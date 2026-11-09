@@ -1,11 +1,18 @@
-require('dotenv').config();
+require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 const casesRouter = require('./routes/cases');
 const visitsRouter = require('./routes/visits');
-const { startWhatsAppBot } = require('./bot/whatsapp');
+const authRouter = require('./routes/auth');
+const hospitalsRouter = require('./routes/hospitals');
+const officersRouter = require('./routes/officers');
+const usersRouter = require('./routes/users');
+const evidenceRouter = require('./routes/evidence');
+const { createHealthRouter } = require('./routes/health');
+const { startWhatsAppBot, getActiveWhatsAppSocket } = require('./bot/whatsapp');
+const { startNotificationScheduler } = require('./services/notificationScheduler');
 
 const app = express();
 const port = Number(process.env.PORT) || 5000;
@@ -14,7 +21,12 @@ fs.mkdirSync(uploadsDir, { recursive: true });
 
 app.use(cors());
 app.use(express.json());
-app.use('/uploads', express.static(uploadsDir));
+app.use('/uploads', evidenceRouter);
+app.use('/api/health', createHealthRouter());
+app.use('/api/auth', authRouter);
+app.use('/api/hospitals', hospitalsRouter);
+app.use('/api/officers', officersRouter);
+app.use('/api/users', usersRouter);
 app.use('/api/cases', casesRouter);
 app.use('/api/visits', visitsRouter);
 
@@ -27,11 +39,24 @@ const server = app.listen(port, () => {
   console.log(`[API] Server berjalan di port ${port}`);
 });
 
-startWhatsAppBot().catch((err) => {
-  console.error('[WA-BOT] Gagal memulai bot WhatsApp:', err);
-});
+let reminderScheduler = null;
+
+startWhatsAppBot()
+  .then(() => {
+    // Getter dipanggil tiap scan agar reconnect WhatsApp memakai socket terbaru.
+    reminderScheduler = startNotificationScheduler(getActiveWhatsAppSocket, {
+      intervalMs: 15 * 60 * 1000,
+      runImmediately: true
+    });
+  })
+  .catch((err) => {
+    console.error('[WA-BOT] Gagal memulai bot WhatsApp:', err);
+  });
 
 function shutdown() {
+  if (reminderScheduler && typeof reminderScheduler.stop === 'function') {
+    reminderScheduler.stop();
+  }
   server.close(() => process.exit(0));
 }
 

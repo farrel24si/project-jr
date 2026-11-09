@@ -1,0 +1,5 @@
+# Root-level ignores (backend/.gitignore covers its own subtree)
+uploads/
+*.log
+.DS_Store
+Thumbs.db

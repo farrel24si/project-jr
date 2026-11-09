@@ -5,7 +5,11 @@ const VALID_STATUSES = [
   'Luka Ringan',
   'Luka Berat',
   'Meninggal Dunia',
-  'Selesai'
+  'Selesai',
+  'Masih Dirawat',
+  'Sudah Pulang',
+  'Belum Dapat Dikonfirmasi',
+  'Dirujuk ke RS Lain'
 ];
 
 function normalizeStatus(statusRaw) {
@@ -17,6 +21,16 @@ function normalizeStatus(statusRaw) {
   return matched || 'Rawat Inap';
 }
 
+function normalizeJenisLaka(jenisLakaRaw) {
+  if (!jenisLakaRaw) return 'Belum Diketahui';
+  const normalized = String(jenisLakaRaw).trim().toLowerCase();
+  if (normalized === 'tunggal') return 'Tunggal';
+  if (normalized === 'tidak tunggal' || normalized === 'tidak_tunggal') {
+    return 'Tidak Tunggal';
+  }
+  return 'Belum Diketahui';
+}
+
 function normalizeKey(rawKey) {
   return rawKey
     .toLowerCase()
@@ -25,7 +39,8 @@ function normalizeKey(rawKey) {
     .replace(/^_+|_+$/g, '');
 }
 
-function parseLaporanRS(text) {
+function parseLaporanRS(text, options = {}) {
+  const { requireRumahSakit = true } = options;
   if (!text || typeof text !== 'string') return null;
 
   const lines = text.split(/\r?\n/);
@@ -43,7 +58,7 @@ function parseLaporanRS(text) {
       data.rumah_sakit = rawVal;
     } else if (key === 'nama' || key === 'nama_korban') {
       data.nama_korban = rawVal;
-    } else if (key === 'nik') {
+    } else if (key === 'nik' || key === 'nik_opsional') {
       data.nik = rawVal.replace(/\D/g, '');
     } else if (key === 'umur') {
       const parsed = parseInt(rawVal, 10);
@@ -56,34 +71,41 @@ function parseLaporanRS(text) {
       data.tgl_masuk = rawVal;
     } else if (key === 'kronologi') {
       data.kronologi = rawVal;
+    } else if (key === 'jenis_laka') {
+      data.jenis_laka_raw = rawVal;
     } else if (key === 'status') {
       data.status_raw = rawVal;
     }
   }
 
-  const isValid =
-    Boolean(data.nama_korban && data.nama_korban.trim()) &&
-    Boolean(data.nik && data.nik.length === 16);
+  const isNamaValid = Boolean(data.nama_korban && data.nama_korban.trim());
+  const isRumahSakitValid = Boolean(data.rumah_sakit && data.rumah_sakit.trim());
+  const isValid = isNamaValid && (!requireRumahSakit || isRumahSakitValid);
 
   if (!isValid) {
     return {
       isValid: false,
       data: null,
-      error: 'Format Belum Lengkap: Nama wajib diisi dan NIK harus tepat 16 digit.'
+      error: requireRumahSakit
+        ? 'Format Belum Lengkap: RS dan Nama wajib diisi.'
+        : 'Format Belum Lengkap: Nama wajib diisi.'
     };
   }
+
+  const nik = data.nik && data.nik.length === 16 ? data.nik : null;
 
   return {
     isValid: true,
     data: {
-      rumah_sakit: data.rumah_sakit || '-',
+      rumah_sakit: data.rumah_sakit ? data.rumah_sakit.trim() : null,
       nama_korban: data.nama_korban.trim(),
-      nik: data.nik,
+      nik,
       umur: data.umur !== undefined ? data.umur : null,
       alamat: data.alamat || '',
       tgl_laka: data.tgl_laka || '',
       tgl_masuk: data.tgl_masuk || '',
       kronologi: data.kronologi || '',
+      jenis_laka: normalizeJenisLaka(data.jenis_laka_raw),
       status_kondisi: normalizeStatus(data.status_raw)
     }
   };
