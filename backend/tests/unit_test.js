@@ -1,15 +1,16 @@
 const assert = require('assert');
 const { spawnSync } = require('child_process');
 const path = require('path');
-const { parseLaporanRS, normalizeStatus, generateNomorTiket } = require('../src/bot/parser');
-const { detectHospitalFromGroup } = require('../src/bot/whatsapp');
+const { parseLaporanRS, normalizeStatus, normalizeDateDDMMYYYY, generateNomorTiket } = require('../src/bot/parser');
+const { detectHospitalFromGroup, resolveHospitalFromGroup, handleMessage } = require('../src/bot/whatsapp');
+const { mapKeterjaminanFromJenisLaka } = require('../src/services/caseCreation');
 const { haversine } = require('../src/utils/geo');
 const {
   normalizeWhatsAppNumber,
   buildWhatsAppJid,
   buildNewAssignmentMessage,
   determineReminderType,
-  buildReminderMessage
+  buildReminderMessage,
 } = require('../src/services/notifications');
 
 function testAuthRefusesMissingJwtSecret() {
@@ -103,7 +104,10 @@ function testBuildReminderMessage() {
     scheduledAt: new Date('2026-11-09T12:00:00.000Z')
   });
   assert.match(msg, /PENGINGAT BATAS WAKTU KUNJUNGAN/i);
-  assert.match(msg, /3 Jam/);
+  assert.doesNotMatch(msg, /sisa waktu/i);
+  assert.doesNotMatch(msg, /kunjungan pertama/i);
+  assert.match(msg, /Batas Kunjungan/);
+  assert.match(msg, /Segera lakukan kunjungan fisik/);
   console.log('PASS testBuildReminderMessage');
 }
 
@@ -128,6 +132,173 @@ Status: Rawat Inap`;
   assert.strictEqual(result.data.status_kondisi, 'Rawat Inap');
   assert.strictEqual(result.data.tgl_laka, '29/10/2026');
   console.log('PASS testParseValid');
+}
+
+function testNormalizeDateDDMMYYYY() {
+  // Contract: canonical DD/MM/YYYY, four-digit year, slash separators only.
+  assert.strictEqual(normalizeDateDDMMYYYY('29/10/2026'), '29/10/2026');
+  assert.strictEqual(normalizeDateDDMMYYYY('01/05/2026'), '01/05/2026');
+
+  // Single-digit day/month accepted and padded to canonical form.
+  assert.strictEqual(normalizeDateDDMMYYYY('1/1/2026'), '01/01/2026');
+  assert.strictEqual(normalizeDateDDMMYYYY('9/12/2026'), '09/12/2026');
+
+  // Two-digit year and hyphen separators are not canonical -> rejected.
+  assert.strictEqual(normalizeDateDDMMYYYY('29/10/26'), null);
+  assert.strictEqual(normalizeDateDDMMYYYY('01/02/05'), null);
+  assert.strictEqual(normalizeDateDDMMYYYY('29-10-2026'), null);
+
+  // Rejected MM/DD/YYYY (e.g. month > 12 in 2nd slot or ambiguity)
+  assert.strictEqual(normalizeDateDDMMYYYY('10/29/2026'), null);
+  assert.strictEqual(normalizeDateDDMMYYYY('12/31/2026'), null);
+
+  // Impossible dates
+  assert.strictEqual(normalizeDateDDMMYYYY('31/04/2026'), null);
+  assert.strictEqual(normalizeDateDDMMYYYY('29/02/2025'), null);
+  assert.strictEqual(normalizeDateDDMMYYYY('29/02/2024'), '29/02/2024'); // leap year valid
+  assert.strictEqual(normalizeDateDDMMYYYY('00/10/2026'), null);
+  assert.strictEqual(normalizeDateDDMMYYYY('15/13/2026'), null);
+  assert.strictEqual(normalizeDateDDMMYYYY('invalid-date'), null);
+
+  // Optional empty values
+  assert.strictEqual(normalizeDateDDMMYYYY(''), '');
+  assert.strictEqual(normalizeDateDDMMYYYY(null), null);
+  assert.strictEqual(normalizeDateDDMMYYYY(undefined), undefined);
+
+  console.log('PASS testNormalizeDateDDMMYYYY');
+}
+
+function testParseLaporanRSDateHandling() {
+  // Canonical four-digit DD/MM/YYYY; single-digit day/month padded.
+  const valid = parseLaporanRS(`#LAPORLAKA
+RS: RS Syafira
+Nama: Budi
+Tgl Laka: 29/10/2026
+Tgl Masuk: 1/1/2026`);
+  assert.strictEqual(valid.isValid, true);
+  assert.strictEqual(valid.data.tgl_laka, '29/10/2026');
+  assert.strictEqual(valid.data.tgl_masuk, '01/01/2026');
+
+  // Two-digit year and hyphen separators rejected in bot reports too.
+  const shortYear = parseLaporanRS(`#LAPORLAKA
+RS: RS Syafira
+Nama: Budi
+Tgl Laka: 29/10/26`);
+  assert.strictEqual(shortYear.isValid, false);
+  assert.match(shortYear.error, /DD\/MM\/YYYY/);
+
+  const hyphenDate = parseLaporanRS(`#LAPORLAKA
+RS: RS Syafira
+Nama: Budi
+Tgl Laka: 29-10-2026`);
+  assert.strictEqual(hyphenDate.isValid, false);
+  assert.match(hyphenDate.error, /DD\/MM\/YYYY/);
+
+  // Optional empty dates
+  const emptyDates = parseLaporanRS(`#LAPORLAKA
+RS: RS Syafira
+Nama: Budi
+Tgl Laka:
+Tgl Masuk:`);
+  assert.strictEqual(emptyDates.isValid, true);
+  assert.strictEqual(emptyDates.data.tgl_laka, '');
+  assert.strictEqual(emptyDates.data.tgl_masuk, '');
+
+  // Invalid date format (MM/DD/YYYY or impossible date) in report -> invalid format error
+  const invalidDate = parseLaporanRS(`#LAPORLAKA
+RS: RS Syafira
+Nama: Budi
+Tgl Laka: 10/29/2026`);
+  assert.strictEqual(invalidDate.isValid, false);
+  assert.match(invalidDate.error, /DD\/MM\/YYYY/);
+
+  const impossibleDate = parseLaporanRS(`#LAPORLAKA
+RS: RS Syafira
+Nama: Budi
+Tgl Masuk: 31/04/2026`);
+  assert.strictEqual(impossibleDate.isValid, false);
+  assert.match(impossibleDate.error, /DD\/MM\/YYYY/);
+
+  console.log('PASS testParseLaporanRSDateHandling');
+}
+
+function testParseLaporanRSTemplatePlaceholderTglMasuk() {
+  // Template placeholder "DD/MM/YYYY" pada Tgl Masuk -> dianggap kosong, laporan valid.
+  const text = `#LAPORLAKA
+RS: RS Syafira
+Nama: Budi
+Tgl Masuk: DD/MM/YYYY`;
+  const result = parseLaporanRS(text);
+  assert.strictEqual(result.isValid, true);
+  assert.strictEqual(result.data.tgl_masuk, '');
+  console.log('PASS testParseLaporanRSTemplatePlaceholderTglMasuk');
+}
+
+function testParseLaporanRSTemplatePlaceholderTglLakaCaseInsensitive() {
+  // Case-insensitive: "tgl laka: dd/mm/yyyy" juga dianggap kosong.
+  const text = `#LAPORLAKA
+RS: RS Syafira
+Nama: Budi
+tgl laka: dd/mm/yyyy`;
+  const result = parseLaporanRS(text);
+  assert.strictEqual(result.isValid, true);
+  assert.strictEqual(result.data.tgl_laka, '');
+  console.log('PASS testParseLaporanRSTemplatePlaceholderTglLakaCaseInsensitive');
+}
+
+function testParseLaporanRSNikOpsionalFullTemplateKey() {
+  // Key template penuh "NIK (opsional, 16 digit):" -> nik tertangkap, tidak di-drop.
+  const text = `#LAPORLAKA
+RS: RS Syafira
+Nama: Budi
+NIK (opsional, 16 digit): 1627893678456398`;
+  const result = parseLaporanRS(text);
+  assert.strictEqual(result.isValid, true);
+  assert.strictEqual(result.data.nik, '1627893678456398');
+  console.log('PASS testParseLaporanRSNikOpsionalFullTemplateKey');
+}
+
+function testParseLaporanRSInvalidDateStillRejected() {
+  // Tanggal tidak mungkin tetap ditolak dengan pesan format DD/MM/YYYY.
+  const text = `#LAPORLAKA
+RS: RS Syafira
+Nama: Budi
+Tgl Masuk: 31/04/2026`;
+  const result = parseLaporanRS(text);
+  assert.strictEqual(result.isValid, false);
+  assert.match(result.error, /DD\/MM\/YYYY/);
+  console.log('PASS testParseLaporanRSInvalidDateStillRejected');
+}
+
+async function testHandleMessageInvalidParseShowsRealError() {
+  const pool = require('../src/config/db');
+  const originalExecute = pool.execute;
+  // Path invalid tidak boleh menyentuh DB sama sekali.
+  pool.execute = async () => {
+    throw new Error('DB must not be touched on invalid parse path');
+  };
+
+  const records = [];
+  const sock = {
+    sendMessage: async (jid, payload) => { records.push({ jid, payload }); }
+  };
+  const msg = {
+    key: { remoteJid: '123@g.us', participant: 'x@s.whatsapp.net', fromMe: false },
+    message: { conversation: '#LAPORLAKA\nNama: X\nTgl Masuk: 31/04/2026' }
+  };
+
+  try {
+    await handleMessage(sock, msg);
+
+    assert.ok(records.length >= 1, 'Harus ada balasan');
+    const textReply = records[0].payload.text;
+    assert.match(textReply, /Format tanggal tidak valid/);
+    assert.ok(!/nama wajib/i.test(textReply), 'Tidak boleh menyalahkan nama korban');
+    assert.match(textReply, /#FORMAT/);
+  } finally {
+    pool.execute = originalExecute;
+  }
+  console.log('PASS testHandleMessageInvalidParseShowsRealError');
 }
 
 function testParseValueWithColon() {
@@ -340,6 +511,80 @@ function testDetectHospitalLongestFirst() {
   console.log('PASS testDetectHospitalLongestFirst');
 }
 
+function testResolveHospitalFromGroup() {
+  const hospitals = [
+    { id: 1, nama_rs: 'RS Prima Pekanbaru' },
+    { id: 2, nama_rs: 'RS Syafira Pekanbaru' }
+  ];
+
+  // 1. Binding JID grup aktif yang persis diprioritaskan.
+  const bindings = [
+    { group_jid: '123456789@g.us', hospital_id: 2 }
+  ];
+  const viaJid = resolveHospitalFromGroup('JR - RS Prima', '123456789@g.us', hospitals, [], bindings);
+  assert.ok(viaJid, 'Binding JID harus menang');
+  assert.strictEqual(viaJid.id, 2);
+
+  // 2. Alias aktif unik menang atas canonical name.
+  const aliases = [
+    { alias_normalized: 'rs prima', alias_display: 'RS Prima', hospital_id: 1, is_active: 1 }
+  ];
+  const viaAlias = resolveHospitalFromGroup('JR - RS Prima', '999999999@g.us', hospitals, aliases, []);
+  assert.ok(viaAlias, 'Alias harus menghasilkan RS');
+  assert.strictEqual(viaAlias.id, 1, 'Alias RS Prima harus menunjuk RS Prima Pekanbaru');
+
+  // 3. Alias tidak dikenal -> null (canonical fallback tidak cocok juga).
+  const unknown = resolveHospitalFromGroup('JR - RS Tak Dikenal', '999999999@g.us', hospitals, aliases, []);
+  assert.strictEqual(unknown, null, 'Alias tidak dikenal harus null');
+
+  // 4. Alias sama dipetakan ke dua RS -> ambigu, null.
+  const ambiguousAliases = aliases.concat([
+    { alias_normalized: 'rs prima', alias_display: 'RS Prima', hospital_id: 2, is_active: 1 }
+  ]);
+  const ambiguous = resolveHospitalFromGroup('JR - RS Prima', '999999999@g.us', hospitals, ambiguousAliases, []);
+  assert.strictEqual(ambiguous, null, 'Alias ambigu harus null');
+
+  // 5. Normalisasi alias: lowercase, trim, spasi berulang, tanda baca.
+  const messy = resolveHospitalFromGroup('JR - RS  Prima!!!', '999999999@g.us', hospitals, aliases, []);
+  assert.ok(messy, 'Normalisasi harus tetap cocok');
+  assert.strictEqual(messy.id, 1);
+
+  // 6. Canonical fallback hanya bila hasil tepat satu.
+  const canonical = resolveHospitalFromGroup('Jasa Raharja - RS Syafira Pekanbaru', '999999999@g.us', hospitals, [], []);
+  assert.ok(canonical, 'Fallback canonical harus cocok');
+  assert.strictEqual(canonical.id, 2);
+
+  const twoCanonical = resolveHospitalFromGroup('RS Syafira Pekanbaru dan RS Prima Pekanbaru', '999999999@g.us', hospitals, [], []);
+  assert.strictEqual(twoCanonical, null, 'Dua RS cocok harus null');
+
+  // 7. Alias diaktifkan untuk RS non-aktif -> tidak dipakai.
+  const inactiveHospital = resolveHospitalFromGroup('JR - RS Prima', '999999999@g.us', [hospitals[1]], aliases, []);
+  assert.strictEqual(inactiveHospital, null, 'Alias menunjuk RS non-aktif harus null');
+
+  // 8. Binding JID menunjuk RS non-aktif -> tidak dipakai, lanjut ke alias.
+  const jidToInactive = resolveHospitalFromGroup('JR - RS Prima', '123456789@g.us', [hospitals[0]], aliases, bindings);
+  assert.ok(jidToInactive, 'Binding JID ke RS non-aktif harus lanjut ke alias');
+  assert.strictEqual(jidToInactive.id, 1);
+
+  console.log('PASS testResolveHospitalFromGroup');
+}
+
+
+function testMapKeterjaminanFromJenisLaka() {
+  assert.strictEqual(mapKeterjaminanFromJenisLaka('Tidak Tunggal'), 'Terjamin JR');
+  assert.strictEqual(mapKeterjaminanFromJenisLaka('Tunggal'), 'Dialihkan ke BPJS');
+  assert.strictEqual(mapKeterjaminanFromJenisLaka('Belum Diketahui'), 'Belum Dikonfirmasi');
+  assert.strictEqual(mapKeterjaminanFromJenisLaka(null), 'Belum Dikonfirmasi');
+  assert.strictEqual(mapKeterjaminanFromJenisLaka(undefined), 'Belum Dikonfirmasi');
+  assert.strictEqual(mapKeterjaminanFromJenisLaka(''), 'Belum Dikonfirmasi');
+  assert.strictEqual(mapKeterjaminanFromJenisLaka('Nilai Tidak Dikenal'), 'Belum Dikonfirmasi');
+  console.log('PASS testMapKeterjaminanFromJenisLaka');
+}
+
+// --------- Guarantee Letter Service unit tests (Fase 2) -----------
+
+// --------- Guarantee Letter billing item unit tests (Fase 3) -----------
+
 const tests = [
   testAuthRefusesMissingJwtSecret,
   testNormalizeWhatsAppNumber,
@@ -348,6 +593,13 @@ const tests = [
   testDetermineReminderType,
   testBuildReminderMessage,
   testParseValid,
+  testNormalizeDateDDMMYYYY,
+  testParseLaporanRSDateHandling,
+  testParseLaporanRSTemplatePlaceholderTglMasuk,
+  testParseLaporanRSTemplatePlaceholderTglLakaCaseInsensitive,
+  testParseLaporanRSNikOpsionalFullTemplateKey,
+  testParseLaporanRSInvalidDateStillRejected,
+  testHandleMessageInvalidParseShowsRealError,
   testParseValueWithColon,
   testParseKeyNormalization,
   testParseNikNonDigits,
@@ -363,21 +615,26 @@ const tests = [
   testParseWithoutRs,
   testParseWithoutRsStillRequiresNama,
   testDetectHospitalFromGroup,
-  testDetectHospitalLongestFirst
+  testDetectHospitalLongestFirst,
+  testResolveHospitalFromGroup,
+  testMapKeterjaminanFromJenisLaka
 ];
 
 let failed = 0;
-for (const test of tests) {
-  try {
-    test();
-  } catch (err) {
-    failed += 1;
-    console.error(`FAIL ${test.name}:`, err.message);
+(async () => {
+  for (const test of tests) {
+    try {
+      await test();
+    } catch (err) {
+      failed += 1;
+      console.error(`FAIL ${test.name}:`, err.message);
+    }
   }
-}
 
-if (failed > 0) {
-  console.error(`${failed} test gagal`);
-  process.exit(1);
-}
-console.log(`Semua ${tests.length} test lulus`);
+  if (failed > 0) {
+    console.error(`${failed} test gagal`);
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`Semua ${tests.length} test lulus`);
+})();

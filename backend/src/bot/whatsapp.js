@@ -20,7 +20,7 @@ let whatsappConnected = false;
 // Versi dengan baris RS dipakai untuk pesan DM/grup tidak dikenali.
 const TEMPLATE_FORMAT_GRUP = `#LAPORLAKA
 Nama:
-NIK (opsional, 16 digit):
+NIK:
 Umur:
 Jenis Laka: Tunggal / Tidak Tunggal / Belum Diketahui
 Alamat:
@@ -32,7 +32,7 @@ Status: Rawat Inap / Luka Ringan / Luka Berat / Meninggal Dunia / Selesai`;
 const TEMPLATE_FORMAT_DM = `#LAPORLAKA
 RS: (nama rumah sakit sesuai daftar)
 Nama:
-NIK (opsional, 16 digit):
+NIK:
 Umur:
 Jenis Laka: Tunggal / Tidak Tunggal / Belum Diketahui
 Alamat:
@@ -52,6 +52,21 @@ function extractText(message) {
 }
 
 /**
+ * Normalisasi judul/alias: lowercase, trim, tanda baca/spasi berulang
+ * menjadi satu spasi. Dipakai konsisten untuk alias dan canonical name.
+ * @param {string} value
+ * @returns {string}
+ */
+function normalizeSubjectTerm(value) {
+  if (typeof value !== 'string') return '';
+  return value
+    .toLowerCase()
+    .replace(/[\p{P}\p{S}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
  * Muat seluruh RS aktif dari DB, urutkan nama terpanjang ke terpendek
  * untuk menghindari substring match yang terlalu pendek.
  * @returns {Promise<Array<{id, nama_rs, latitude, longitude, radius_meter}>>}
@@ -64,7 +79,48 @@ async function loadActiveHospitals() {
 }
 
 /**
- * Cocokkan nama RS dari judul grup.
+ * Muat alias RS aktif dari tabel hospital_aliases.
+ * Tabel mungkin belum ada (migration 010 belum diterapkan) -> hasil kosong.
+ * @returns {Promise<Array<{hospital_id, alias_normalized, alias_display}>>}
+ */
+async function loadActiveAliases() {
+  try {
+    const [rows] = await pool.execute(
+      'SELECT hospital_id, alias_normalized, alias_display, is_active FROM hospital_aliases WHERE is_active = 1'
+    );
+    return rows;
+  } catch (err) {
+    return [];
+  }
+}
+
+/**
+ * Muat binding JID grup WhatsApp aktif dari tabel hospital_whatsapp_groups.
+ * Tabel mungkin belum ada (migration 010 belum diterapkan) -> hasil kosong.
+ * @returns {Promise<Array<{hospital_id, group_jid, is_active}>>}
+ */
+async function loadActiveGroupBindings() {
+  try {
+    const [rows] = await pool.execute(
+      'SELECT hospital_id, group_jid, is_active FROM hospital_whatsapp_groups WHERE is_active = 1'
+    );
+    return rows;
+  } catch (err) {
+    return [];
+  }
+}
+
+async function loadGroupRoutingRules() {
+  const [aliases, groupBindings] = await Promise.all([
+    loadActiveAliases(),
+    loadActiveGroupBindings()
+  ]);
+  return { aliases, groupBindings };
+}
+
+/**
+ * Cocokkan nama RS dari judul grup (canonical name, batas kata eksak).
+ * Fallback terakhir; nol atau lebih dari satu hasil -> null.
  * @param {string} groupSubject  judul grup WhatsApp
  * @param {Array}  hospitals     hasil loadActiveHospitals()
  * @returns {object|null}  RS yang cocok (tepat satu), atau null
@@ -72,15 +128,77 @@ async function loadActiveHospitals() {
 function detectHospitalFromGroup(groupSubject, hospitals) {
   if (!groupSubject) return null;
 
-  const subjectNorm = groupSubject.trim().toLowerCase().replace(/\s+/g, ' ');
+  const subjectNorm = normalizeSubjectTerm(groupSubject);
+  if (!subjectNorm) return null;
+
   const matches = hospitals.filter((h) => {
-    const nameNorm = h.nama_rs.trim().toLowerCase().replace(/\s+/g, ' ');
+    const nameNorm = normalizeSubjectTerm(h.nama_rs);
+    if (!nameNorm) return false;
     // Exact substring; pastikan bukan bagian dari kata lain dengan batas spasi/awal/akhir
     const regex = new RegExp(`(?:^|\\s)${nameNorm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\s|$)`, 'i');
     return regex.test(subjectNorm);
   });
 
   return matches.length === 1 ? matches[0] : null;
+}
+
+/**
+ * Resolver RS dari grup WhatsApp dengan urutan deterministik:
+ *   1. Binding JID grup aktif yang persis (exact).
+ *   2. Alias aktif unik (ter-normalisasi) cocok di judul grup.
+ *   3. Fallback canonical group-name existing, hanya bila tepat satu.
+ * Nol/ambigu -> null. Tidak pernah fuzzy/LIKE.
+ *
+ * Alias direpresentasikan sebagai kemunculan alias_normalized dengan batas kata
+ * di judul grup ter-normalisasi. Group subject normal: alias `RS Prima` cocok
+ * pada judul `JR - RS Prima`.
+ *
+ * @param {string} groupSubject judul grup WhatsApp
+ * @param {string} groupJid     JID grup (mis. 123456789@g.us); opsional
+ * @param {Array}  hospitals    hasil loadActiveHospitals()
+ * @param {Array}  aliases      [{hospital_id, alias_normalized, is_active}]
+ * @param {Array}  groupBindings [{hospital_id, group_jid, is_active}]
+ * @returns {object|null} hospital yang ter-resolve, atau null
+ */
+function resolveHospitalFromGroup(groupSubject, groupJid, hospitals, aliases = [], groupBindings = []) {
+  const byId = new Map(hospitals.map((h) => [h.id, h]));
+  const activeByHospital = (hospitalId) => byId.get(hospitalId) || null;
+
+  // 1. Binding JID grup aktif yang persis.
+  if (groupJid) {
+    const jidMatches = groupBindings.filter(
+      (b) => b.group_jid === groupJid && b.is_active !== 0
+    );
+    if (jidMatches.length === 1) {
+      const hospital = activeByHospital(jidMatches[0].hospital_id);
+      if (hospital) return hospital;
+    }
+    if (jidMatches.length > 1) return null; // JID unik global; defensif
+  }
+
+  // 2. Alias aktif unik pada judul grup ter-normalisasi.
+  if (groupSubject) {
+    const subjectNorm = normalizeSubjectTerm(groupSubject);
+    if (subjectNorm) {
+      const aliasMatches = aliases.filter((alias) => {
+        if (!alias.alias_normalized || alias.is_active === 0) return false;
+        if (!activeByHospital(alias.hospital_id)) return false;
+        const aliasNorm = normalizeSubjectTerm(alias.alias_normalized);
+        if (!aliasNorm) return false;
+        const regex = new RegExp(
+          `(?:^|\\s)${aliasNorm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\s|$)`,
+          'i'
+        );
+        return regex.test(subjectNorm);
+      });
+      const uniqueHospitalIds = [...new Set(aliasMatches.map((m) => m.hospital_id))];
+      if (uniqueHospitalIds.length === 1) return activeByHospital(uniqueHospitalIds[0]);
+      if (uniqueHospitalIds.length > 1) return null; // ambigu, jangan pernah menebak
+    }
+  }
+
+  // 3. Fallback canonical group-name existing, hanya bila tepat satu.
+  return detectHospitalFromGroup(groupSubject, hospitals);
 }
 
 async function handleMessage(sock, msg) {
@@ -103,29 +221,37 @@ async function handleMessage(sock, msg) {
   // --------------------------------------------------------------- #LAPORLAKA
   if (!lowerText.includes('#laporlaka')) return;
 
-  const hospitals = await loadActiveHospitals();
-
   // Parse isi pesan lebih dulu — RS tidak wajib ada di teks karena bisa dari nama grup.
+  // Parsing tidak menyentuh DB, jadi pesan invalid langsung ditolak tanpa query.
   const parsed = parseLaporanRS(text, { requireRumahSakit: false });
 
   if (!parsed || !parsed.isValid) {
+    const errorText = parsed && parsed.error
+      ? parsed.error
+      : 'Format Belum Lengkap.\nNama korban wajib diisi.';
     await sock.sendMessage(jid, {
-      text:
-        'Format Belum Lengkap.\n' +
-        'Nama korban wajib diisi.\n' +
-        'Ketik #FORMAT untuk melihat format laporan yang benar.'
+      text: `${errorText}\nKetik #FORMAT untuk melihat format laporan yang benar.`
     }, { quoted: msg });
     return;
   }
 
+  const hospitals = await loadActiveHospitals();
+
   // ------------------------------------------------------------- resolve RS
   let resolvedHospital = null;
 
-  // 1. Coba deteksi dari nama grup
+  // 1. Coba deteksi dari grup: binding JID aktif -> alias unik -> canonical.
   if (isGroup) {
     try {
       const meta = await sock.groupMetadata(jid);
-      resolvedHospital = detectHospitalFromGroup(meta.subject, hospitals);
+      const { aliases, groupBindings } = await loadGroupRoutingRules();
+      resolvedHospital = resolveHospitalFromGroup(
+        meta.subject,
+        jid,
+        hospitals,
+        aliases,
+        groupBindings
+      );
     } catch (metaErr) {
       console.warn('[WA-BOT] Gagal baca metadata grup:', metaErr.message);
     }
@@ -180,7 +306,7 @@ async function handleMessage(sock, msg) {
   const now = new Date();
 
   try {
-    const { tiket, caseId, visitId, assignedOfficer } = await insertCaseWithRetry({
+    const result = await insertCaseWithRetry({
       ...parsed.data,
       rumah_sakit: resolvedHospital.nama_rs,
       hospital_id: resolvedHospital.id,
@@ -188,9 +314,12 @@ async function handleMessage(sock, msg) {
       waktu_lapor_wa: now
     }, { autoAssign: true });
 
+    const { tiket, caseId, visitId, assignedOfficer } = result;
+
     const replySuccess =
       `Laporan berhasil diterima!\n\n` +
       `Nomor Tiket: ${tiket}\n` +
+      `Keterjaminan: ${result.case.status_keterjaminan}\n` +
       `Nama Korban: ${parsed.data.nama_korban}\n` +
       `RS: ${resolvedHospital.nama_rs}\n` +
       `Status: ${parsed.data.status_kondisi}\n` +
@@ -308,6 +437,11 @@ module.exports = {
   startWhatsAppBot,
   handleMessage,
   detectHospitalFromGroup,
+  resolveHospitalFromGroup,
+  normalizeSubjectTerm,
   loadActiveHospitals,
+  loadActiveAliases,
+  loadActiveGroupBindings,
+  loadGroupRoutingRules,
   getActiveWhatsAppSocket
 };

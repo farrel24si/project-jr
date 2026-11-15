@@ -39,6 +39,35 @@ function normalizeKey(rawKey) {
     .replace(/^_+|_+$/g, '');
 }
 
+function normalizeDateDDMMYYYY(value) {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+
+  const trimmed = String(value).trim();
+  if (!trimmed) return '';
+
+  const match = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(trimmed);
+  if (!match) return null;
+
+  const [, dayRaw, monthRaw, yearRaw] = match;
+  const day = Number(dayRaw);
+  const month = Number(monthRaw);
+  const year = Number(yearRaw);
+
+  if (month < 1 || month > 12 || day < 1 || year < 2000 || year > 2099) return null;
+
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
+
+  return `${String(day).padStart(2, '0')}/${String(month).padStart(2, '0')}/${year}`;
+}
+
+function treatPlaceholderAsEmpty(value) {
+  if (value === undefined || value === null) return '';
+  const trimmed = String(value).trim();
+  return trimmed.toLowerCase() === 'dd/mm/yyyy' ? '' : trimmed;
+}
+
 function parseLaporanRS(text, options = {}) {
   const { requireRumahSakit = true } = options;
   if (!text || typeof text !== 'string') return null;
@@ -58,7 +87,7 @@ function parseLaporanRS(text, options = {}) {
       data.rumah_sakit = rawVal;
     } else if (key === 'nama' || key === 'nama_korban') {
       data.nama_korban = rawVal;
-    } else if (key === 'nik' || key === 'nik_opsional') {
+    } else if (key === 'nik' || key.startsWith('nik_')) {
       data.nik = rawVal.replace(/\D/g, '');
     } else if (key === 'umur') {
       const parsed = parseInt(rawVal, 10);
@@ -92,6 +121,16 @@ function parseLaporanRS(text, options = {}) {
     };
   }
 
+  const tglLaka = normalizeDateDDMMYYYY(treatPlaceholderAsEmpty(data.tgl_laka));
+  const tglMasuk = normalizeDateDDMMYYYY(treatPlaceholderAsEmpty(data.tgl_masuk));
+  if (tglLaka === null || tglMasuk === null) {
+    return {
+      isValid: false,
+      data: null,
+      error: 'Format tanggal tidak valid. Gunakan format DD/MM/YYYY.'
+    };
+  }
+
   const nik = data.nik && data.nik.length === 16 ? data.nik : null;
 
   return {
@@ -102,8 +141,8 @@ function parseLaporanRS(text, options = {}) {
       nik,
       umur: data.umur !== undefined ? data.umur : null,
       alamat: data.alamat || '',
-      tgl_laka: data.tgl_laka || '',
-      tgl_masuk: data.tgl_masuk || '',
+      tgl_laka: tglLaka,
+      tgl_masuk: tglMasuk,
       kronologi: data.kronologi || '',
       jenis_laka: normalizeJenisLaka(data.jenis_laka_raw),
       status_kondisi: normalizeStatus(data.status_raw)
@@ -119,6 +158,7 @@ function generateNomorTiket() {
 module.exports = {
   parseLaporanRS,
   normalizeStatus,
+  normalizeDateDDMMYYYY,
   generateNomorTiket,
   VALID_STATUSES
 };

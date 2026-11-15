@@ -1,6 +1,20 @@
 const pool = require('../config/db');
 const { generateNomorTiket } = require('../bot/parser');
 
+/**
+ * Mapping otomatis status keterjaminan dari jenis laka (aturan Jasa Raharja):
+ *   'Tidak Tunggal' -> 'Terjamin JR'
+ *   'Tunggal'       -> 'Dialihkan ke BPJS'
+ *   selain itu      -> 'Belum Dikonfirmasi'
+ * @param {string|null|undefined} jenisLaka
+ * @returns {string}
+ */
+function mapKeterjaminanFromJenisLaka(jenisLaka) {
+  if (jenisLaka === 'Tidak Tunggal') return 'Terjamin JR';
+  if (jenisLaka === 'Tunggal') return 'Dialihkan ke BPJS';
+  return 'Belum Dikonfirmasi';
+}
+
 async function findOfficerForHospital(conn, hospitalId) {
   if (!hospitalId) return null;
   const [[officer]] = await conn.execute(
@@ -40,8 +54,9 @@ async function insertCaseWithRetry(payload, options = {}, maxRetry = 5) {
           nomor_tiket, nomor_laporan, rumah_sakit, hospital_id, ruangan_rs,
           nama_korban, nik, umur, jenis_kelamin, alamat, telepon_korban,
           tgl_laka, tgl_masuk, kronologi, jenis_laka, status_kondisi,
+          status_keterjaminan, no_gl, tgl_gl,
           no_pelapor_wa, waktu_lapor_wa, assigned_officer_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           tiket,
           payload.nomor_laporan || null,
@@ -59,6 +74,9 @@ async function insertCaseWithRetry(payload, options = {}, maxRetry = 5) {
           payload.kronologi || null,
           payload.jenis_laka || 'Belum Diketahui',
           payload.status_kondisi || 'Rawat Inap',
+          payload.status_keterjaminan || mapKeterjaminanFromJenisLaka(payload.jenis_laka || 'Belum Diketahui'),
+          payload.no_gl || null,
+          payload.tgl_gl || null,
           payload.no_pelapor_wa || null,
           payload.waktu_lapor_wa,
           assignedOfficerId
@@ -106,6 +124,7 @@ async function insertCaseWithRetry(payload, options = {}, maxRetry = 5) {
 }
 
 module.exports = {
+  mapKeterjaminanFromJenisLaka,
   findOfficerForHospital,
   insertCaseWithRetry
 };

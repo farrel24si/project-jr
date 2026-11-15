@@ -50,21 +50,11 @@ function determineReminderType(now, scheduledAt) {
   return 'REMINDER_24H';
 }
 
-function reminderLabel(reminderType) {
-  const labels = {
-    REMINDER_24H: '24 Jam',
-    REMINDER_12H: '12 Jam',
-    REMINDER_3H: '3 Jam'
-  };
-  return labels[reminderType] || 'Segera';
-}
-
 function buildReminderMessage(data) {
   const jadwal = formatDateTimeWib(data.scheduledAt);
   return (
     `*PENGINGAT BATAS WAKTU KUNJUNGAN*\n\n` +
-    `Yth. Petugas: ${data.officerName || 'Petugas'}\n` +
-    `Sisa waktu kunjungan pertama: *${reminderLabel(data.reminderType)}*.\n\n` +
+    `Yth. Petugas: ${data.officerName || 'Petugas'}\n\n` +
     `- No Tiket: ${data.ticket}\n` +
     `- Korban: ${data.victimName}\n` +
     `- RS: ${data.hospitalName}\n` +

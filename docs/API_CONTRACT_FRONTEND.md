@@ -142,6 +142,9 @@ Dokumen acuan integrasi untuk tim pengembang Frontend. Menggantikan mock `localS
         "umur": 34,
         "jenis_laka": "Tunggal",
         "status_kondisi": "Rawat Inap",
+        "status_keterjaminan": "Dialihkan ke BPJS",
+        "no_gl": null,
+        "tgl_gl": null,
         "waktu_lapor_wa": "2026-11-08T15:20:00.000Z",
         "created_at": "2026-11-08T15:20:00.000Z",
         "hospital_nama": "RS Syafira Pekanbaru",
@@ -251,9 +254,17 @@ Dokumen acuan integrasi untuk tim pengembang Frontend. Menggantikan mock `localS
     "jenis_laka": "Tidak Tunggal",
     "status_kondisi": "Rawat Inap",
     "ruangan_rs": "Kamar Mawar 03",
-    "nomor_laporan": "LP/123/XI/2026"
+    "nomor_laporan": "LP/123/XI/2026",
+    "status_keterjaminan": "Terjamin JR",
+    "no_gl": "GL/001/XII/2026",
+    "tgl_gl": "12/11/2026"
   }
   ```
+  Field baru (Fase 1 GL, semuanya opsional):
+  - `status_keterjaminan`: `'Belum Dikonfirmasi'` / `'Terjamin JR'` / `'Dialihkan ke BPJS'`.
+    Bila dikosongkan, backend memetakan otomatis dari `jenis_laka`:
+    `Tidak Tunggal` → `Terjamin JR`; `Tunggal` → `Dialihkan ke BPJS`; lainnya → `Belum Dikonfirmasi`.
+  - `no_gl` (maks 50 karakter), `tgl_gl` (format `DD/MM/YYYY`, tersimpan kanonis).
 - **Aturan Bisnis & Validasi**:
   1. `hospital_id` dan `nama_korban` wajib diisi (`400 Bad Request` bila kosong).
   2. `hospital_id` harus ada dan berstatus aktif (`404 Not Found` bila tidak aktif/tidak ada).
@@ -283,6 +294,9 @@ Dokumen acuan integrasi untuk tim pengembang Frontend. Menggantikan mock `localS
         "kronologi": "Tabrakan roda dua di persimpangan",
         "jenis_laka": "Tidak Tunggal",
         "status_kondisi": "Rawat Inap",
+        "status_keterjaminan": "Terjamin JR",
+        "no_gl": null,
+        "tgl_gl": null,
         "ruangan_rs": "Kamar Mawar 03",
         "nomor_laporan": "LP/123/XI/2026",
         "assigned_officer_id": 1,
@@ -300,6 +314,37 @@ Dokumen acuan integrasi untuk tim pengembang Frontend. Menggantikan mock `localS
         "id": 1,
         "nama": "Andi Pratama"
       }
+    }
+  }
+  ```
+
+---
+
+### 3.4 Update Keterjaminan & GL Kasus
+- **Method / Endpoint**: `PATCH /cases/:id/keterjaminan`
+- **Auth**: Bearer Token (Role `kabag` atau `petugas`)
+- **Request Body**:
+  ```json
+  {
+    "status_keterjaminan": "Terjamin JR",
+    "no_gl": "GL/001/XII/2026",
+    "tgl_gl": "12/11/2026"
+  }
+  ```
+- **Aturan**:
+  1. `status_keterjaminan` wajib dan harus salah satu: `'Belum Dikonfirmasi'`, `'Terjamin JR'`, `'Dialihkan ke BPJS'` (`422` bila tidak).
+  2. `no_gl` opsional, maks 50 karakter; kirim `null` untuk mengosongkan. `tgl_gl` opsional format `DD/MM/YYYY` (tersimpan kanonis); format salah `422`.
+  3. Field yang tidak dikirim tidak berubah (partial update).
+  4. Petugas hanya boleh update kasus miliknya (`403` bila bukan assignee); Kabag bebas. Kasus tidak ada `404`.
+- **Response 200 OK**:
+  ```json
+  {
+    "success": true,
+    "data": {
+      "id": 18,
+      "status_keterjaminan": "Terjamin JR",
+      "no_gl": "GL/001/XII/2026",
+      "tgl_gl": "12/11/2026"
     }
   }
   ```
@@ -459,3 +504,41 @@ Semua endpoint memerlukan role `kabag`.
   - 12 Jam sebelum batas waktu.
   - 3 Jam sebelum batas waktu.
 - Frontend tidak perlu memicu push notifikasi; cukup mengonsumsi status kunjungan dan flag `is_overdue` dari API `/cases`.
+
+---
+
+## 7. Panduan Cepat & Aturan UI Frontend (Cheatsheet Penting)
+
+Bagian ini merangkum aturan bisnis & validasi wajib untuk komponen UI frontend agar tidak kena error backend.
+
+> **Penting:** Aplikasi ini TIDAK mengelola perhitungan biaya/plafon. Monitoring biaya ditangani aplikasi lain (JR-Care). Sistem ini hanya menyimpan status keterjaminan, nomor GL, dan tanggal GL — tanpa nominal rupiah. Jangan buat form input biaya/kuitansi di frontend.
+
+### 7.1 Keterjaminan & Data GL (hanya teks, tanpa angka biaya)
+1. `cases.status_keterjaminan` bernilai salah satu dari: `'Belum Dikonfirmasi'`, `'Terjamin JR'`, `'Dialihkan ke BPJS'`.
+2. Ubah status + data GL lewat `PATCH /cases/:id/keterjaminan` (partial update, field yang tidak dikirim tidak berubah).
+3. Field yang boleh diisi di UI:
+   - `status_keterjaminan` (dropdown 3 nilai di atas)
+   - `no_gl` (input teks, maks 50 karakter; kirim `null` untuk mengosongkan)
+   - `tgl_gl` (input tanggal `DD/MM/YYYY`; format salah ditolak `422`)
+4. Tampilkan badge keterjaminan di list & detail kasus. Contoh warna yang disarankan:
+   - `Terjamin JR` — hijau
+   - `Dialihkan ke BPJS` — biru
+   - `Belum Dikonfirmasi` — abu-abu/kuning
+5. Tombol/label "GL sudah terbit" cukup dicek dari `no_gl` tidak null. Tidak ada plafon, sisa saldo, atau status habis plafon di sistem ini.
+
+### 7.2 Tampilan Gambar Bukti Kunjungan (`/uploads/:filename`)
+- Jangan pakai `<img src="/uploads/..." />` langsung — endpoint butuh header `Authorization: Bearer <token>`.
+- Ambil sebagai blob:
+
+```javascript
+const res = await fetch(`${API_BASE_URL}/uploads/${filename}`, {
+  headers: { Authorization: `Bearer ${token}` }
+});
+const blob = await res.blob();
+const imageUrl = URL.createObjectURL(blob);
+// pasang ke <img src={imageUrl} /> lalu URL.revokeObjectURL saat unmount
+```
+
+### 7.3 Format Tanggal & Angka
+- Semua tanggal dari API berupa string `DD/MM/YYYY` (bukan ISO). Kirim balik dengan format sama; `YYYY-MM-DD` dari datepicker browser wajib dikonversi dulu.
+- Nominal uang tidak lagi ada di kontrak API. Kalau butuh menampilkan angka lain (misal statistik jumlah kasus), gunakan angka murni dari respons.

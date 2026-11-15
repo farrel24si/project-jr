@@ -19,6 +19,10 @@ const port = Number(process.env.PORT) || 5000;
 const uploadsDir = path.resolve(process.cwd(), 'uploads');
 fs.mkdirSync(uploadsDir, { recursive: true });
 
+// Socket WA aktif diakses rute via req.app.get('waSocket'); getter dipanggil
+// per request agar reconnect memakai socket terbaru.
+app.set('waSocket', getActiveWhatsAppSocket);
+
 app.use(cors());
 app.use(express.json());
 app.use('/uploads', evidenceRouter);

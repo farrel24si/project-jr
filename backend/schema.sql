@@ -6,8 +6,8 @@ CREATE TABLE IF NOT EXISTS hospitals (
   id INT AUTO_INCREMENT PRIMARY KEY,
   nama_rs VARCHAR(100) NOT NULL,
   alamat VARCHAR(255) NULL,
-  latitude DECIMAL(10,8) NOT NULL,
-  longitude DECIMAL(11,8) NOT NULL,
+  latitude DECIMAL(10,8) NULL,
+  longitude DECIMAL(11,8) NULL,
   radius_meter INT DEFAULT 200,
   is_active TINYINT(1) NOT NULL DEFAULT 1,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -18,6 +18,47 @@ CREATE TABLE IF NOT EXISTS hospitals (
 INSERT IGNORE INTO hospitals (nama_rs, alamat, latitude, longitude, radius_meter) VALUES
 ('RS Prima Pekanbaru', 'Jl. Bima No.1, Delima, Kec. Binawidya, Kota Pekanbaru, Riau 28292', 0.49070000, 101.39950000, 200),
 ('RS Syafira Pekanbaru', 'Jl. Jend. Sudirman No.134, Tangkerang Tengah, Kec. Marpoyan Damai, Kota Pekanbaru, Riau 28282', 0.49830000, 101.45480000, 200);
+
+-- Alias RS untuk routing grup WhatsApp (migration 010).
+-- Alias ter-normalisasi global unik; JID binding global unik; tidak ada seed JID.
+CREATE TABLE IF NOT EXISTS hospital_aliases (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  hospital_id INT NOT NULL,
+  alias_normalized VARCHAR(150) NOT NULL,
+  alias_display VARCHAR(150) NOT NULL,
+  is_active TINYINT(1) NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_hospital_aliases_normalized (alias_normalized),
+  KEY idx_hospital_aliases_hospital_active (hospital_id, is_active),
+  CONSTRAINT fk_hospital_aliases_hospital FOREIGN KEY (hospital_id) REFERENCES hospitals(id)
+    ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS hospital_whatsapp_groups (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  hospital_id INT NOT NULL,
+  group_jid VARCHAR(100) NOT NULL,
+  group_subject_last_seen VARCHAR(255) NULL,
+  is_active TINYINT(1) NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_hospital_whatsapp_groups_jid (group_jid),
+  KEY idx_hospital_whatsapp_groups_hospital_active (hospital_id, is_active),
+  CONSTRAINT fk_hospital_whatsapp_groups_hospital FOREIGN KEY (hospital_id) REFERENCES hospitals(id)
+    ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Seed alias untuk RS yang sudah ada di instalasi baru (Prima + Syafira).
+-- Alias RS lain (Awal Bros, Aulia, dst.) di-seed lewat
+-- `node scripts/seed-hospital-aliases.js` setelah importer RS dijalankan.
+INSERT IGNORE INTO hospital_aliases (hospital_id, alias_normalized, alias_display, is_active)
+SELECT h.id, a.alias_normalized, a.alias_display, 1
+FROM (
+  SELECT 'rs prima' AS alias_normalized, 'RS Prima' AS alias_display, 'RS Prima Pekanbaru' AS nama_rs UNION ALL
+  SELECT 'rs syafira', 'RS Syafira', 'RS Syafira Pekanbaru'
+) a
+JOIN hospitals h ON h.nama_rs = a.nama_rs;
 
 -- Master Petugas Lapangan Jasa Raharja
 CREATE TABLE IF NOT EXISTS officers (
@@ -75,6 +116,9 @@ CREATE TABLE IF NOT EXISTS cases (
   kronologi TEXT NULL,
   keterangan_tambahan TEXT NULL,
   jenis_laka ENUM('Tunggal','Tidak Tunggal','Belum Diketahui') NOT NULL DEFAULT 'Belum Diketahui',
+  status_keterjaminan VARCHAR(50) NOT NULL DEFAULT 'Belum Dikonfirmasi',
+  no_gl VARCHAR(50) NULL,
+  tgl_gl VARCHAR(50) NULL,
   status_kondisi VARCHAR(50) NOT NULL DEFAULT 'Rawat Inap',
   status_pemantauan ENUM('Belum Dikunjungi','Pemantauan Aktif','Menunggu Konfirmasi Kondisi','Selesai Dipantau') NOT NULL DEFAULT 'Belum Dikunjungi',
   status_konfirmasi_kondisi VARCHAR(50) NULL,

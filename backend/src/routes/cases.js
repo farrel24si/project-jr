@@ -2,21 +2,29 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../config/db');
 const { authenticate, authorize } = require('../middleware/auth');
-const { VALID_STATUSES } = require('../bot/parser');
+const { VALID_STATUSES, normalizeDateDDMMYYYY } = require('../bot/parser');
 const { insertCaseWithRetry } = require('../services/caseCreation');
 
 const OPTIONAL_FIELDS = [
   'nomor_laporan', 'ruangan_rs', 'nik', 'umur', 'jenis_kelamin', 'alamat',
   'telepon_korban', 'tgl_laka', 'tgl_masuk', 'kronologi',
-  'jenis_laka', 'status_kondisi'
+  'jenis_laka', 'status_kondisi',
+  'status_keterjaminan', 'no_gl', 'tgl_gl'
 ];
 
+const VALID_KETERJAMINAN = ['Belum Dikonfirmasi', 'Terjamin JR', 'Dialihkan ke BPJS'];
+
 function validOptionalFields(body) {
+  for (const field of ['tgl_laka', 'tgl_masuk', 'tgl_gl']) {
+    if (body[field] !== undefined && body[field] !== null && normalizeDateDDMMYYYY(body[field]) === null) return false;
+  }
   if (body.umur !== undefined && (!Number.isInteger(body.umur) || body.umur < 0)) return false;
   if (body.nik !== undefined && body.nik !== null && !/^\d{16}$/.test(String(body.nik))) return false;
   if (body.jenis_kelamin !== undefined && body.jenis_kelamin !== null && !['Laki-laki', 'Perempuan'].includes(body.jenis_kelamin)) return false;
   if (body.jenis_laka !== undefined && !['Tunggal', 'Tidak Tunggal', 'Belum Diketahui'].includes(body.jenis_laka)) return false;
   if (body.status_kondisi !== undefined && !VALID_STATUSES.includes(body.status_kondisi)) return false;
+  if (body.status_keterjaminan !== undefined && !VALID_KETERJAMINAN.includes(body.status_keterjaminan)) return false;
+  if (body.no_gl !== undefined && body.no_gl !== null && String(body.no_gl).length > 50) return false;
   return true;
 }
 
@@ -29,7 +37,13 @@ router.post('/', authenticate, authorize('kabag', 'petugas'), async (req, res) =
       return res.status(400).json({ success: false, message: 'hospital_id dan nama_korban wajib diisi.' });
     }
     if (!validOptionalFields(body)) {
-      return res.status(422).json({ success: false, message: 'Data kasus tidak sesuai schema.' });
+      const badDateField = ['tgl_laka', 'tgl_masuk'].find(
+        (f) => body[f] !== undefined && body[f] !== null && normalizeDateDDMMYYYY(body[f]) === null
+      );
+      const message = badDateField
+        ? `Tanggal ${badDateField} tidak valid. Gunakan format DD/MM/YYYY.`
+        : 'Data kasus tidak sesuai schema.';
+      return res.status(422).json({ success: false, message });
     }
 
     const [[hospital]] = await pool.execute(
@@ -55,7 +69,12 @@ router.post('/', authenticate, authorize('kabag', 'petugas'), async (req, res) =
     }
 
     const result = await insertCaseWithRetry({
-      ...OPTIONAL_FIELDS.reduce((values, field) => ({ ...values, [field]: body[field] }), {}),
+      ...OPTIONAL_FIELDS.reduce((values, field) => ({
+        ...values,
+        [field]: ['tgl_laka', 'tgl_masuk', 'tgl_gl'].includes(field) && body[field] !== undefined && body[field] !== null
+          ? normalizeDateDDMMYYYY(body[field])
+          : body[field]
+      }), {}),
       hospital_id: hospital.id,
       rumah_sakit: hospital.nama_rs,
       nama_korban: String(body.nama_korban).trim(),
@@ -157,6 +176,95 @@ router.patch('/:caseId/referrals/:referralId/assignee', authenticate, authorize(
   }
 });
 
+// PATCH /api/cases/:id/keterjaminan — update status keterjaminan & data GL
+router.patch('/:id/keterjaminan', authenticate, authorize('kabag', 'petugas'), async (req, res) => {
+  const caseId = Number(req.params.id);
+  if (!Number.isInteger(caseId) || caseId <= 0) {
+    return res.status(400).json({ success: false, message: 'ID kasus tidak valid.' });
+  }
+
+  const { status_keterjaminan, no_gl, tgl_gl } = req.body || {};
+
+  if (!status_keterjaminan || !VALID_KETERJAMINAN.includes(status_keterjaminan)) {
+    return res.status(422).json({
+      success: false,
+      message: `status_keterjaminan harus salah satu dari: ${VALID_KETERJAMINAN.join(', ')}`
+    });
+  }
+
+  if (no_gl !== undefined && no_gl !== null && String(no_gl).length > 50) {
+    return res.status(422).json({
+      success: false,
+      message: 'no_gl maksimal 50 karakter.'
+    });
+  }
+
+  let normalizedTglGl = undefined;
+  if (tgl_gl !== undefined) {
+    if (tgl_gl === null || String(tgl_gl).trim() === '') {
+      normalizedTglGl = null;
+    } else {
+      normalizedTglGl = normalizeDateDDMMYYYY(tgl_gl);
+      if (normalizedTglGl === null) {
+        return res.status(422).json({
+          success: false,
+          message: 'Format tgl_gl tidak valid. Gunakan format DD/MM/YYYY.'
+        });
+      }
+    }
+  }
+
+  let conn;
+  try {
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+
+    const [[existingCase]] = await conn.execute(
+      'SELECT id, assigned_officer_id, status_keterjaminan, no_gl, tgl_gl FROM cases WHERE id = ? FOR UPDATE',
+      [caseId]
+    );
+
+    if (!existingCase) {
+      await conn.rollback();
+      return res.status(404).json({ success: false, message: 'Kasus tidak ditemukan.' });
+    }
+
+    if (req.user.role === 'petugas') {
+      if (!req.user.officerId || String(existingCase.assigned_officer_id) !== String(req.user.officerId)) {
+        await conn.rollback();
+        return res.status(403).json({ success: false, message: 'Akses ditolak.' });
+      }
+    }
+
+    const nextStatus = status_keterjaminan;
+    const nextNoGl = no_gl !== undefined ? (no_gl ? String(no_gl).trim() : null) : existingCase.no_gl;
+    const nextTglGl = normalizedTglGl !== undefined ? normalizedTglGl : existingCase.tgl_gl;
+
+    await conn.execute(
+      'UPDATE cases SET status_keterjaminan = ?, no_gl = ?, tgl_gl = ? WHERE id = ?',
+      [nextStatus, nextNoGl, nextTglGl, caseId]
+    );
+
+    await conn.commit();
+
+    return res.json({
+      success: true,
+      data: {
+        id: caseId,
+        status_keterjaminan: nextStatus,
+        no_gl: nextNoGl,
+        tgl_gl: nextTglGl
+      }
+    });
+  } catch (err) {
+    if (conn) await conn.rollback();
+    console.error('[API] PATCH /cases/:id/keterjaminan error:', err);
+    return res.status(500).json({ success: false, message: 'Gagal memperbarui keterjaminan kasus.' });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
 // GET /api/cases — semua kasus (kabag semua, petugas hanya assigned)
 router.get('/', authenticate, async (req, res) => {
   try {
@@ -174,7 +282,7 @@ router.get('/', authenticate, async (req, res) => {
         c.id, c.nomor_tiket, c.rumah_sakit, c.hospital_id,
         c.assigned_officer_id, ao.nama AS assigned_officer_nama,
         c.nama_korban, c.nik, c.umur, c.jenis_laka,
-        c.status_kondisi, c.waktu_lapor_wa, c.created_at,
+        c.status_kondisi, c.status_keterjaminan, c.no_gl, c.tgl_gl, c.waktu_lapor_wa, c.created_at,
         h.nama_rs AS hospital_nama, h.latitude AS hospital_lat, h.longitude AS hospital_lng,
         h.radius_meter AS hospital_radius,
         COUNT(CASE WHEN v.status_kunjungan = 'Menunggu' THEN v.id END) AS tugas_menunggu,

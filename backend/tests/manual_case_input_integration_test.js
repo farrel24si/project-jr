@@ -128,8 +128,8 @@ async function main() {
       hospital_id: fixture.hospitalId,
       nama_korban: 'Korban Manual',
       nik: '1234567890123456', umur: 32, jenis_kelamin: 'Perempuan',
-      alamat: 'Alamat uji', telepon_korban: '08123456789', tgl_laka: '01/01/2026',
-      tgl_masuk: '02/01/2026', kronologi: 'Uji HTTP',
+      alamat: 'Alamat uji', telepon_korban: '08123456789', tgl_laka: '1/1/2026',
+      tgl_masuk: '2/1/2026', kronologi: 'Uji HTTP',
       jenis_laka: 'Tunggal', status_kondisi: 'Rawat Inap',
       assigned_officer_id: fixture.otherOfficerId,
       officer_id: fixture.otherOfficerId
@@ -141,6 +141,8 @@ async function main() {
     assert.match(kabagCreate.body.data.case.nomor_tiket, /^JR-/);
     assert.equal(kabagCreate.body.data.case.assigned_officer_id, fixture.primaryOfficerId);
     assert.equal(kabagCreate.body.data.assigned_officer.id, fixture.primaryOfficerId);
+    assert.equal(kabagCreate.body.data.case.tgl_laka, '01/01/2026');
+    assert.equal(kabagCreate.body.data.case.tgl_masuk, '02/01/2026');
     assert.equal(kabagCreate.body.data.visit.kunjungan_ke, 1);
     assert.equal(kabagCreate.body.data.visit.status_kunjungan, 'Menunggu');
     const diffHours = (new Date(kabagCreate.body.data.visit.jadwal_kunjungan).getTime() - new Date(kabagCreate.body.data.case.waktu_lapor_wa).getTime()) / (60 * 60 * 1000);
@@ -191,6 +193,31 @@ async function main() {
       status_kondisi: 'BukanStatusValid'
     }, kabagToken);
     assert.equal(invalidStatus.status, 422);
+
+    // 9. Dates must use Indonesian DD/MM/YYYY and must be possible calendar dates.
+    const invalidMmDdYyyy = await request('POST', '/api/cases', {
+      hospital_id: fixture.hospitalId,
+      nama_korban: 'Tanggal MM DD',
+      tgl_laka: '10/29/2026'
+    }, kabagToken);
+    assert.equal(invalidMmDdYyyy.status, 422, JSON.stringify(invalidMmDdYyyy.body));
+    assert.match(invalidMmDdYyyy.body.message, /DD\/MM\/YYYY/);
+
+    const invalidShortYear = await request('POST', '/api/cases', {
+      hospital_id: fixture.hospitalId,
+      nama_korban: 'Tahun Dua Digit',
+      tgl_laka: '29/10/26'
+    }, kabagToken);
+    assert.equal(invalidShortYear.status, 422, JSON.stringify(invalidShortYear.body));
+    assert.match(invalidShortYear.body.message, /DD\/MM\/YYYY/);
+
+    const impossibleDate = await request('POST', '/api/cases', {
+      hospital_id: fixture.hospitalId,
+      nama_korban: 'Tanggal Mustahil',
+      tgl_masuk: '31/04/2026'
+    }, kabagToken);
+    assert.equal(impossibleDate.status, 422, JSON.stringify(impossibleDate.body));
+    assert.match(impossibleDate.body.message, /DD\/MM\/YYYY/);
 
     console.log('PASS manual case input HTTP integration');
   } finally {
