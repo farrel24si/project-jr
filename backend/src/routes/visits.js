@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
@@ -6,9 +7,11 @@ const pool = require('../config/db');
 const { haversine } = require('../utils/geo');
 const { VALID_STATUSES } = require('../bot/parser');
 const { authenticate } = require('../middleware/auth');
+const { TERMINAL_STATUSES, findOfficerForHospital } = require('../services/caseCreation');
+const { notifyNewAssignment } = require('../services/notificationDelivery');
 
 const router = express.Router();
-const uploadDir = path.resolve(process.cwd(), 'uploads');
+const uploadDir = path.resolve(__dirname, '..', '..', 'uploads');
 fs.mkdirSync(uploadDir, { recursive: true });
 
 const ALLOWED_IMAGE_TYPES = {
@@ -22,7 +25,8 @@ const storage = multer.diskStorage({
   filename: (req, file, cb) => {
     // Ekstensi diturunkan dari MIME yang sudah lolos whitelist, bukan dari nama file klien.
     const ext = ALLOWED_IMAGE_TYPES[file.mimetype] || '.bin';
-    cb(null, `VISIT_${Date.now()}${ext}`);
+    const randDigits = String(crypto.randomInt(1000, 10000));
+    cb(null, `VISIT_${Date.now()}${randDigits}${ext}`);
   }
 });
 
@@ -45,23 +49,36 @@ function deleteUploadedFile(file) {
   }
 }
 
-router.post('/:visitId/submit', authenticate, upload.single('foto_bukti'), async (req, res) => {
+function requirePetugasWithOfficer(req, res, next) {
+  if (!req.user || req.user.role !== 'petugas' || !req.user.officerId) {
+    return res.status(403).json({
+      success: false,
+      message: 'Hanya akun petugas yang terhubung ke data petugas dapat submit kunjungan.'
+    });
+  }
+  next();
+}
+
+router.post('/:visitId/submit', authenticate, requirePetugasWithOfficer, upload.single('foto_bukti'), async (req, res) => {
   const { visitId } = req.params;
-  const body = req.body;
+  const body = req.body || {};
   let conn;
 
   try {
-    if (req.user.role !== 'petugas' || !req.user.officerId) {
-      deleteUploadedFile(req.file);
-      return res.status(403).json({
-        success: false,
-        message: 'Hanya akun petugas yang terhubung ke data petugas dapat submit kunjungan.'
-      });
-    }
-    const lat = Number(body.lat_petugas);
-    const lng = Number(body.lng_petugas);
+    const isCoordPresent = (v) =>
+      v !== undefined && v !== null && String(v).trim() !== '' && typeof v !== 'boolean' && !Array.isArray(v);
+    const lat = isCoordPresent(body.lat_petugas) ? Number(body.lat_petugas) : NaN;
+    const lng = isCoordPresent(body.lng_petugas) ? Number(body.lng_petugas) : NaN;
 
-    if (!body.case_id || !Number.isFinite(lat) || !Number.isFinite(lng)) {
+    if (
+      !body.case_id ||
+      !Number.isFinite(lat) ||
+      !Number.isFinite(lng) ||
+      lat < -90 ||
+      lat > 90 ||
+      lng < -180 ||
+      lng > 180
+    ) {
       deleteUploadedFile(req.file);
       return res.status(400).json({
         success: false,
@@ -127,7 +144,7 @@ router.post('/:visitId/submit', authenticate, upload.single('foto_bukti'), async
       ? await conn.execute('SELECT * FROM hospitals WHERE id = ? AND is_active = 1 LIMIT 1', [caseData.hospital_id])
       : [null];
 
-    if (!hospital) {
+    if (!hospital || hospital.latitude === null || hospital.longitude === null) {
       await conn.rollback();
       deleteUploadedFile(req.file);
       return res.status(422).json({ success: false, message: 'Master rumah sakit kasus belum valid/aktif; kunjungan tidak dapat disubmit.' });
@@ -148,7 +165,11 @@ router.post('/:visitId/submit', authenticate, upload.single('foto_bukti'), async
     const isReferral = body.status_kondisi_terbaru === 'Dirujuk ke RS Lain';
     let targetHospital = null;
     let targetOfficer = null;
-    const targetHospitalId = Number(body.rujukan_hospital_id);
+    const rawTargetHospitalId = body.rujukan_hospital_id;
+    const targetHospitalId =
+      rawTargetHospitalId !== '' && rawTargetHospitalId !== null && typeof rawTargetHospitalId !== 'boolean'
+        ? Number(rawTargetHospitalId)
+        : NaN;
     if (isReferral) {
       if (!Number.isInteger(targetHospitalId) || targetHospitalId <= 0) {
         await conn.rollback();
@@ -168,14 +189,7 @@ router.post('/:visitId/submit', authenticate, upload.single('foto_bukti'), async
         deleteUploadedFile(req.file);
         return res.status(422).json({ success: false, message: 'Rumah sakit rujukan tidak ditemukan atau tidak aktif.' });
       }
-      [[targetOfficer]] = await conn.execute(
-        `SELECT o.id, o.nama FROM officer_hospitals oh
-         JOIN officers o ON o.id = oh.officer_id
-         WHERE oh.hospital_id = ? AND oh.is_active = 1 AND o.is_active = 1
-         ORDER BY oh.is_primary DESC,
-           (SELECT COUNT(*) FROM cases c WHERE c.assigned_officer_id = o.id) ASC,
-           o.id ASC LIMIT 1`, [targetHospitalId]
-      );
+      targetOfficer = await findOfficerForHospital(conn, targetHospitalId);
     }
 
     const now = new Date();
@@ -183,6 +197,7 @@ router.post('/:visitId/submit', authenticate, upload.single('foto_bukti'), async
       ? 'Selesai Tepat Waktu'
       : 'Selesai Terlambat';
     const fotoUrl = req.file ? `/uploads/${req.file.filename}` : null;
+    const statusTerbaru = body.status_kondisi_terbaru || caseData.status_kondisi;
 
     await conn.execute(
       `UPDATE visits SET
@@ -214,10 +229,18 @@ router.post('/:visitId/submit', authenticate, upload.single('foto_bukti'), async
       ]
     );
 
-    const statusTerbaru = body.status_kondisi_terbaru || caseData.status_kondisi;
+    let targetVisitId = null;
+    const nextScheduleAt = new Date(now.getTime() + 72 * 3600 * 1000);
+
     if (isReferral) {
       await conn.execute(
-        `UPDATE cases SET hospital_id = ?, rumah_sakit = ?, status_kondisi = ?, assigned_officer_id = ? WHERE id = ?`,
+        `UPDATE cases SET
+           hospital_id = ?,
+           rumah_sakit = ?,
+           status_kondisi = ?,
+           status_pemantauan = 'Pemantauan Aktif',
+           assigned_officer_id = ?
+         WHERE id = ?`,
         [targetHospital.id, targetHospital.nama_rs, statusTerbaru, targetOfficer?.id || null, caseData.id]
       );
       const [history] = await conn.execute(
@@ -228,28 +251,58 @@ router.post('/:visitId/submit', authenticate, upload.single('foto_bukti'), async
         [caseData.id, caseData.hospital_id, targetHospital.id, caseData.assigned_officer_id,
           targetOfficer?.id || null, req.user.officerId, body.alasan_rujukan || null, body.catatan_rujukan || null]
       );
-      if (!['Meninggal Dunia', 'Sudah Pulang', 'Selesai'].includes(statusTerbaru)) {
+      if (!TERMINAL_STATUSES.includes(statusTerbaru)) {
+        const [nextVisitRes] = await conn.execute(
+          `INSERT INTO visits (case_id, kunjungan_ke, jadwal_kunjungan, status_kunjungan)
+           VALUES (?, ?, DATE_ADD(?, INTERVAL 72 HOUR), 'Menunggu')`,
+          [caseData.id, visit.kunjungan_ke + 1, now]
+        );
+        targetVisitId = nextVisitRes.insertId;
+      }
+      caseData.referralId = history.insertId;
+    } else {
+      const isTerminal = TERMINAL_STATUSES.includes(statusTerbaru);
+      const nextStatusPemantauan = isTerminal ? 'Selesai Dipantau' : 'Pemantauan Aktif';
+
+      await conn.execute(
+        `UPDATE cases SET
+           status_kondisi = ?,
+           status_pemantauan = ?
+         WHERE id = ?`,
+        [statusTerbaru, nextStatusPemantauan, caseData.id]
+      );
+
+      if (!isTerminal) {
         await conn.execute(
           `INSERT INTO visits (case_id, kunjungan_ke, jadwal_kunjungan, status_kunjungan)
            VALUES (?, ?, DATE_ADD(?, INTERVAL 72 HOUR), 'Menunggu')`,
           [caseData.id, visit.kunjungan_ke + 1, now]
         );
       }
-      caseData.referralId = history.insertId;
-    } else {
-      if (body.status_kondisi_terbaru) {
-        await conn.execute('UPDATE cases SET status_kondisi = ? WHERE id = ?', [statusTerbaru, caseData.id]);
-      }
-      if (!['Selesai', 'Meninggal Dunia'].includes(statusTerbaru)) {
-        await conn.execute(
-          `INSERT INTO visits (case_id, kunjungan_ke, jadwal_kunjungan, status_kunjungan)
-           VALUES (?, ?, DATE_ADD(?, INTERVAL 3 DAY), 'Menunggu')`,
-          [caseData.id, visit.kunjungan_ke + 1, now]
-        );
-      }
     }
 
     await conn.commit();
+
+    // Kirim notifikasi DM WhatsApp ke petugas tujuan rujukan (bila ada telepon & visit baru)
+    if (isReferral && targetOfficer && targetOfficer.telepon && targetVisitId) {
+      const getSocket = req.app && typeof req.app.get === 'function' ? req.app.get('waSocket') : null;
+      const sock = typeof getSocket === 'function' ? getSocket() : null;
+      await notifyNewAssignment(sock, {
+        caseId: caseData.id,
+        visitId: targetVisitId,
+        officerId: targetOfficer.id,
+        officerName: targetOfficer.nama,
+        officerPhone: targetOfficer.telepon,
+        ticket: caseData.nomor_tiket,
+        victimName: caseData.nama_korban,
+        hospitalName: targetHospital.nama_rs,
+        condition: statusTerbaru,
+        scheduledAt: nextScheduleAt
+      }).catch((notifyErr) => {
+        console.error('[API] Gagal kirim notifikasi WA rujukan ke petugas tujuan:', notifyErr.message);
+      });
+    }
+
     res.json({
       success: true,
       message: isOutsideHospitalRadius

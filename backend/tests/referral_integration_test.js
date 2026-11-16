@@ -31,10 +31,10 @@ async function createHospital(label) {
   return result.insertId;
 }
 
-async function createOfficer(label) {
+async function createOfficer(label, phone = null) {
   const [officer] = await pool.execute(
-    'INSERT INTO officers (nama, is_active) VALUES (?, 1)',
-    [`Petugas ${label} ${stamp}`]
+    'INSERT INTO officers (nama, telepon, is_active) VALUES (?, ?, 1)',
+    [`Petugas ${label} ${stamp}`, phone]
   );
   const [user] = await pool.execute(
     `INSERT INTO users (officer_id, username, password_hash, role, is_active)
@@ -45,11 +45,15 @@ async function createOfficer(label) {
 }
 
 async function setup() {
+  fixture.prevNotifEnv = process.env.ENABLE_WHATSAPP_NOTIFICATIONS;
+  process.env.ENABLE_WHATSAPP_NOTIFICATIONS = 'true';
+  fixture.sentMessages = [];
+
   fixture.sourceHospitalId = await createHospital('Asal');
   fixture.targetHospitalId = await createHospital('Tujuan');
-  fixture.source = await createOfficer('Asal');
-  fixture.target = await createOfficer('Tujuan');
-  fixture.override = await createOfficer('Override');
+  fixture.source = await createOfficer('Asal', '081211112222');
+  fixture.target = await createOfficer('Tujuan', '081233334444');
+  fixture.override = await createOfficer('Override', '081255556666');
   fixture.inactiveHospitalId = await createHospital('Nonaktif');
   await pool.execute('UPDATE hospitals SET is_active = 0 WHERE id = ?', [fixture.inactiveHospitalId]);
   fixture.noPlotHospitalId = await createHospital('Tanpa Plot');
@@ -85,6 +89,11 @@ async function setup() {
   fixture.sourceVisitId = visit.insertId;
 
   const app = express();
+  app.set('waSocket', () => ({
+    sendMessage: async (jid, payload) => {
+      fixture.sentMessages.push({ jid, payload });
+    }
+  }));
   app.use(express.json());
   app.use('/api/cases', casesRouter);
   app.use('/api/visits', visitsRouter);
@@ -94,8 +103,13 @@ async function setup() {
 }
 
 async function cleanup() {
+  if (fixture.prevNotifEnv !== undefined) {
+    process.env.ENABLE_WHATSAPP_NOTIFICATIONS = fixture.prevNotifEnv;
+  } else {
+    delete process.env.ENABLE_WHATSAPP_NOTIFICATIONS;
+  }
   if (server) await new Promise((resolve) => server.close(resolve));
-  if (fixture.photoUrl) await fs.promises.unlink(path.resolve(process.cwd(), `.${fixture.photoUrl}`)).catch(() => {});
+  if (fixture.photoUrl) await fs.promises.unlink(path.resolve(__dirname, '..', `.${fixture.photoUrl}`)).catch(() => {});
   if (fixture.caseId) await pool.execute('DELETE FROM cases WHERE id = ?', [fixture.caseId]);
   if (fixture.noAssigneeCaseId) await pool.execute('DELETE FROM cases WHERE id = ?', [fixture.noAssigneeCaseId]);
   if (fixture.kabagUserId) await pool.execute('DELETE FROM users WHERE id = ?', [fixture.kabagUserId]);
@@ -298,6 +312,49 @@ async function main() {
     assert.equal(overriddenHistory.new_officer_id, fixture.override.officerId);
     assert.equal(overriddenHistory.previous_officer_id, fixture.source.officerId);
     assert.ok(detailBody.data.referrals[0].new_officer_id);
+
+    // Pastikan petugas tujuan rujukan (target) & petugas hasil override Kabag (override)
+    // keduanya menerima DM WhatsApp otomatis dan tercatat SENT di notification_logs.
+    assert.equal(fixture.sentMessages.length, 2, 'Harus ada 2 DM WA terkirim (saat rujukan & saat override)');
+    assert.equal(fixture.sentMessages[0].jid, '6281233334444@s.whatsapp.net');
+    assert.equal(fixture.sentMessages[1].jid, '6281255556666@s.whatsapp.net');
+
+    const [notifLogs] = await pool.execute(
+      `SELECT officer_id, delivery_status FROM notification_logs
+       WHERE case_id = ? AND notification_type = 'NEW_ASSIGNMENT'
+       ORDER BY id ASC`,
+      [fixture.caseId]
+    );
+    assert.equal(notifLogs.length, 2);
+    assert.equal(notifLogs[0].officer_id, fixture.target.officerId);
+    assert.equal(notifLogs[0].delivery_status, 'SENT');
+    assert.equal(notifLogs[1].officer_id, fixture.override.officerId);
+    assert.equal(notifLogs[1].delivery_status, 'SENT');
+
+    // Submit visit di RS tujuan dengan status 'Sudah Pulang' (status terminal):
+    // tidak boleh menjadwalkan visit ke-3 dan status_pemantauan menjadi 'Selesai Dipantau'.
+    const pulangForm = new FormData();
+    pulangForm.set('case_id', String(fixture.caseId));
+    pulangForm.set('lat_petugas', '0.01');
+    pulangForm.set('lng_petugas', '101.4');
+    pulangForm.set('status_kondisi_terbaru', 'Sudah Pulang');
+    pulangForm.set('cek_komunikasi_keluarga', 'true');
+    const [[pendingTargetVisit]] = await pool.execute(
+      `SELECT id FROM visits WHERE case_id = ? AND status_kunjungan = 'Menunggu' LIMIT 1`,
+      [fixture.caseId]
+    );
+    const pulangRes = await fetch(`${baseUrl}/api/visits/${pendingTargetVisit.id}/submit`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token({ userId: fixture.override.userId, role: 'petugas', officerId: fixture.override.officerId })}` },
+      body: pulangForm
+    });
+    assert.equal(pulangRes.status, 200);
+    const [[caseAfterPulang]] = await pool.execute(
+      'SELECT status_kondisi, status_pemantauan FROM cases WHERE id = ?',
+      [fixture.caseId]
+    );
+    assert.equal(caseAfterPulang.status_kondisi, 'Sudah Pulang');
+    assert.equal(caseAfterPulang.status_pemantauan, 'Selesai Dipantau');
 
     // Target hospital without any active plotting: transfer succeeds, case unassigned.
     const [noPlotCaseResult] = await pool.execute(

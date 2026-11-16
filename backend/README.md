@@ -57,9 +57,13 @@ mysql -u root -p < migrations/008_case_referrals.sql
 mysql -u root -p < migrations/009_hospitals_staging.sql
 mysql -u root -p < migrations/010_hospital_aliases_groups.sql
 mysql -u root -p < migrations/011_case_guarantee.sql
+# 012–014 pernah dipakai internal lalu dihapus karena fitur biaya dibatalkan.
+# Jangan jalankan ulang; lanjutkan langsung ke migration aktif berikutnya.
+mysql -u root -p < migrations/015_archive_single_vehicle_cases.sql
+mysql -u root -p < migrations/016_indexes_and_optimizations.sql
 ```
 
-Semua migrasi 001 s/d 011 dirancang idempotent (aman dijalankan berulang).
+Semua migration aktif yang tercantum di atas dirancang idempotent (aman dijalankan berulang).
 - 001: NIK opsional & normalisasi jenis laka.
 - 002: Master data `officers`/`users`, auth, relasi `hospital_id` dan `assigned_officer_id`.
 - 003: Kolom detail kasus, status pemantauan, dan tabel `monitorings`.
@@ -70,7 +74,9 @@ Semua migrasi 001 s/d 011 dirancang idempotent (aman dijalankan berulang).
 - 008: Tabel riwayat handoff rujukan lintas rumah sakit (`case_referrals`).
 - 009: `hospitals.latitude`/`longitude` jadi nullable untuk data staging yang koordinatnya belum terverifikasi.
 - 010: Tabel `hospital_aliases` (alias ter-normalisasi global unik) dan `hospital_whatsapp_groups` (binding JID grup global unik) untuk routing grup WhatsApp. Seed alias RS Pekanbaru aktif lewat `node scripts/seed-hospital-aliases.js`; binding JID dilakukan Kabag setelah JID grup terlihat dari metadata bot.
-- 011: Fase 1 Keterjaminan & GL (`cases.status_keterjaminan`, `cases.no_gl`, `cases.tgl_gl`). Mapping otomatis jenis laka saat lapor (Tidak Tunggal -> Terjamin JR, Tunggal -> Dialihkan ke BPJS), endpoint koreksi `PATCH /api/cases/:id/keterjaminan`.
+- 011: Fase 1 Keterjaminan & GL (`cases.status_keterjaminan`, `cases.no_gl`, `cases.tgl_gl`). Mapping otomatis jenis laka saat lapor (Tidak Tunggal -> Terjamin JR, selain itu -> Belum Dikonfirmasi; tanpa status BPJS), endpoint koreksi `PATCH /api/cases/:id/keterjaminan`.
+- 015: Laka tunggal disimpan sebagai arsip `status_pemantauan = Diarsipkan` tanpa petugas, visit, SLA, atau notifikasi. Migrasi juga menghapus tugas `Menunggu` lama untuk kasus tunggal; riwayat kunjungan selesai tetap tersimpan.
+- 016: Index optimasi pada `visits(status_kunjungan, jadwal_kunjungan)` untuk scheduler pengingat SLA dan `visits(foto_bukti_url)` untuk akses bukti foto.
 
 > Catatan: perhitungan biaya/plafon TIDAK dikelola sistem ini — monitoring biaya ditangani aplikasi/web lain (JR-Care). Aplikasi ini hanya mencatat status keterjaminan, nomor GL, dan tanggal GL tanpa nominal rupiah.
 
@@ -197,10 +203,10 @@ Soft delete dipakai untuk semua master data: riwayat `cases`/`visits` tetap vali
 | GET | `/api/health` | Health check publik tanpa token: status service, database connected, server time, uptime |
 | GET | `/api/cases` | Kabag: semua kasus. Petugas: hanya yang `assigned_officer_id` = dirinya. Memuat `tugas_menunggu`, `jadwal_berikutnya`, `is_overdue`, koordinat RS |
 | GET | `/api/cases/:id` | Detail kasus + objek `hospital` (koordinat & radius) + `assigned_officer` + `visits` dengan `is_overdue` |
-| POST | `/api/cases` | Input kasus manual (Role `kabag` atau `petugas`): validasi plotting RS, generate tiket `JR-XXXXXX`, auto-assign, visit #1 |
+| POST | `/api/cases` | Input kasus manual (Role `kabag` atau `petugas`): validasi plotting RS, generate tiket `JR-XXXXXX`, auto-assign + visit #1 untuk selain laka tunggal. Laka tunggal diarsipkan tanpa petugas, visit, SLA, atau notifikasi. |
 | POST | `/api/visits/:visitId/submit` | Submit checklist kunjungan (multipart/form-data, file `foto_bukti`). Hanya role `petugas`; status `Dirujuk ke RS Lain` memindahkan kasus ke RS tujuan aktif. |
 | PATCH | `/api/cases/:caseId/referrals/:referralId/assignee` | Kabag-only. Body `{ "officer_id" }`; petugas harus plotting aktif di RS tujuan. |
-| PATCH | `/api/cases/:id/keterjaminan` | Update `status_keterjaminan` (`Belum Dikonfirmasi`/`Terjamin JR`/`Dialihkan ke BPJS`), `no_gl`, `tgl_gl` (partial). Kabag semua kasus; petugas hanya kasus miliknya. Tanpa nominal biaya. |
+| PATCH | `/api/cases/:id/keterjaminan` | Update `status_keterjaminan` (`Belum Dikonfirmasi`/`Terjamin JR`), `no_gl`, `tgl_gl` (partial). Kabag semua kasus; petugas hanya kasus miliknya. Tanpa nominal biaya. |
 
 ### GET /api/cases/:id — kontrak untuk maps
 
@@ -311,8 +317,8 @@ Aturan:
 - Foto bukti kunjungan dilindungi autentikasi di `GET /uploads/:filename` (hanya dapat diakses oleh petugas pemilik kasus atau role `kabag`). File berbahaya seperti SVG ditolak.
 - Kasus tanpa `hospital_id` valid/aktif → `422` (tidak ada lagi fallback "validasi radius dilewati").
 - `status_kondisi_terbaru` BUKAN `Selesai`/`Meninggal Dunia`/`Sudah Pulang` → otomatis dibuat kunjungan berikutnya (jadwal = sekarang + 3 hari). Semua dalam 1 transaksi.
-- `Dirujuk ke RS Lain` wajib `rujukan_hospital_id`. Dalam transaksi sama, kasus berpindah RS, riwayat rujukan dibuat, petugas tujuan dipilih dari plotting aktif (utama lalu beban paling kecil), dan visit berikutnya jatuh tempo 72 jam. Bila tidak ada plotting aktif, kasus tetap berhasil dipindah tanpa petugas.
-- `PATCH /api/cases/:caseId/referrals/:referralId/assignee` hanya untuk Kabag. Hanya menerima `officer_id`, divalidasi terhadap plotting aktif RS tujuan, dan memperbarui assignment kasus + petugas baru pada riwayat secara atomik.
+- `Dirujuk ke RS Lain` wajib `rujukan_hospital_id`. Dalam transaksi sama, kasus berpindah RS, riwayat rujukan dibuat, petugas tujuan dipilih dari plotting aktif (utama lalu beban kasus aktif paling kecil), dan visit berikutnya jatuh tempo 72 jam. Petugas tujuan yang terpilih otomatis dikirimi DM WhatsApp tugas baru (`NEW_ASSIGNMENT`). Bila tidak ada plotting aktif, kasus tetap berhasil dipindah tanpa petugas.
+- `PATCH /api/cases/:caseId/referrals/:referralId/assignee` hanya untuk Kabag. Hanya menerima `officer_id`, divalidasi terhadap plotting aktif RS tujuan, memperbarui assignment kasus + petugas baru pada riwayat secara atomik, dan mengirimkan DM WhatsApp tugas baru ke petugas pengganti.
 - `GET /api/cases/:id` juga memuat `referrals`, termasuk RS asal/tujuan dan petugas lama/baru.
 - Visit tidak ditemukan → `404`. Visit sudah selesai → `409`.
 

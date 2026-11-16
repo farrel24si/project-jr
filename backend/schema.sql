@@ -120,7 +120,7 @@ CREATE TABLE IF NOT EXISTS cases (
   no_gl VARCHAR(50) NULL,
   tgl_gl VARCHAR(50) NULL,
   status_kondisi VARCHAR(50) NOT NULL DEFAULT 'Rawat Inap',
-  status_pemantauan ENUM('Belum Dikunjungi','Pemantauan Aktif','Menunggu Konfirmasi Kondisi','Selesai Dipantau') NOT NULL DEFAULT 'Belum Dikunjungi',
+  status_pemantauan ENUM('Belum Dikunjungi','Pemantauan Aktif','Menunggu Konfirmasi Kondisi','Selesai Dipantau','Diarsipkan') NOT NULL DEFAULT 'Belum Dikunjungi',
   status_konfirmasi_kondisi VARCHAR(50) NULL,
   waktu_pemantauan_terakhir DATETIME NULL,
   jadwal_pemantauan_berikutnya DATETIME NULL,
@@ -168,6 +168,8 @@ CREATE TABLE IF NOT EXISTS visits (
   KEY idx_visits_officer_id (officer_id),
   KEY idx_visits_case_sequence (case_id, kunjungan_ke, status_kunjungan),
   KEY idx_visits_officer_actual (officer_id, waktu_aktual_kunjungan),
+  KEY idx_visits_status_schedule (status_kunjungan, jadwal_kunjungan),
+  KEY idx_visits_foto_bukti_url (foto_bukti_url),
   CONSTRAINT fk_visits_case FOREIGN KEY (case_id) REFERENCES cases(id) ON DELETE CASCADE,
   CONSTRAINT fk_visits_officer FOREIGN KEY (officer_id) REFERENCES officers(id)
     ON DELETE SET NULL ON UPDATE CASCADE

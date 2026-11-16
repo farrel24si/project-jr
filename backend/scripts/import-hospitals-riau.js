@@ -16,7 +16,7 @@ function normalizeNamaRs(value) {
 
 const activeHospitals = [
   ['RS AWAL BROS - PEKANBARU', 'Jl. Jend. Sudirman No.117, Tengkerang Sel., Bukit Raya, Kota Pekanbaru, Riau 28128', 0.4950, 101.4552],
-  ['RS SYAFIRA - PEKANBARU', 'Jl. Jend. Sudirman No.134, Tangkerang Tengah, Marpoyan Damai, Kota Pekanbaru, Riau 28282', 0.4924, 101.4542],
+  ['RS SYAFIRA - PEKANBARU', 'Jl. Jend. Sudirman No.134, Tangkerang Tengah, Marpoyan Damai, Kota Pekanbaru, Riau 28282', 0.49830000, 101.45480000],
   ['RS EKA HOSPITAL - PEKANBARU', 'Jl. Soekarno - Hatta No.6, Tengkerang Bar., Marpoyan Damai, Kota Pekanbaru, Riau 28292', 0.4828, 101.4206],
   ['RS AWAL BROS HANGTUAH', 'Jl. Hangtuah No.121, Kelurahan Sialang Sakti, Tenayan Raya, Kota Pekanbaru, Riau 28285', 0.5097, 101.4886],
   ['RS BHAYANGKARA POLDA - RIAU', 'Jalan RA Kartini No.14, Simpang Empat, Pekanbaru Kota, Kota Pekanbaru, Riau 28156', 0.5187, 101.4497],

@@ -3,7 +3,21 @@ const pool = require('../config/db');
 const { authenticate, authorize } = require('../middleware/auth');
 
 const router = express.Router();
-const isNumber = (value) => Number.isFinite(Number(value));
+const isNumber = (value) =>
+  value !== '' &&
+  value !== null &&
+  value !== undefined &&
+  typeof value !== 'boolean' &&
+  !Array.isArray(value) &&
+  Number.isFinite(Number(value));
+
+function isValidHospitalCoords(latitude, longitude, radiusMeter) {
+  if (!isNumber(latitude) || !isNumber(longitude) || !isNumber(radiusMeter)) return false;
+  const lat = Number(latitude);
+  const lng = Number(longitude);
+  const rad = Number(radiusMeter);
+  return lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180 && rad > 0;
+}
 
 router.get('/', authenticate, async (req, res) => {
   try {
@@ -20,11 +34,15 @@ router.get('/', authenticate, async (req, res) => {
 });
 
 router.post('/', authenticate, authorize('kabag'), async (req, res) => {
-  const { nama_rs, alamat = null, latitude, longitude, radius_meter = 200 } = req.body;
-  if (!nama_rs?.trim() || !isNumber(latitude) || !isNumber(longitude) || !isNumber(radius_meter)) {
-    return res.status(400).json({ success: false, message: 'nama_rs, latitude, longitude, dan radius_meter wajib valid.' });
-  }
   try {
+    const { nama_rs, alamat = null, latitude, longitude, radius_meter = 200 } = req.body || {};
+    if (
+      typeof nama_rs !== 'string' ||
+      !nama_rs.trim() ||
+      !isValidHospitalCoords(latitude, longitude, radius_meter)
+    ) {
+      return res.status(400).json({ success: false, message: 'nama_rs, latitude, longitude, dan radius_meter wajib valid.' });
+    }
     const [result] = await pool.execute(
       'INSERT INTO hospitals (nama_rs, alamat, latitude, longitude, radius_meter) VALUES (?, ?, ?, ?, ?)',
       [nama_rs.trim(), alamat || null, Number(latitude), Number(longitude), Math.round(Number(radius_meter))]
@@ -39,11 +57,15 @@ router.post('/', authenticate, authorize('kabag'), async (req, res) => {
 });
 
 router.put('/:id', authenticate, authorize('kabag'), async (req, res) => {
-  const { nama_rs, alamat = null, latitude, longitude, radius_meter, is_active } = req.body;
-  if (!nama_rs?.trim() || !isNumber(latitude) || !isNumber(longitude) || !isNumber(radius_meter)) {
-    return res.status(400).json({ success: false, message: 'nama_rs, latitude, longitude, dan radius_meter wajib valid.' });
-  }
   try {
+    const { nama_rs, alamat = null, latitude, longitude, radius_meter, is_active } = req.body || {};
+    if (
+      typeof nama_rs !== 'string' ||
+      !nama_rs.trim() ||
+      !isValidHospitalCoords(latitude, longitude, radius_meter)
+    ) {
+      return res.status(400).json({ success: false, message: 'nama_rs, latitude, longitude, dan radius_meter wajib valid.' });
+    }
     const [result] = await pool.execute(
       `UPDATE hospitals SET nama_rs = ?, alamat = ?, latitude = ?, longitude = ?, radius_meter = ?,
        is_active = COALESCE(?, is_active) WHERE id = ?`,

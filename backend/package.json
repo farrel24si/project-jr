@@ -5,8 +5,9 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node server.js",
+    "dev": "node --watch server.js",
     "test": "node tests/unit_test.js && node tests/health_check_test.js",
-    "test:integration": "node tests/integration_mvp_test.js && node tests/crud_integration_test.js && node tests/manual_case_input_integration_test.js && node tests/soft_geofence_integration_test.js && node tests/referral_integration_test.js && node tests/notification_delivery_test.js"
+    "test:integration": "node tests/integration_mvp_test.js && node tests/crud_integration_test.js && node tests/manual_case_input_integration_test.js && node tests/soft_geofence_integration_test.js && node tests/referral_integration_test.js && node tests/notification_delivery_test.js && node tests/guarantee_fase1_integration_test.js"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.9",

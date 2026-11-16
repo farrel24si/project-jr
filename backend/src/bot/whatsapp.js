@@ -12,9 +12,11 @@ const { parseLaporanRS } = require('./parser');
 const { insertCaseWithRetry } = require('../services/caseCreation');
 const { notifyNewAssignment } = require('../services/notificationDelivery');
 
-const SESSION_DIR = path.resolve(process.cwd(), 'session_jr_bot');
+const SESSION_DIR = path.resolve(__dirname, '..', '..', 'session_jr_bot');
 let activeSocket = null;
 let whatsappConnected = false;
+let reconnectAttempts = 0;
+let reconnectTimer = null;
 
 // Template #FORMAT dasar — tanpa baris RS karena RS dideteksi dari nama grup.
 // Versi dengan baris RS dipakai untuk pesan DM/grup tidak dikenali.
@@ -22,24 +24,24 @@ const TEMPLATE_FORMAT_GRUP = `#LAPORLAKA
 Nama:
 NIK:
 Umur:
-Jenis Laka: Tunggal / Tidak Tunggal / Belum Diketahui
+Jenis Laka:
 Alamat:
-Tgl Laka: DD/MM/YYYY
-Tgl Masuk: DD/MM/YYYY
+Tgl Laka:
+Tgl Masuk:
 Kronologi:
-Status: Rawat Inap / Luka Ringan / Luka Berat / Meninggal Dunia / Selesai`;
+Status: Rawat Inap / Luka Ringan / Luka Berat / Meninggal Dunia`;
 
 const TEMPLATE_FORMAT_DM = `#LAPORLAKA
 RS: (nama rumah sakit sesuai daftar)
 Nama:
 NIK:
 Umur:
-Jenis Laka: Tunggal / Tidak Tunggal / Belum Diketahui
+Jenis Laka:
 Alamat:
-Tgl Laka: DD/MM/YYYY
-Tgl Masuk: DD/MM/YYYY
+Tgl Laka:
+Tgl Masuk:
 Kronologi:
-Status: Rawat Inap / Luka Ringan / Luka Berat / Meninggal Dunia / Selesai`;
+Status: Rawat Inap / Luka Ringan / Luka Berat / Meninggal Dunia`;
 
 function extractText(message) {
   if (!message) return '';
@@ -221,6 +223,14 @@ async function handleMessage(sock, msg) {
   // --------------------------------------------------------------- #LAPORLAKA
   if (!lowerText.includes('#laporlaka')) return;
 
+  // Laporan #LAPORLAKA dibatasi hanya dari Grup RS (kecuali ALLOW_DM_REPORTS=true)
+  if (!isGroup && process.env.ALLOW_DM_REPORTS !== 'true') {
+    await sock.sendMessage(jid, {
+      text: 'Laporan #LAPORLAKA hanya dapat dikirim melalui Grup WhatsApp Rumah Sakit yang terdaftar.'
+    }, { quoted: msg });
+    return;
+  }
+
   // Parse isi pesan lebih dulu — RS tidak wajib ada di teks karena bisa dari nama grup.
   // Parsing tidak menyentuh DB, jadi pesan invalid langsung ditolak tanpa query.
   const parsed = parseLaporanRS(text, { requireRumahSakit: false });
@@ -316,17 +326,17 @@ async function handleMessage(sock, msg) {
 
     const { tiket, caseId, visitId, assignedOfficer } = result;
 
+    const archiveNotice = result.case.status_pemantauan === 'Diarsipkan'
+      ? `\nTindak Lanjut: Diarsipkan — laka tunggal tidak ditindaklanjuti Jasa Raharja.`
+      : '';
     const replySuccess =
       `Laporan berhasil diterima!\n\n` +
       `Nomor Tiket: ${tiket}\n` +
       `Keterjaminan: ${result.case.status_keterjaminan}\n` +
       `Nama Korban: ${parsed.data.nama_korban}\n` +
       `RS: ${resolvedHospital.nama_rs}\n` +
-      `Status: ${parsed.data.status_kondisi}\n` +
-      `Batas Waktu Kunjungan ke-1: 72 jam ke depan.\n\n` +
-      (assignedOfficer
-        ? `Petugas: ${assignedOfficer.nama}`
-        : 'Belum ada petugas yang di-plotting untuk RS ini. Kabag akan menugaskan segera.');
+      `Status: ${parsed.data.status_kondisi}` +
+      archiveNotice;
 
     await sock.sendMessage(jid, { text: replySuccess }, { quoted: msg });
 
@@ -394,20 +404,31 @@ async function startWhatsAppBot() {
         whatsappConnected = false;
         activeSocket = null;
       }
+      try {
+        sock.ev.removeAllListeners();
+      } catch (_) {}
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
       console.log(
         `[WA-BOT] Koneksi terputus (status: ${statusCode}). Reconnect: ${shouldReconnect}`
       );
       if (shouldReconnect) {
-        startWhatsAppBot().catch((err) => {
-          console.error('[WA-BOT] Gagal reconnect:', err.message);
-        });
+        reconnectAttempts += 1;
+        const delayMs = Math.min(30000, 1000 * Math.pow(2, Math.min(reconnectAttempts - 1, 5)));
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          startWhatsAppBot().catch((err) => {
+            console.error('[WA-BOT] Gagal reconnect:', err.message);
+          });
+        }, delayMs);
       } else {
+        reconnectAttempts = 0;
         clearSession();
         console.log('[WA-BOT] Sesi WhatsApp sudah logout. Jalankan ulang server untuk tampilkan QR baru.');
       }
     } else if (connection === 'open') {
+      reconnectAttempts = 0;
       if (activeSocket === sock) whatsappConnected = true;
       console.log('[WA-BOT] WhatsApp bot berhasil terhubung.');
     } else if (connection === 'connecting' && activeSocket === sock) {

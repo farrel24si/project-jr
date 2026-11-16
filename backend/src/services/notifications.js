@@ -20,11 +20,11 @@ function buildWhatsAppJid(raw) {
 function formatDateTimeWib(date) {
   const d = date instanceof Date ? date : new Date(date);
   if (Number.isNaN(d.getTime())) return '-';
-  return d.toISOString().replace('T', ' ').slice(0, 19);
+  const wib = new Date(d.getTime() + 7 * 60 * 60 * 1000);
+  return `${wib.toISOString().replace('T', ' ').slice(0, 19)} WIB`;
 }
 
 function buildNewAssignmentMessage(data) {
-  const jadwal = formatDateTimeWib(data.scheduledAt);
   return (
     `*Pemberitahuan Tugas Baru Jasa Raharja*\n\n` +
     `Yth. Petugas: ${data.officerName || 'Petugas'}\n` +
@@ -33,7 +33,7 @@ function buildNewAssignmentMessage(data) {
     `- Korban: ${data.victimName}\n` +
     `- RS: ${data.hospitalName}\n` +
     `- Kondisi: ${data.condition || 'Rawat Inap'}\n` +
-    `- Batas Kunjungan ke-1: 72 Jam (${jadwal})\n\n` +
+    `- Batas Kunjungan ke-1: 72 Jam\n\n` +
     `Silakan lakukan kunjungan fisik dan submit laporan melalui sistem.`
   );
 }

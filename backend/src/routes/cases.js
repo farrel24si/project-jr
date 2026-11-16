@@ -4,6 +4,7 @@ const pool = require('../config/db');
 const { authenticate, authorize } = require('../middleware/auth');
 const { VALID_STATUSES, normalizeDateDDMMYYYY } = require('../bot/parser');
 const { insertCaseWithRetry } = require('../services/caseCreation');
+const { notifyNewAssignment } = require('../services/notificationDelivery');
 
 const OPTIONAL_FIELDS = [
   'nomor_laporan', 'ruangan_rs', 'nik', 'umur', 'jenis_kelamin', 'alamat',
@@ -12,7 +13,7 @@ const OPTIONAL_FIELDS = [
   'status_keterjaminan', 'no_gl', 'tgl_gl'
 ];
 
-const VALID_KETERJAMINAN = ['Belum Dikonfirmasi', 'Terjamin JR', 'Dialihkan ke BPJS'];
+const VALID_KETERJAMINAN = ['Belum Dikonfirmasi', 'Terjamin JR'];
 
 function validOptionalFields(body) {
   for (const field of ['tgl_laka', 'tgl_masuk', 'tgl_gl']) {
@@ -37,7 +38,7 @@ router.post('/', authenticate, authorize('kabag', 'petugas'), async (req, res) =
       return res.status(400).json({ success: false, message: 'hospital_id dan nama_korban wajib diisi.' });
     }
     if (!validOptionalFields(body)) {
-      const badDateField = ['tgl_laka', 'tgl_masuk'].find(
+      const badDateField = ['tgl_laka', 'tgl_masuk', 'tgl_gl'].find(
         (f) => body[f] !== undefined && body[f] !== null && normalizeDateDDMMYYYY(body[f]) === null
       );
       const message = badDateField
@@ -112,7 +113,7 @@ router.patch('/:caseId/referrals/:referralId/assignee', authenticate, authorize(
     await conn.beginTransaction();
 
     const [[caseData]] = await conn.execute(
-      'SELECT id, hospital_id, assigned_officer_id FROM cases WHERE id = ? FOR UPDATE',
+      'SELECT id, nomor_tiket, nama_korban, status_kondisi, hospital_id, assigned_officer_id FROM cases WHERE id = ? FOR UPDATE',
       [caseId]
     );
     if (!caseData) {
@@ -130,8 +131,10 @@ router.patch('/:caseId/referrals/:referralId/assignee', authenticate, authorize(
     }
 
     const [[plot]] = await conn.execute(
-      `SELECT o.id, o.nama FROM officer_hospitals oh
+      `SELECT o.id, o.nama, o.telepon, h.nama_rs AS target_hospital_nama
+       FROM officer_hospitals oh
        JOIN officers o ON o.id = oh.officer_id
+       JOIN hospitals h ON h.id = oh.hospital_id
        WHERE oh.hospital_id = ? AND oh.officer_id = ? AND oh.is_active = 1 AND o.is_active = 1`,
       [referral.target_hospital_id, officerId]
     );
@@ -142,6 +145,13 @@ router.patch('/:caseId/referrals/:referralId/assignee', authenticate, authorize(
         message: 'Petugas tidak memiliki plotting aktif di rumah sakit tujuan rujukan.'
       });
     }
+
+    const [[pendingVisit]] = await conn.execute(
+      `SELECT id, jadwal_kunjungan FROM visits
+       WHERE case_id = ? AND status_kunjungan = 'Menunggu'
+       ORDER BY kunjungan_ke DESC LIMIT 1`,
+      [caseId]
+    );
 
     await conn.execute(
       'UPDATE cases SET assigned_officer_id = ? WHERE id = ?',
@@ -154,6 +164,26 @@ router.patch('/:caseId/referrals/:referralId/assignee', authenticate, authorize(
     );
 
     await conn.commit();
+
+    // Kirim notifikasi DM WhatsApp ke petugas baru hasil override Kabag
+    if (plot.telepon && pendingVisit) {
+      const getSocket = req.app && typeof req.app.get === 'function' ? req.app.get('waSocket') : null;
+      const sock = typeof getSocket === 'function' ? getSocket() : null;
+      await notifyNewAssignment(sock, {
+        caseId,
+        visitId: pendingVisit.id,
+        officerId: plot.id,
+        officerName: plot.nama,
+        officerPhone: plot.telepon,
+        ticket: caseData.nomor_tiket,
+        victimName: caseData.nama_korban,
+        hospitalName: plot.target_hospital_nama,
+        condition: caseData.status_kondisi,
+        scheduledAt: pendingVisit.jadwal_kunjungan
+      }).catch((notifyErr) => {
+        console.error('[API] Gagal kirim notifikasi WA override rujukan:', notifyErr.message);
+      });
+    }
 
     return res.json({
       success: true,
@@ -282,7 +312,7 @@ router.get('/', authenticate, async (req, res) => {
         c.id, c.nomor_tiket, c.rumah_sakit, c.hospital_id,
         c.assigned_officer_id, ao.nama AS assigned_officer_nama,
         c.nama_korban, c.nik, c.umur, c.jenis_laka,
-        c.status_kondisi, c.status_keterjaminan, c.no_gl, c.tgl_gl, c.waktu_lapor_wa, c.created_at,
+        c.status_kondisi, c.status_pemantauan, c.status_keterjaminan, c.no_gl, c.tgl_gl, c.waktu_lapor_wa, c.created_at,
         h.nama_rs AS hospital_nama, h.latitude AS hospital_lat, h.longitude AS hospital_lng,
         h.radius_meter AS hospital_radius,
         COUNT(CASE WHEN v.status_kunjungan = 'Menunggu' THEN v.id END) AS tugas_menunggu,
@@ -296,7 +326,7 @@ router.get('/', authenticate, async (req, res) => {
       LEFT JOIN officers ao ON ao.id = c.assigned_officer_id
       LEFT JOIN visits v ON v.case_id = c.id
       ${whereClause}
-      GROUP BY c.id
+      GROUP BY c.id, h.id, ao.id
       ORDER BY c.waktu_lapor_wa DESC
     `, params);
 

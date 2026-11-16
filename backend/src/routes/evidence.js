@@ -4,7 +4,7 @@ const pool = require('../config/db');
 const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
-const uploadsDir = path.resolve(process.cwd(), 'uploads');
+const uploadsDir = path.resolve(__dirname, '..', '..', 'uploads');
 
 router.get('/:filename', authenticate, async (req, res) => {
   const filename = path.basename(req.params.filename);

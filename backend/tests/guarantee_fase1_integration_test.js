@@ -140,7 +140,17 @@ async function main() {
       jenis_laka: 'Tunggal',
       waktu_lapor_wa: new Date()
     });
-    assert.strictEqual(caseTunggal.case.status_keterjaminan, 'Dialihkan ke BPJS');
+    // Laka tunggal dicatat sebagai arsip: tanpa penugasan, visit, SLA, atau notif tugas.
+    assert.strictEqual(caseTunggal.case.status_keterjaminan, 'Belum Dikonfirmasi');
+    assert.strictEqual(caseTunggal.case.status_pemantauan, 'Diarsipkan');
+    assert.strictEqual(caseTunggal.case.assigned_officer_id, null);
+    assert.strictEqual(caseTunggal.assignedOfficer, null);
+    assert.strictEqual(caseTunggal.visitId, null);
+    assert.strictEqual(caseTunggal.visit, null);
+    const [[tunggalVisitCount]] = await pool.execute(
+      'SELECT COUNT(*) AS n FROM visits WHERE case_id = ?', [caseTunggal.caseId]
+    );
+    assert.strictEqual(tunggalVisitCount.n, 0);
 
     const caseDefault = await insertCaseWithRetry({
       hospital_id: fixture.hospitalId,
@@ -230,16 +240,22 @@ async function main() {
     assert.strictEqual(rowInDb.no_gl, 'GL/JR/001');
     assert.strictEqual(rowInDb.tgl_gl, '01/11/2026');
 
-    // 8. HTTP PATCH: kabag 200, update status to Dialihkan ke BPJS and clear GL fields
+    // 8. HTTP PATCH: kabag 200, reset status to Belum Dikonfirmasi and clear GL fields
     const kabagPatch = await request('PATCH', `/api/cases/${targetCaseId}/keterjaminan`, {
-      status_keterjaminan: 'Dialihkan ke BPJS',
+      status_keterjaminan: 'Belum Dikonfirmasi',
       no_gl: null,
       tgl_gl: null
     }, kabagToken);
     assert.strictEqual(kabagPatch.status, 200, JSON.stringify(kabagPatch.body));
-    assert.strictEqual(kabagPatch.body.data.status_keterjaminan, 'Dialihkan ke BPJS');
+    assert.strictEqual(kabagPatch.body.data.status_keterjaminan, 'Belum Dikonfirmasi');
     assert.strictEqual(kabagPatch.body.data.no_gl, null);
     assert.strictEqual(kabagPatch.body.data.tgl_gl, null);
+
+    // 8b. Nilai di luar enum (termasuk warisan 'Dialihkan ke BPJS') wajib ditolak 422
+    const bpjsPatch = await request('PATCH', `/api/cases/${targetCaseId}/keterjaminan`, {
+      status_keterjaminan: 'Dialihkan ke BPJS'
+    }, kabagToken);
+    assert.strictEqual(bpjsPatch.status, 422, JSON.stringify(bpjsPatch.body));
 
     // 9. HTTP PATCH: partial update (keep old no_gl / tgl_gl when not provided)
     // First set no_gl again

@@ -6,7 +6,7 @@
  * Atau dengan variabel environment:
  *   KABAG_USERNAME=admin KABAG_PASSWORD=rahasia node scripts/seed-kabag.js
  */
-require('dotenv').config();
+require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 const readline = require('readline');
 const bcrypt = require('bcryptjs');
 const pool = require('../src/config/db');

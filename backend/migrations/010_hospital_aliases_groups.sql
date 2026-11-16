@@ -3,8 +3,8 @@
 --   tidak bisa masuk di DB.
 -- - hospital_whatsapp_groups: binding JID grup global unik; JID tidak di-seed
 --   karena JID aktual belum diketahui bot.
--- - Seed alias `RS Prima` untuk RS Prima Pekanbaru hanya bila hospital ada.
---   Seed TIDAK mengaktifkan alias (is_active = 0); aktivasi dilakukan Kabag.
+-- - Seed alias RS aktif Pekanbaru secara idempotent (is_active = 1) hanya bila
+--   hospital tujuan sudah ada di tabel hospitals.
 -- Target: MySQL 8 / MariaDB. Idempotent, aman dijalankan berulang.
 -- Jalankan: mysql -u root -p db_monitoring_jr < migrations/010_hospital_aliases_groups.sql
 

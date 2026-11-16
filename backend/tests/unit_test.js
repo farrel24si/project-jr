@@ -61,6 +61,9 @@ function testBuildNewAssignmentMessage() {
   assert.match(message, /Budi Santoso/);
   assert.match(message, /RS Syafira Pekanbaru/);
   assert.match(message, /72 jam/i);
+  // Tidak ada timestamp absolut di DM tugas (tanggal detail hanya di pesan pengingat)
+  assert.doesNotMatch(message, /\d{4}-\d{2}-\d{2}/);
+  assert.doesNotMatch(message, /\d{2}:\d{2}:\d{2}/);
   console.log('PASS testBuildNewAssignmentMessage');
 }
 
@@ -106,9 +109,39 @@ function testBuildReminderMessage() {
   assert.match(msg, /PENGINGAT BATAS WAKTU KUNJUNGAN/i);
   assert.doesNotMatch(msg, /sisa waktu/i);
   assert.doesNotMatch(msg, /kunjungan pertama/i);
-  assert.match(msg, /Batas Kunjungan/);
+  assert.match(msg, /Batas Kunjungan: 2026-11-09 19:00:00 WIB/);
   assert.match(msg, /Segera lakukan kunjungan fisik/);
   console.log('PASS testBuildReminderMessage');
+}
+
+async function testHandleMessageRejectsDmReportUnlessAllowed() {
+  const pool = require('../src/config/db');
+  const originalExecute = pool.execute;
+  const prevAllowDm = process.env.ALLOW_DM_REPORTS;
+  delete process.env.ALLOW_DM_REPORTS;
+
+  pool.execute = async () => {
+    throw new Error('DB must not be touched when DM #LAPORLAKA is rejected');
+  };
+
+  const records = [];
+  const sock = {
+    sendMessage: async (jid, payload) => { records.push({ jid, payload }); }
+  };
+
+  try {
+    await handleMessage(sock, {
+      key: { remoteJid: '6281234567890@s.whatsapp.net', fromMe: false },
+      message: { conversation: '#LAPORLAKA\nRS: RS Syafira Pekanbaru\nNama: Korban DM' }
+    });
+    assert.strictEqual(records.length, 1);
+    assert.match(records[0].payload.text, /Grup WhatsApp Rumah Sakit/i);
+  } finally {
+    pool.execute = originalExecute;
+    if (prevAllowDm !== undefined) process.env.ALLOW_DM_REPORTS = prevAllowDm;
+    else delete process.env.ALLOW_DM_REPORTS;
+  }
+  console.log('PASS testHandleMessageRejectsDmReportUnlessAllowed');
 }
 
 function testParseValid() {
@@ -299,6 +332,55 @@ async function testHandleMessageInvalidParseShowsRealError() {
     pool.execute = originalExecute;
   }
   console.log('PASS testHandleMessageInvalidParseShowsRealError');
+}
+
+async function testFormatTemplateIsClean() {
+  const pool = require('../src/config/db');
+  const originalExecute = pool.execute;
+  // Path #FORMAT tidak boleh menyentuh DB.
+  pool.execute = async () => {
+    throw new Error('DB must not be touched on #FORMAT path');
+  };
+
+  const records = [];
+  const sock = {
+    sendMessage: async (jid, payload) => { records.push({ jid, payload }); }
+  };
+
+  try {
+    // Grup: template tanpa baris RS
+    await handleMessage(sock, {
+      key: { remoteJid: '123@g.us', participant: 'x@s.whatsapp.net', fromMe: false },
+      message: { conversation: '#FORMAT' }
+    });
+    assert.strictEqual(records.length, 1);
+    const grupText = records[0].payload.text;
+    assert.match(grupText, /^#LAPORLAKA/);
+    assert.match(grupText, /Jenis Laka:\n/);
+    assert.match(grupText, /Tgl Laka:\n/);
+    assert.match(grupText, /Tgl Masuk:\n/);
+    assert.match(grupText, /Status: Rawat Inap \/ Luka Ringan \/ Luka Berat \/ Meninggal Dunia$/);
+    assert.doesNotMatch(grupText, /Tunggal \/ Tidak Tunggal/);
+    assert.doesNotMatch(grupText, /DD\/MM\/YYYY/);
+    assert.doesNotMatch(grupText, /Selesai/);
+    assert.doesNotMatch(grupText, /^RS:/m);
+
+    // DM: template wajib ada baris RS
+    records.length = 0;
+    await handleMessage(sock, {
+      key: { remoteJid: '6281111111111@s.whatsapp.net', fromMe: false },
+      message: { conversation: '#format' }
+    });
+    assert.strictEqual(records.length, 1);
+    const dmText = records[0].payload.text;
+    assert.match(dmText, /^#LAPORLAKA\nRS: /);
+    assert.match(dmText, /Jenis Laka:\n/);
+    assert.doesNotMatch(dmText, /DD\/MM\/YYYY/);
+    assert.doesNotMatch(dmText, /Selesai/);
+  } finally {
+    pool.execute = originalExecute;
+  }
+  console.log('PASS testFormatTemplateIsClean');
 }
 
 function testParseValueWithColon() {
@@ -572,7 +654,7 @@ function testResolveHospitalFromGroup() {
 
 function testMapKeterjaminanFromJenisLaka() {
   assert.strictEqual(mapKeterjaminanFromJenisLaka('Tidak Tunggal'), 'Terjamin JR');
-  assert.strictEqual(mapKeterjaminanFromJenisLaka('Tunggal'), 'Dialihkan ke BPJS');
+  assert.strictEqual(mapKeterjaminanFromJenisLaka('Tunggal'), 'Belum Dikonfirmasi');
   assert.strictEqual(mapKeterjaminanFromJenisLaka('Belum Diketahui'), 'Belum Dikonfirmasi');
   assert.strictEqual(mapKeterjaminanFromJenisLaka(null), 'Belum Dikonfirmasi');
   assert.strictEqual(mapKeterjaminanFromJenisLaka(undefined), 'Belum Dikonfirmasi');
@@ -592,6 +674,7 @@ const tests = [
   testBuildNewAssignmentMessage,
   testDetermineReminderType,
   testBuildReminderMessage,
+  testHandleMessageRejectsDmReportUnlessAllowed,
   testParseValid,
   testNormalizeDateDDMMYYYY,
   testParseLaporanRSDateHandling,
@@ -600,6 +683,7 @@ const tests = [
   testParseLaporanRSNikOpsionalFullTemplateKey,
   testParseLaporanRSInvalidDateStillRejected,
   testHandleMessageInvalidParseShowsRealError,
+  testFormatTemplateIsClean,
   testParseValueWithColon,
   testParseKeyNormalization,
   testParseNikNonDigits,

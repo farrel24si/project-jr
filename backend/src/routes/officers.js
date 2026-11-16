@@ -8,10 +8,15 @@ const OFFICER_FIELDS = ['nama', 'nip', 'jabatan', 'wilayah', 'telepon', 'email']
 
 function pickOfficerPayload(body) {
   const payload = {};
+  if (!body || typeof body !== 'object') return payload;
   for (const field of OFFICER_FIELDS) {
     if (body[field] !== undefined) {
-      const value = typeof body[field] === 'string' ? body[field].trim() : body[field];
-      payload[field] = value === '' ? null : value;
+      if (body[field] !== null && typeof body[field] !== 'string') {
+        payload[field] = String(body[field]).trim();
+      } else {
+        const value = typeof body[field] === 'string' ? body[field].trim() : body[field];
+        payload[field] = value === '' ? null : value;
+      }
     }
   }
   return payload;
@@ -54,11 +59,11 @@ router.get('/:id', authenticate, async (req, res) => {
 });
 
 router.post('/', authenticate, authorize('kabag'), async (req, res) => {
-  const payload = pickOfficerPayload(req.body);
-  if (!payload.nama) {
-    return res.status(400).json({ success: false, message: 'nama petugas wajib diisi.' });
-  }
   try {
+    const payload = pickOfficerPayload(req.body);
+    if (!payload.nama) {
+      return res.status(400).json({ success: false, message: 'nama petugas wajib diisi.' });
+    }
     const [result] = await pool.execute(
       'INSERT INTO officers (nama, nip, jabatan, wilayah, telepon, email) VALUES (?, ?, ?, ?, ?, ?)',
       [payload.nama, payload.nip || null, payload.jabatan || null, payload.wilayah || null,
@@ -76,16 +81,25 @@ router.post('/', authenticate, authorize('kabag'), async (req, res) => {
 });
 
 router.put('/:id', authenticate, authorize('kabag'), async (req, res) => {
-  const payload = pickOfficerPayload(req.body);
-  if (Object.keys(payload).length === 0 && typeof req.body.is_active !== 'boolean') {
-    return res.status(400).json({ success: false, message: 'Tidak ada field yang diubah.' });
-  }
-  if (payload.nama !== undefined && !payload.nama) {
-    return res.status(400).json({ success: false, message: 'nama petugas tidak boleh kosong.' });
-  }
+  let conn;
   try {
-    const [[existing]] = await pool.execute('SELECT id FROM officers WHERE id = ?', [req.params.id]);
-    if (!existing) return res.status(404).json({ success: false, message: 'Petugas tidak ditemukan.' });
+    const body = req.body || {};
+    const payload = pickOfficerPayload(body);
+    if (Object.keys(payload).length === 0 && typeof body.is_active !== 'boolean') {
+      return res.status(400).json({ success: false, message: 'Tidak ada field yang diubah.' });
+    }
+    if (payload.nama !== undefined && !payload.nama) {
+      return res.status(400).json({ success: false, message: 'nama petugas tidak boleh kosong.' });
+    }
+
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+
+    const [[existing]] = await conn.execute('SELECT id FROM officers WHERE id = ? FOR UPDATE', [req.params.id]);
+    if (!existing) {
+      await conn.rollback();
+      return res.status(404).json({ success: false, message: 'Petugas tidak ditemukan.' });
+    }
 
     const setClauses = [];
     const values = [];
@@ -93,40 +107,54 @@ router.put('/:id', authenticate, authorize('kabag'), async (req, res) => {
       setClauses.push(`${field} = ?`);
       values.push(value);
     }
-    if (typeof req.body.is_active === 'boolean') {
+    if (typeof body.is_active === 'boolean') {
       setClauses.push('is_active = ?');
-      values.push(req.body.is_active ? 1 : 0);
+      values.push(body.is_active ? 1 : 0);
     }
     values.push(req.params.id);
 
-    await pool.execute(`UPDATE officers SET ${setClauses.join(', ')} WHERE id = ?`, values);
+    await conn.execute(`UPDATE officers SET ${setClauses.join(', ')} WHERE id = ?`, values);
 
-    // Petugas dinonaktifkan -> akun login-nya ikut dinonaktifkan.
-    if (req.body.is_active === false) {
-      await pool.execute('UPDATE users SET is_active = 0 WHERE officer_id = ?', [req.params.id]);
+    // Petugas dinonaktifkan -> akun login-nya ikut dinonaktifkan secara atomik.
+    if (body.is_active === false) {
+      await conn.execute('UPDATE users SET is_active = 0 WHERE officer_id = ?', [req.params.id]);
     }
 
-    const [[officer]] = await pool.execute('SELECT * FROM officers WHERE id = ?', [req.params.id]);
+    const [[officer]] = await conn.execute('SELECT * FROM officers WHERE id = ?', [req.params.id]);
+    await conn.commit();
     res.json({ success: true, data: officer });
   } catch (err) {
+    if (conn) await conn.rollback();
     if (err.code === 'ER_DUP_ENTRY') {
       return res.status(409).json({ success: false, message: 'NIP atau email petugas sudah terdaftar.' });
     }
     console.error('[API] PUT /officers error:', err);
     res.status(500).json({ success: false, message: 'Gagal mengubah data petugas.' });
+  } finally {
+    if (conn) conn.release();
   }
 });
 
 // Soft delete: riwayat kunjungan tetap valid.
 router.delete('/:id', authenticate, authorize('kabag'), async (req, res) => {
+  let conn;
   try {
-    const [result] = await pool.execute('UPDATE officers SET is_active = 0 WHERE id = ?', [req.params.id]);
-    if (!result.affectedRows) return res.status(404).json({ success: false, message: 'Petugas tidak ditemukan.' });
-    await pool.execute('UPDATE users SET is_active = 0 WHERE officer_id = ?', [req.params.id]);
+    conn = await pool.getConnection();
+    await conn.beginTransaction();
+    const [result] = await conn.execute('UPDATE officers SET is_active = 0 WHERE id = ?', [req.params.id]);
+    if (!result.affectedRows) {
+      await conn.rollback();
+      return res.status(404).json({ success: false, message: 'Petugas tidak ditemukan.' });
+    }
+    await conn.execute('UPDATE users SET is_active = 0 WHERE officer_id = ?', [req.params.id]);
+    await conn.commit();
     res.json({ success: true, message: 'Petugas dinonaktifkan.' });
   } catch (err) {
+    if (conn) await conn.rollback();
     console.error('[API] DELETE /officers error:', err);
     res.status(500).json({ success: false, message: 'Gagal menonaktifkan petugas.' });
+  } finally {
+    if (conn) conn.release();
   }
 });
 
@@ -163,14 +191,18 @@ router.get('/:id/hospitals', authenticate, async (req, res) => {
 
 // POST /api/officers/:officerId/hospitals — hubungkan petugas ke RS
 router.post('/:officerId/hospitals', authenticate, authorize('kabag'), async (req, res) => {
-  const { hospital_id, is_primary = false } = req.body;
-  const officerId = req.params.officerId;
-
-  if (!Number.isInteger(Number(hospital_id))) {
-    return res.status(400).json({ success: false, message: 'hospital_id wajib diisi dengan angka.' });
-  }
-
   try {
+    const { hospital_id, is_primary = false } = req.body || {};
+    const officerId = req.params.officerId;
+    const parsedHospitalId =
+      hospital_id !== '' && hospital_id !== null && typeof hospital_id !== 'boolean' && !Array.isArray(hospital_id)
+        ? Number(hospital_id)
+        : NaN;
+
+    if (!Number.isInteger(parsedHospitalId) || parsedHospitalId <= 0) {
+      return res.status(400).json({ success: false, message: 'hospital_id wajib diisi dengan angka.' });
+    }
+
     const [[officer]] = await pool.execute(
       'SELECT id, is_active FROM officers WHERE id = ?',
       [officerId]
@@ -181,7 +213,7 @@ router.post('/:officerId/hospitals', authenticate, authorize('kabag'), async (re
 
     const [[hospital]] = await pool.execute(
       'SELECT id, is_active FROM hospitals WHERE id = ?',
-      [hospital_id]
+      [parsedHospitalId]
     );
     if (!hospital || !hospital.is_active) {
       return res.status(404).json({ success: false, message: 'Rumah sakit tidak ditemukan atau nonaktif.' });
@@ -196,7 +228,7 @@ router.post('/:officerId/hospitals', authenticate, authorize('kabag'), async (re
          is_active = 1,
          ended_at = NULL,
          assigned_at = NOW()`,
-      [officerId, Number(hospital_id), is_primary ? 1 : 0]
+      [officerId, parsedHospitalId, is_primary ? 1 : 0]
     );
 
     const [[row]] = await pool.execute(
@@ -204,7 +236,7 @@ router.post('/:officerId/hospitals', authenticate, authorize('kabag'), async (re
        FROM officer_hospitals oh
        JOIN hospitals h ON h.id = oh.hospital_id
        WHERE oh.officer_id = ? AND oh.hospital_id = ?`,
-      [officerId, Number(hospital_id)]
+      [officerId, parsedHospitalId]
     );
     res.status(result.affectedRows === 1 ? 201 : 200).json({ success: true, data: row });
   } catch (err) {

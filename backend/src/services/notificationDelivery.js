@@ -243,19 +243,6 @@ async function scanAndSendReminders(sock, options = {}) {
       continue;
     }
 
-    // Cek apakah tipe ini sudah pernah terkirim untuk visit_id DAN petugas ini
-    const [[alreadySent]] = await pool.query(
-      `SELECT id FROM notification_logs
-       WHERE visit_id = ? AND officer_id = ? AND notification_type = ? AND delivery_status = 'SENT'
-       LIMIT 1`,
-      [v.visit_id, v.assigned_officer_id, reminderType]
-    );
-
-    if (alreadySent) {
-      skipped += 1;
-      continue;
-    }
-
     const text = buildReminderMessage({
       officerName: v.officer_nama,
       ticket: v.nomor_tiket,
@@ -265,6 +252,7 @@ async function scanAndSendReminders(sock, options = {}) {
       scheduledAt: v.jadwal_kunjungan
     });
 
+    // reserveNotification menangani deduplikasi secara atomik berdasarkan unique key
     const reserved = await reserveNotification({
       caseId: v.case_id,
       visitId: v.visit_id,

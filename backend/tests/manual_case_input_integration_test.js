@@ -130,7 +130,7 @@ async function main() {
       nik: '1234567890123456', umur: 32, jenis_kelamin: 'Perempuan',
       alamat: 'Alamat uji', telepon_korban: '08123456789', tgl_laka: '1/1/2026',
       tgl_masuk: '2/1/2026', kronologi: 'Uji HTTP',
-      jenis_laka: 'Tunggal', status_kondisi: 'Rawat Inap',
+      jenis_laka: 'Tidak Tunggal', status_kondisi: 'Rawat Inap',
       assigned_officer_id: fixture.otherOfficerId,
       officer_id: fixture.otherOfficerId
     };
@@ -148,7 +148,25 @@ async function main() {
     const diffHours = (new Date(kabagCreate.body.data.visit.jadwal_kunjungan).getTime() - new Date(kabagCreate.body.data.case.waktu_lapor_wa).getTime()) / (60 * 60 * 1000);
     assert.equal(Math.round(diffHours), 72);
 
-    // 3. Kabag creates case for unplotted hospital: remains unassigned
+    // 3. Laka tunggal dicatat sebagai arsip: tanpa assignment atau kunjungan/SLA.
+    const tunggalArchive = await request('POST', '/api/cases', {
+      hospital_id: fixture.hospitalId,
+      nama_korban: 'Korban Tunggal Arsip',
+      jenis_laka: 'Tunggal',
+      status_kondisi: 'Luka Ringan'
+    }, kabagToken);
+    assert.equal(tunggalArchive.status, 201, JSON.stringify(tunggalArchive.body));
+    assert.equal(tunggalArchive.body.data.case.status_keterjaminan, 'Belum Dikonfirmasi');
+    assert.equal(tunggalArchive.body.data.case.status_pemantauan, 'Diarsipkan');
+    assert.equal(tunggalArchive.body.data.case.assigned_officer_id, null);
+    assert.equal(tunggalArchive.body.data.assigned_officer, null);
+    assert.equal(tunggalArchive.body.data.visit, null);
+    const [[archiveVisitCount]] = await pool.execute(
+      'SELECT COUNT(*) AS n FROM visits WHERE case_id = ?', [tunggalArchive.body.data.case.id]
+    );
+    assert.equal(archiveVisitCount.n, 0);
+
+    // 4. Kabag creates case for unplotted hospital: remains unassigned
     const unplottedCreate = await request('POST', '/api/cases', {
       hospital_id: fixture.unplottedHospitalId,
       nama_korban: 'Korban Tanpa Plotting'

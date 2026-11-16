@@ -1,29 +1,33 @@
 const pool = require('../config/db');
 const { generateNomorTiket } = require('../bot/parser');
 
+const TERMINAL_STATUSES = ['Selesai', 'Meninggal Dunia', 'Sudah Pulang'];
+
 /**
  * Mapping otomatis status keterjaminan dari jenis laka (aturan Jasa Raharja):
  *   'Tidak Tunggal' -> 'Terjamin JR'
- *   'Tunggal'       -> 'Dialihkan ke BPJS'
+ *   'Tunggal'       -> 'Belum Dikonfirmasi' (keputusan Kabag; tidak ada jalur BPJS di sistem)
  *   selain itu      -> 'Belum Dikonfirmasi'
  * @param {string|null|undefined} jenisLaka
  * @returns {string}
  */
 function mapKeterjaminanFromJenisLaka(jenisLaka) {
   if (jenisLaka === 'Tidak Tunggal') return 'Terjamin JR';
-  if (jenisLaka === 'Tunggal') return 'Dialihkan ke BPJS';
   return 'Belum Dikonfirmasi';
 }
 
 async function findOfficerForHospital(conn, hospitalId) {
   if (!hospitalId) return null;
   const [[officer]] = await conn.execute(
-    `SELECT oh.officer_id, o.nama, o.telepon
+    `SELECT oh.officer_id, oh.officer_id AS id, o.nama, o.telepon
      FROM officer_hospitals oh
      JOIN officers o ON o.id = oh.officer_id
      WHERE oh.hospital_id = ? AND oh.is_active = 1 AND o.is_active = 1
      ORDER BY oh.is_primary DESC,
-       (SELECT COUNT(*) FROM cases c WHERE c.assigned_officer_id = o.id) ASC,
+       (SELECT COUNT(*) FROM cases c
+        WHERE c.assigned_officer_id = o.id
+          AND c.status_pemantauan NOT IN ('Selesai Dipantau', 'Diarsipkan')
+          AND c.status_kondisi NOT IN ('Selesai', 'Meninggal Dunia', 'Sudah Pulang')) ASC,
        o.id ASC
      LIMIT 1`,
     [hospitalId]
@@ -32,6 +36,7 @@ async function findOfficerForHospital(conn, hospitalId) {
 }
 
 async function insertCaseWithRetry(payload, options = {}, maxRetry = 5) {
+  const isArchivedTunggal = payload.jenis_laka === 'Tunggal';
   let attempt = 0;
   while (attempt < maxRetry) {
     attempt += 1;
@@ -41,9 +46,9 @@ async function insertCaseWithRetry(payload, options = {}, maxRetry = 5) {
       await conn.beginTransaction();
 
       let officer = null;
-      if (options.assignedOfficer) {
+      if (!isArchivedTunggal && options.assignedOfficer) {
         officer = options.assignedOfficer;
-      } else if (options.autoAssign) {
+      } else if (!isArchivedTunggal && options.autoAssign) {
         officer = await findOfficerForHospital(conn, payload.hospital_id);
       }
 
@@ -53,10 +58,10 @@ async function insertCaseWithRetry(payload, options = {}, maxRetry = 5) {
         `INSERT INTO cases (
           nomor_tiket, nomor_laporan, rumah_sakit, hospital_id, ruangan_rs,
           nama_korban, nik, umur, jenis_kelamin, alamat, telepon_korban,
-          tgl_laka, tgl_masuk, kronologi, jenis_laka, status_kondisi,
+          tgl_laka, tgl_masuk, kronologi, jenis_laka, status_kondisi, status_pemantauan,
           status_keterjaminan, no_gl, tgl_gl,
           no_pelapor_wa, waktu_lapor_wa, assigned_officer_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           tiket,
           payload.nomor_laporan || null,
@@ -74,6 +79,7 @@ async function insertCaseWithRetry(payload, options = {}, maxRetry = 5) {
           payload.kronologi || null,
           payload.jenis_laka || 'Belum Diketahui',
           payload.status_kondisi || 'Rawat Inap',
+          isArchivedTunggal ? 'Diarsipkan' : 'Belum Dikunjungi',
           payload.status_keterjaminan || mapKeterjaminanFromJenisLaka(payload.jenis_laka || 'Belum Diketahui'),
           payload.no_gl || null,
           payload.tgl_gl || null,
@@ -84,17 +90,21 @@ async function insertCaseWithRetry(payload, options = {}, maxRetry = 5) {
       );
 
       const caseId = caseResult.insertId;
+      let visitId = null;
+      let visitRow = null;
 
-      const [visitResult] = await conn.execute(
-        `INSERT INTO visits (
-          case_id, kunjungan_ke, jadwal_kunjungan, status_kunjungan
-        ) VALUES (?, 1, DATE_ADD(?, INTERVAL 72 HOUR), 'Menunggu')`,
-        [caseId, payload.waktu_lapor_wa]
-      );
-      const visitId = visitResult.insertId;
+      if (!isArchivedTunggal) {
+        const [visitResult] = await conn.execute(
+          `INSERT INTO visits (
+            case_id, kunjungan_ke, jadwal_kunjungan, status_kunjungan
+          ) VALUES (?, 1, DATE_ADD(?, INTERVAL 72 HOUR), 'Menunggu')`,
+          [caseId, payload.waktu_lapor_wa]
+        );
+        visitId = visitResult.insertId;
+        [[visitRow]] = await conn.execute('SELECT * FROM visits WHERE id = ?', [visitId]);
+      }
 
       const [[caseRow]] = await conn.execute('SELECT * FROM cases WHERE id = ?', [caseId]);
-      const [[visitRow]] = await conn.execute('SELECT * FROM visits WHERE id = ?', [visitId]);
 
       await conn.commit();
       return {
@@ -124,6 +134,7 @@ async function insertCaseWithRetry(payload, options = {}, maxRetry = 5) {
 }
 
 module.exports = {
+  TERMINAL_STATUSES,
   mapKeterjaminanFromJenisLaka,
   findOfficerForHospital,
   insertCaseWithRetry

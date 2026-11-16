@@ -25,21 +25,21 @@ router.get('/', async (req, res) => {
 });
 
 router.post('/', async (req, res) => {
-  const { username, password, role = 'petugas', officer_id = null } = req.body;
-
-  if (!username?.trim() || !password) {
-    return res.status(400).json({ success: false, message: 'username dan password wajib diisi.' });
-  }
-
-  if (!['kabag', 'petugas'].includes(role)) {
-    return res.status(400).json({ success: false, message: 'role harus kabag atau petugas.' });
-  }
-
-  if (role === 'petugas' && !officer_id) {
-    return res.status(400).json({ success: false, message: 'Akun petugas wajib dihubungkan ke officer_id.' });
-  }
-
   try {
+    const { username, password, role = 'petugas', officer_id = null } = req.body || {};
+
+    if (typeof username !== 'string' || typeof password !== 'string' || !username.trim() || !password) {
+      return res.status(400).json({ success: false, message: 'username dan password wajib diisi.' });
+    }
+
+    if (!['kabag', 'petugas'].includes(role)) {
+      return res.status(400).json({ success: false, message: 'role harus kabag atau petugas.' });
+    }
+
+    if (role === 'petugas' && !officer_id) {
+      return res.status(400).json({ success: false, message: 'Akun petugas wajib dihubungkan ke officer_id.' });
+    }
+
     if (officer_id) {
       const [[officer]] = await pool.execute('SELECT id, is_active FROM officers WHERE id = ?', [officer_id]);
       if (!officer || !officer.is_active) {
@@ -67,16 +67,38 @@ router.post('/', async (req, res) => {
 });
 
 router.put('/:id', async (req, res) => {
-  const { password, role, officer_id, is_active } = req.body;
-  const userId = req.params.id;
-
   try {
+    const { password, role, officer_id, is_active } = req.body || {};
+    const userId = req.params.id;
+
     const [[existing]] = await pool.execute('SELECT * FROM users WHERE id = ?', [userId]);
     if (!existing) return res.status(404).json({ success: false, message: 'User tidak ditemukan.' });
 
     // Jangan izinkan kabag menonaktifkan akun sendiri
     if (String(req.user.userId) === String(userId) && is_active === false) {
       return res.status(400).json({ success: false, message: 'Tidak dapat menonaktifkan akun sendiri.' });
+    }
+
+    if (role !== undefined && !['kabag', 'petugas'].includes(role)) {
+      return res.status(400).json({ success: false, message: 'role harus kabag atau petugas.' });
+    }
+
+    if (password !== undefined && (typeof password !== 'string' || !password)) {
+      return res.status(400).json({ success: false, message: 'password tidak valid.' });
+    }
+
+    const effectiveRole = role !== undefined ? role : existing.role;
+    const effectiveOfficerId = officer_id !== undefined ? (officer_id || null) : existing.officer_id;
+
+    if (effectiveRole === 'petugas' && !effectiveOfficerId) {
+      return res.status(400).json({ success: false, message: 'Akun petugas wajib dihubungkan ke officer_id.' });
+    }
+
+    if (officer_id !== undefined && officer_id !== null) {
+      const [[officer]] = await pool.execute('SELECT id, is_active FROM officers WHERE id = ?', [officer_id]);
+      if (!officer || !officer.is_active) {
+        return res.status(400).json({ success: false, message: 'Petugas tidak ditemukan atau nonaktif.' });
+      }
     }
 
     const sets = [];

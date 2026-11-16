@@ -140,9 +140,10 @@ Dokumen acuan integrasi untuk tim pengembang Frontend. Menggantikan mock `localS
         "nama_korban": "Budi Setiawan",
         "nik": "1471012345678901",
         "umur": 34,
-        "jenis_laka": "Tunggal",
+        "jenis_laka": "Tidak Tunggal",
         "status_kondisi": "Rawat Inap",
-        "status_keterjaminan": "Dialihkan ke BPJS",
+        "status_pemantauan": "Pemantauan Aktif",
+        "status_keterjaminan": "Terjamin JR",
         "no_gl": null,
         "tgl_gl": null,
         "waktu_lapor_wa": "2026-11-08T15:20:00.000Z",
@@ -261,18 +262,19 @@ Dokumen acuan integrasi untuk tim pengembang Frontend. Menggantikan mock `localS
   }
   ```
   Field baru (Fase 1 GL, semuanya opsional):
-  - `status_keterjaminan`: `'Belum Dikonfirmasi'` / `'Terjamin JR'` / `'Dialihkan ke BPJS'`.
+  - `status_keterjaminan`: `'Belum Dikonfirmasi'` / `'Terjamin JR'`.
     Bila dikosongkan, backend memetakan otomatis dari `jenis_laka`:
-    `Tidak Tunggal` → `Terjamin JR`; `Tunggal` → `Dialihkan ke BPJS`; lainnya → `Belum Dikonfirmasi`.
+    `Tidak Tunggal` → `Terjamin JR`; lainnya (termasuk `Tunggal`) → `Belum Dikonfirmasi` (Kabag yang mengonfirmasi). Sistem ini khusus Jasa Raharja — tidak ada status BPJS.
   - `no_gl` (maks 50 karakter), `tgl_gl` (format `DD/MM/YYYY`, tersimpan kanonis).
 - **Aturan Bisnis & Validasi**:
   1. `hospital_id` dan `nama_korban` wajib diisi (`400 Bad Request` bila kosong).
   2. `hospital_id` harus ada dan berstatus aktif (`404 Not Found` bila tidak aktif/tidak ada).
   3. Field opsional divalidasi: `nik` 16 digit angka, `jenis_kelamin` (`'Laki-laki'` / `'Perempuan'`), `jenis_laka` (`'Tunggal'` / `'Tidak Tunggal'` / `'Belum Diketahui'`), `status_kondisi` sesuai daftar status valid (`422 Unprocessable Entity` bila tidak cocok).
   4. Role `kabag`: Sistem otomatis memilih petugas yang di-plotting untuk RS tersebut (prioritas `is_primary`, lalu beban kasus aktif terkecil). Jika RS belum di-plotting, kasus tetap dibuat dengan `assigned_officer_id = null`.
-  5. Role `petugas`: Petugas HANYA boleh menginput untuk RS yang aktif di-plotting ke dirinya (`403 Forbidden` jika RS di luar plotting tugasnya). Kasus otomatis di-assign ke petugas penginput.
-  6. Field `assigned_officer_id` atau `officer_id` pada request body diabaikan untuk mencegah eskalasi wewenang.
-  7. Backend otomatis membuat nomor tiket unik `JR-XXXXXX` dan menjadwalkan visit ke-1 dengan batas SLA 72 jam ke depan dalam 1 transaksi database.
+  5. **Khusus `jenis_laka: 'Tunggal'`:** laporan disimpan sebagai arsip dengan `status_pemantauan: 'Diarsipkan'`, `assigned_officer_id: null`, dan `visit: null`. Backend tidak menjadwalkan kunjungan, SLA, atau notifikasi tugas. Arsip hanya terlihat untuk Kabag, bukan daftar tugas petugas.
+  6. Role `petugas`: Petugas HANYA boleh menginput untuk RS yang aktif di-plotting ke dirinya (`403 Forbidden` jika RS di luar plotting tugasnya). Untuk selain laka tunggal, kasus otomatis di-assign ke petugas penginput.
+  7. Field `assigned_officer_id` atau `officer_id` pada request body diabaikan untuk mencegah eskalasi wewenang.
+  8. Untuk selain laka tunggal, backend otomatis membuat nomor tiket unik `JR-XXXXXX` dan menjadwalkan visit ke-1 dengan batas SLA 72 jam ke depan dalam 1 transaksi database.
 - **Response 201 Created**:
   ```json
   {
@@ -332,7 +334,7 @@ Dokumen acuan integrasi untuk tim pengembang Frontend. Menggantikan mock `localS
   }
   ```
 - **Aturan**:
-  1. `status_keterjaminan` wajib dan harus salah satu: `'Belum Dikonfirmasi'`, `'Terjamin JR'`, `'Dialihkan ke BPJS'` (`422` bila tidak).
+  1. `status_keterjaminan` wajib dan harus salah satu: `'Belum Dikonfirmasi'`, `'Terjamin JR'` (`422` bila tidak; `'Dialihkan ke BPJS'` sudah tidak valid).
   2. `no_gl` opsional, maks 50 karakter; kirim `null` untuk mengosongkan. `tgl_gl` opsional format `DD/MM/YYYY` (tersimpan kanonis); format salah `422`.
   3. Field yang tidak dikirim tidak berubah (partial update).
   4. Petugas hanya boleh update kasus miliknya (`403` bila bukan assignee); Kabag bebas. Kasus tidak ada `404`.
@@ -386,7 +388,7 @@ Dokumen acuan integrasi untuk tim pengembang Frontend. Menggantikan mock `localS
   4. Auto-Next Visit: Bila `status_kondisi_terbaru` BUKAN status terminal (`'Selesai'`, `'Meninggal Dunia'`, `'Sudah Pulang'`), backend otomatis menjadwalkan kunjungan lanjutan ke-N+1 (`jadwal_kunjungan = waktu_submit + 72 Jam / 3 Hari`).
   5. Khusus `'Dirujuk ke RS Lain'`:
      - `rujukan_hospital_id` wajib; ditolak `422` bila kosong, sama dengan RS kasus, atau RS tujuan tidak aktif.
-     - Dalam satu transaksi: visit sumber dicatat selesai, `cases.hospital_id`/`rumah_sakit`/`status_kondisi` pindah ke RS tujuan, petugas RS tujuan ter-assign otomatis (prioritas `is_primary`, beban terendah). Bila RS tujuan tidak punya plotting aktif, kasus tetap pindah dengan `assigned_officer_id = null` (respons `referral.unassigned = true`; Kabag dapat override).
+     - Dalam satu transaksi: visit sumber dicatat selesai, `cases.hospital_id`/`rumah_sakit`/`status_kondisi` pindah ke RS tujuan, petugas RS tujuan ter-assign otomatis (prioritas `is_primary`, beban kasus aktif terendah) dan menerima notifikasi DM WhatsApp otomatis. Bila RS tujuan tidak punya plotting aktif, kasus tetap pindah dengan `assigned_officer_id = null` (respons `referral.unassigned = true`; Kabag dapat override).
      - Visit baru ke-N+1 dibuat dengan SLA 72 jam sejak waktu rujukan, kecuali status terminal.
      - Tiket kasus `nomor_tiket` tidak berubah; riwayat tersimpan di tabel `case_referrals` (tampil di `GET /cases/:id`).
      - Follow-up kunjungan di RS asal otomatis berhenti.
@@ -443,7 +445,7 @@ Dokumen acuan integrasi untuk tim pengembang Frontend. Menggantikan mock `localS
 - **Aturan**:
   1. Hanya mengubah `cases.assigned_officer_id` dan `case_referrals.new_officer_id`; field lain diabaikan.
   2. `officer_id` wajib berupa ID valid dan petugas harus punya plotting aktif (`officer_hospitals.is_active = 1`) di RS tujuan rujukan (`422` bila tidak).
-  3. `previous_officer_id` di riwayat tetap menyimpan petugas asal.
+  3. `previous_officer_id` di riwayat tetap menyimpan petugas asal. Petugas baru yang dipilih akan menerima notifikasi DM WhatsApp otomatis untuk kunjungan aktif pada RS tujuan.
 - **Response 200 OK**:
   ```json
   {
@@ -498,7 +500,7 @@ Semua endpoint memerlukan role `kabag`.
 ---
 
 ## 6. Penanganan Notifikasi & SLA (Sisi Background)
-- Ketika laporan masuk dari WhatsApp grup RS, sistem backend otomatis menugaskan petugas sesuai plotting RS dan mengirim pesan notifikasi ke WhatsApp nomor petugas (`62...`).
+- Ketika laporan masuk dari WhatsApp grup RS, sistem backend otomatis menugaskan petugas sesuai plotting RS dan mengirim pesan notifikasi ke WhatsApp nomor petugas (`62...`) — **kecuali laka tunggal**. Laka tunggal disimpan sebagai `Diarsipkan`, tanpa penugasan, kunjungan, SLA, atau notifikasi tugas.
 - Petugas akan menerima pesan pengingat otomatis di WhatsApp saat sisa waktu SLA kunjungan berada di batas:
   - 24 Jam sebelum batas waktu.
   - 12 Jam sebelum batas waktu.
@@ -514,17 +516,17 @@ Bagian ini merangkum aturan bisnis & validasi wajib untuk komponen UI frontend a
 > **Penting:** Aplikasi ini TIDAK mengelola perhitungan biaya/plafon. Monitoring biaya ditangani aplikasi lain (JR-Care). Sistem ini hanya menyimpan status keterjaminan, nomor GL, dan tanggal GL — tanpa nominal rupiah. Jangan buat form input biaya/kuitansi di frontend.
 
 ### 7.1 Keterjaminan & Data GL (hanya teks, tanpa angka biaya)
-1. `cases.status_keterjaminan` bernilai salah satu dari: `'Belum Dikonfirmasi'`, `'Terjamin JR'`, `'Dialihkan ke BPJS'`.
+1. `cases.status_keterjaminan` bernilai salah satu dari: `'Belum Dikonfirmasi'`, `'Terjamin JR'`. Tidak ada status BPJS — sistem ini khusus Jasa Raharja.
 2. Ubah status + data GL lewat `PATCH /cases/:id/keterjaminan` (partial update, field yang tidak dikirim tidak berubah).
 3. Field yang boleh diisi di UI:
-   - `status_keterjaminan` (dropdown 3 nilai di atas)
+   - `status_keterjaminan` (dropdown 2 nilai di atas)
    - `no_gl` (input teks, maks 50 karakter; kirim `null` untuk mengosongkan)
    - `tgl_gl` (input tanggal `DD/MM/YYYY`; format salah ditolak `422`)
 4. Tampilkan badge keterjaminan di list & detail kasus. Contoh warna yang disarankan:
    - `Terjamin JR` — hijau
-   - `Dialihkan ke BPJS` — biru
    - `Belum Dikonfirmasi` — abu-abu/kuning
 5. Tombol/label "GL sudah terbit" cukup dicek dari `no_gl` tidak null. Tidak ada plafon, sisa saldo, atau status habis plafon di sistem ini.
+6. **Laka tunggal:** backend mengembalikan `status_pemantauan: 'Diarsipkan'`, `assigned_officer_id: null`, dan tidak ada visit/SLA. Tampilkan badge abu-abu `Diarsipkan — tidak ditindaklanjuti JR`; jangan tampilkan sebagai tugas aktif atau form kunjungan. Arsip hanya muncul pada daftar Kabag.
 
 ### 7.2 Tampilan Gambar Bukti Kunjungan (`/uploads/:filename`)
 - Jangan pakai `<img src="/uploads/..." />` langsung — endpoint butuh header `Authorization: Bearer <token>`.

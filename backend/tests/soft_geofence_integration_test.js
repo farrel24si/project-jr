@@ -72,7 +72,7 @@ async function cleanup() {
   if (server) await new Promise((resolve) => server.close(resolve));
 
   if (fixture.photoUrl) {
-    await fs.promises.unlink(path.resolve(process.cwd(), `.${fixture.photoUrl}`)).catch(() => {});
+    await fs.promises.unlink(path.resolve(__dirname, '..', `.${fixture.photoUrl}`)).catch(() => {});
   }
   if (fixture.caseId) await pool.execute('DELETE FROM cases WHERE id = ?', [fixture.caseId]);
   if (fixture.userId) await pool.execute('DELETE FROM users WHERE id = ?', [fixture.userId]);
@@ -120,7 +120,7 @@ async function main() {
     assert.equal(Number(savedVisit.lat_petugas), 0.01);
     assert.ok(Number(savedVisit.jarak_dari_rs_meter) > 1);
     fixture.photoUrl = savedVisit.foto_bukti_url;
-    assert.equal(fs.existsSync(path.resolve(process.cwd(), `.${fixture.photoUrl}`)), true);
+    assert.equal(fs.existsSync(path.resolve(__dirname, '..', `.${fixture.photoUrl}`)), true);
 
     // Keamanan: bukti foto hanya boleh dibuka pemilik kasus/kabag, bukan publik.
     const noAuth = await fetch(`${baseUrl}${fixture.photoUrl}`);

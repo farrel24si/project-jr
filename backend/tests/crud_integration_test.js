@@ -123,6 +123,31 @@ async function main() {
     }, petugasToken);
     assert.equal(petugasPostRs.status, 403);
 
+    // Kabag CREATE hospital: invalid inputs (non-string nama_rs, empty lat, out-of-range lat) -> 400 without crash
+    const invalidTypeRs = await request('POST', '/api/hospitals', {
+      nama_rs: 12345,
+      latitude: 0.5,
+      longitude: 101.4,
+      radius_meter: 200
+    }, kabagToken);
+    assert.equal(invalidTypeRs.status, 400);
+
+    const emptyLatRs = await request('POST', '/api/hospitals', {
+      nama_rs: `RS Kosong Lat ${stamp}`,
+      latitude: '',
+      longitude: 101.4,
+      radius_meter: 200
+    }, kabagToken);
+    assert.equal(emptyLatRs.status, 400);
+
+    const outOfRangeLatRs = await request('POST', '/api/hospitals', {
+      nama_rs: `RS OutOfRange ${stamp}`,
+      latitude: 120,
+      longitude: 101.4,
+      radius_meter: 200
+    }, kabagToken);
+    assert.equal(outOfRangeLatRs.status, 400);
+
     // Kabag CREATE hospital
     const createRs = await request('POST', '/api/hospitals', {
       nama_rs: `RS Uji CRUD ${stamp}`,
@@ -260,6 +285,17 @@ async function main() {
     const listUsers = await request('GET', '/api/users', null, kabagToken);
     assert.equal(listUsers.status, 200);
     assert.ok(listUsers.body.data.some((u) => u.id === userId));
+
+    // Kabag UPDATE user: invalid role or invalid officer_id -> 400
+    const badRoleUpdate = await request('PUT', `/api/users/${userId}`, {
+      role: 'superadmin'
+    }, kabagToken);
+    assert.equal(badRoleUpdate.status, 400);
+
+    const badOfficerUpdate = await request('PUT', `/api/users/${userId}`, {
+      officer_id: 99999999
+    }, kabagToken);
+    assert.equal(badOfficerUpdate.status, 400);
 
     // Kabag UPDATE user
     const updateUser = await request('PUT', `/api/users/${userId}`, {
