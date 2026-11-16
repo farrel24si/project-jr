@@ -1,5 +1,5 @@
 import React from 'react';
-import { NavLink, useNavigate } from 'react-router-dom';
+import { NavLink, Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import {
   LayoutDashboard,
@@ -8,7 +8,9 @@ import {
   UserCheck,
   CalendarCheck,
   History,
-  LogOut
+  LogOut,
+  FileText,
+  User
 } from 'lucide-react';
 
 export default function Sidebar({ isOpen, onClose }) {
@@ -18,24 +20,34 @@ export default function Sidebar({ isOpen, onClose }) {
   const kabagLinks = [
     {
       to: '/kabag',
-      label: 'Dashboard Monitoring',
+      label: 'Dashboard',
       icon: LayoutDashboard,
       end: true
     },
     {
+      to: '/kabag/monitoring',
+      label: 'Daftar Korban',
+      icon: Users
+    },
+    {
       to: '/kabag/kinerja',
-      label: 'Analisis Kinerja Petugas',
+      label: 'Kinerja Petugas',
       icon: BarChart3
     },
     {
-      to: '/kabag/monitoring',
-      label: 'Monitoring Korban',
-      icon: Users
+      to: '/kabag/laporan',
+      label: 'Laporan Kinerja',
+      icon: FileText
     },
     {
       to: '/kabag/petugas',
       label: 'Data Petugas',
       icon: UserCheck
+    },
+    {
+      to: '/kabag/profil',
+      label: 'Profil Saya',
+      icon: User
     }
   ];
 
@@ -60,14 +72,19 @@ export default function Sidebar({ isOpen, onClose }) {
       to: '/petugas/riwayat',
       label: 'Riwayat Kunjungan',
       icon: History
+    },
+    {
+      to: '/petugas/profil',
+      label: 'Profil Saya',
+      icon: User
     }
   ];
 
   const links = isKabag ? kabagLinks : petugasLinks;
 
-  const handleLogout = () => {
-    logout();
-    navigate('/login');
+  const handleLogout = async () => {
+    await logout();
+    navigate('/login', { replace: true });
   };
 
   return (
@@ -137,19 +154,27 @@ export default function Sidebar({ isOpen, onClose }) {
 
         {/* Bottom Profile Widget & Logout Button */}
         <div className="p-4 border-t border-slate-100 bg-slate-50/70 space-y-2.5">
-          <div className="flex items-center gap-3 p-2 rounded-xl bg-white border border-slate-200/80 shadow-2xs">
-            <div className="w-9 h-9 rounded-xl bg-[#145DA0] text-white flex items-center justify-center font-bold text-xs shadow-2xs shrink-0 ring-2 ring-blue-100">
-              {currentUser?.profile?.avatar || (isKabag ? 'KB' : 'PT')}
+          <Link
+            to={isKabag ? '/kabag/profil' : '/petugas/profil'}
+            className="flex items-center gap-3 p-2 rounded-xl bg-white border border-slate-200/80 shadow-2xs hover:border-blue-300 hover:bg-blue-50/50 transition-all cursor-pointer group"
+            title="Lihat & Edit Profil Saya"
+          >
+            <div className="w-9 h-9 rounded-xl bg-[#145DA0] text-white flex items-center justify-center font-bold text-xs shadow-2xs shrink-0 ring-2 ring-blue-100 overflow-hidden">
+              {currentUser?.profile?.avatar && (currentUser.profile.avatar.startsWith('data:image') || currentUser.profile.avatar.startsWith('http')) ? (
+                <img src={currentUser.profile.avatar} alt="Avatar" className="w-full h-full object-cover" />
+              ) : (
+                currentUser?.profile?.avatar || (isKabag ? 'KB' : 'PT')
+              )}
             </div>
             <div className="min-w-0 flex-1">
-              <p className="text-xs font-bold text-slate-800 truncate leading-tight">
-                {currentUser?.profile?.nama || (isKabag ? 'Budi Santoso, S.E.' : 'Adi Putra Pratama')}
+              <p className="text-xs font-bold text-slate-800 truncate leading-tight group-hover:text-[#145DA0] transition-colors">
+                {currentUser?.profile?.nama || (isKabag ? 'Kabag' : 'Petugas')}
               </p>
               <p className="text-[10px] text-slate-500 font-medium truncate mt-0.5">
                 {isKabag ? 'Kepala Bagian' : 'Petugas Lapangan'}
               </p>
             </div>
-          </div>
+          </Link>
 
           <button
             type="button"

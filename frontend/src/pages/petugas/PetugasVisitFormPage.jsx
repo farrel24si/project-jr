@@ -1,7 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { storageService } from '../../services/storageService';
+import { cachePhoto } from '../../services/photoService';
 import { useAuth } from '../../context/AuthContext';
+import { checkVisitInterval } from '../../services/slaService';
 import CameraCapture from '../../components/petugas/CameraCapture';
 import GpsCapture from '../../components/petugas/GpsCapture';
 import {
@@ -11,13 +13,15 @@ import {
   Clock,
   CheckCircle2,
   AlertCircle,
+  AlertTriangle,
   Save,
   Activity,
   FileText,
   Camera,
   MapPin,
   ShieldCheck,
-  AlertOctagon
+  AlertOctagon,
+  Lock
 } from 'lucide-react';
 
 export default function PetugasVisitFormPage() {
@@ -32,7 +36,10 @@ export default function PetugasVisitFormPage() {
     return new Date(now.getTime() - tzOffset).toISOString().slice(0, 16);
   });
 
-  const [kondisiKorban, setKondisiKorban] = useState('Masih Dirawat');
+  const [kondisiKorban, setKondisiKorban] = useState('Rawat Inap');
+  const [cekKomunikasiKeluarga, setCekKomunikasiKeluarga] = useState(true);
+  const [cekEdukasiSantunan, setCekEdukasiSantunan] = useState(true);
+  const [cekArahanLp, setCekArahanLp] = useState(true);
   const [perkembanganKondisi, setPerkembanganKondisi] = useState('');
   const [komunikasiKeluarga, setKomunikasiKeluarga] = useState('');
   const [penyampaianHak, setPenyampaianHak] = useState(
@@ -51,15 +58,21 @@ export default function PetugasVisitFormPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
-    const data = storageService.getVictimById(id);
-    if (!data) {
-      navigate('/petugas/korban');
-      return;
-    }
-    setVictim(data);
-    if (data.kondisiTerakhir) {
-      setKondisiKorban(data.kondisiTerakhir);
-    }
+    const load = async () => {
+      let data = storageService.getVictimById(id);
+      if (!data) {
+        data = await storageService.fetchVictimDetail(id);
+      }
+      if (!data) {
+        navigate('/petugas/korban');
+        return;
+      }
+      setVictim(data);
+      if (data.kondisiTerakhir) {
+        setKondisiKorban(data.kondisiTerakhir);
+      }
+    };
+    load();
   }, [id, navigate]);
 
   if (!victim) {
@@ -70,10 +83,59 @@ export default function PetugasVisitFormPage() {
     );
   }
 
-  const handleSubmit = (e) => {
+  // Verifikasi Otorisasi: Petugas hanya dapat menginput kunjungan korban yang ditugaskan kepadanya
+  const allOfficers = storageService.getOfficers();
+  const isAssigned = currentUser?.role === 'petugas'
+    ? storageService.isOfficerAssignedToVictim(currentUser?.profile || currentUser?.profile?.id || currentUser?.profile?.nama, victim, allOfficers)
+    : true;
+
+  if (!isAssigned) {
+    return (
+      <div className="max-w-md mx-auto my-16 p-6 bg-white rounded-3xl border border-rose-200 shadow-xl text-center space-y-4">
+        <div className="w-14 h-14 rounded-2xl bg-rose-50 border border-rose-200 text-rose-600 flex items-center justify-center mx-auto">
+          <ShieldCheck className="w-7 h-7 text-rose-600" />
+        </div>
+        <div className="space-y-1">
+          <span className="text-[10px] font-extrabold uppercase tracking-wider text-rose-700 bg-rose-100 px-2.5 py-0.5 rounded-full">
+            Akses Formulir Ditolak
+          </span>
+          <h2 className="text-lg font-black text-slate-900">Bukan Tanggung Jawab Anda</h2>
+        </div>
+        <p className="text-xs text-slate-500 leading-relaxed">
+          Anda tidak dapat menginput kunjungan untuk korban <strong>{victim.nama}</strong> karena faskes atau penugasan korban berada di luar tanggung jawab Anda.
+        </p>
+        <button
+          type="button"
+          onClick={() => navigate('/petugas/pemantauan')}
+          className="w-full py-2.5 px-4 rounded-xl text-xs font-bold bg-[#145DA0] text-white hover:bg-[#0f4980] transition-colors cursor-pointer"
+        >
+          Kembali ke Jadwal Pemantauan Saya
+        </button>
+      </div>
+    );
+  }
+
+  const previousVisitDate = victim?.tanggalKunjunganTerakhir || 
+                            victim?.waktuPemantauanTerakhir || 
+                            victim?.kunjunganPertama?.tanggalKunjungan || 
+                            victim?.tanggalInformasiDiterima;
+
+  const intervalCheck = useMemo(() => {
+    return checkVisitInterval(previousVisitDate, waktuKunjungan);
+  }, [previousVisitDate, waktuKunjungan]);
+
+  const isFirstVisit = !victim?.kunjunganPertama && (victim?.riwayatAktivitas || []).filter((a) => a.statusKunjungan !== 'Menunggu').length === 0;
+
+  const handleSubmit = async (e) => {
     e.preventDefault();
     setValidationError('');
     setSuccessMessage('');
+
+    if (new Date(waktuKunjungan) > new Date(Date.now() + 5 * 60000)) {
+      setValidationError('Waktu kunjungan aktual tidak boleh di masa mendatang. Harap masukkan waktu saat kunjungan telah benar-benar dilakukan.');
+      window.scrollTo({ top: 100, behavior: 'smooth' });
+      return;
+    }
 
     if (!perkembanganKondisi.trim()) {
       setValidationError('Perkembangan kondisi korban wajib diisi.');
@@ -81,13 +143,13 @@ export default function PetugasVisitFormPage() {
       return;
     }
 
-    if (!photoData) {
-      setValidationError('Foto dokumentasi kunjungan wajib diambil sebagai bukti pertanggungjawaban.');
+    if (!gpsData || !gpsData.latitude || !gpsData.longitude) {
+      setValidationError('Harap mengunci lokasi koordinat GPS / maps rumah sakit terlebih dahulu.');
       return;
     }
 
-    if (!gpsData || !gpsData.latitude || !gpsData.longitude) {
-      setValidationError('Koordinat GPS wajib terdeteksi saat melakukan kunjungan lapangan.');
+    if (!photoData) {
+      setValidationError('Harap mengupload atau mengambil dokumentasi foto kunjungan.');
       return;
     }
 
@@ -96,9 +158,15 @@ export default function PetugasVisitFormPage() {
     try {
       const visitPayload = {
         tanggalKunjungan: new Date(waktuKunjungan).toISOString(),
+        waktuAktualKunjungan: new Date(waktuKunjungan).toISOString(),
+        waktuPencatatanSistem: new Date().toISOString(),
         petugasId: currentUser?.profile?.id || victim.petugasId,
         petugasNama: currentUser?.profile?.nama || victim.namaPetugas,
         kondisiKorban,
+        cek_komunikasi_keluarga: cekKomunikasiKeluarga,
+        cek_edukasi_santunan: cekEdukasiSantunan,
+        cek_arahan_lp: cekArahanLp,
+        catatan_kondisi: perkembanganKondisi,
         hasilKunjungan: perkembanganKondisi,
         komunikasiKeluarga,
         penyampaianHak,
@@ -111,7 +179,19 @@ export default function PetugasVisitFormPage() {
         waktuFoto: gpsData.waktu || new Date().toISOString()
       };
 
-      const updated = storageService.addVisit(victim.id, visitPayload);
+      if (photoData) {
+        cachePhoto(victim.id, photoData);
+        if (victim.caseId) {
+          cachePhoto(victim.caseId, photoData);
+          cachePhoto(`case_${victim.caseId}`, photoData);
+        }
+        if (victim.activeVisitId) {
+          cachePhoto(victim.activeVisitId, photoData);
+          cachePhoto(`VISIT-${victim.activeVisitId}`, photoData);
+        }
+      }
+
+      const updated = await storageService.addVisit(victim.id, visitPayload);
       if (!updated) {
         throw new Error('Gagal memperbarui data korban.');
       }
@@ -122,7 +202,7 @@ export default function PetugasVisitFormPage() {
       }, 1000);
     } catch (err) {
       console.error(err);
-      setValidationError('Terjadi kendala saat menyimpan laporan kunjungan. Silakan coba kembali.');
+      setValidationError(err.message || 'Terjadi kendala saat menyimpan laporan kunjungan. Silakan coba kembali.');
       setIsSubmitting(false);
     }
   };
@@ -140,7 +220,7 @@ export default function PetugasVisitFormPage() {
         </Link>
         <div>
           <h1 className="text-xl font-black text-slate-900 tracking-tight">
-            Formulir Kunjungan Rumah Sakit
+            {isFirstVisit ? 'Formulir Kunjungan Pertama' : 'Formulir Kunjungan Selanjutnya'}
           </h1>
           <p className="text-xs text-slate-500 mt-0.5">
             Pencatatan aktivitas kunjungan langsung ke data korban ID: {victim.id}.
@@ -171,7 +251,7 @@ export default function PetugasVisitFormPage() {
 
       <form onSubmit={handleSubmit} className="space-y-6">
         {/* ── BAGIAN A: INFORMASI KUNJUNGAN ── */}
-        <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-5 shadow-xs space-y-4">
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-5 sm:p-6 shadow-2xs space-y-4">
           <div className="border-b border-slate-100 pb-2.5 flex items-center justify-between">
             <h2 className="text-sm font-bold text-slate-800 flex items-center gap-2">
               <span className="w-5 h-5 rounded-full bg-blue-100 text-[#145DA0] text-xs font-bold flex items-center justify-center">
@@ -211,43 +291,75 @@ export default function PetugasVisitFormPage() {
               </div>
             </div>
 
-            {/* Waktu Kunjungan */}
+            {/* Waktu Kunjungan (Otomatis & Terkunci Sistem) */}
             <div>
-              <label className="block text-slate-600 font-semibold mb-1">
-                Waktu Kunjungan <span className="text-red-500">*</span>
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-slate-600 font-semibold">
+                  Tanggal &amp; Waktu Kunjungan Aktual <span className="text-red-500">*</span>
+                </label>
+                <span className="inline-flex items-center gap-1 text-[10px] text-slate-600 font-semibold bg-slate-200/80 px-2 py-0.5 rounded">
+                  <Lock className="w-3 h-3 text-slate-500" />
+                  Terkunci Sistem
+                </span>
+              </div>
               <div className="relative">
                 <Clock className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                 <input
                   type="datetime-local"
                   required
+                  readOnly
+                  disabled
                   value={waktuKunjungan}
-                  onChange={(e) => setWaktuKunjungan(e.target.value)}
-                  className="w-full pl-9 pr-3 py-2 rounded-lg border border-slate-200 bg-white text-slate-800 font-medium focus:ring-1 focus:ring-[#145DA0] focus:outline-none"
+                  className="w-full pl-9 pr-3 py-2 rounded-lg border border-slate-200 bg-slate-100 text-slate-600 font-medium cursor-not-allowed select-none focus:outline-none"
                 />
               </div>
+              <p className="text-[10px] text-slate-500 mt-1">
+                Tanggal dan jam dicatat otomatis oleh sistem sesuai waktu aktual saat ini (terkunci / tidak dapat diubah).
+              </p>
+
+              {/* Banner Peringatan Interval SLA 3 Hari */}
+              {previousVisitDate && (
+                <div className="mt-2.5">
+                  {intervalCheck.isOverdue ? (
+                    <div className="p-3 bg-rose-50 border border-rose-300 rounded-xl flex items-start gap-2.5 text-rose-900 shadow-2xs">
+                      <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5 animate-pulse" />
+                      <div className="text-[11px] leading-relaxed">
+                        <strong className="block font-bold text-rose-950">PERINGATAN: Kunjungan Melewati Batas Waktu 3 Hari!</strong>
+                        Waktu kunjungan ini berjarak <strong>{intervalCheck.durationText}</strong> dari tanggal informasi / kunjungan sebelumnya. Batas standar SLA Jasa Raharja adalah <strong>maksimal 72 jam (3 hari)</strong>. Kunjungan akan tercatat sebagai selesai terlambat.
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center gap-2 text-emerald-800 text-[11px]">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <span>
+                        Sesuai jadwal SLA: berjarak <strong>{intervalCheck.durationText}</strong> dari kunjungan sebelumnya (dalam batas maksimal 3 hari).
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         </div>
 
         {/* ── BAGIAN B: KONDISI KORBAN ── */}
-        <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-5 shadow-xs space-y-4">
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-5 sm:p-6 shadow-2xs space-y-4">
           <div className="border-b border-slate-100 pb-2.5">
             <h2 className="text-sm font-bold text-slate-800 flex items-center gap-2">
               <span className="w-5 h-5 rounded-full bg-blue-100 text-[#145DA0] text-xs font-bold flex items-center justify-center">
                 B
               </span>
-              Kondisi Korban Saat Kunjungan
+              Kondisi Korban Saat Kunjungan (Status Backend)
             </h2>
           </div>
 
           <div className="space-y-2 text-xs">
             {[
-              { id: 'Masih Dirawat', label: 'Masih Dirawat', desc: 'Korban masih menjalani rawat inap di rumah sakit.' },
-              { id: 'Sudah Pulang', label: 'Sudah Pulang', desc: 'Korban telah dinyatakan sembuh / diizinkan pulang oleh dokter.' },
-              { id: 'Dirujuk', label: 'Dirujuk', desc: 'Korban dipindahkan/dirujuk ke rumah sakit lain.' },
+              { id: 'Rawat Inap', label: 'Rawat Inap', desc: 'Korban masih menjalani rawat inap di rumah sakit.' },
+              { id: 'Luka Ringan', label: 'Luka Ringan', desc: 'Korban mengalami luka ringan / observasi rawat jalan.' },
+              { id: 'Luka Berat', label: 'Luka Berat', desc: 'Korban mengalami luka berat dalam perawatan intensif.' },
               { id: 'Meninggal Dunia', label: 'Meninggal Dunia', desc: 'Korban dinyatakan meninggal dunia oleh tim medis RS.' },
-              { id: 'Belum Dapat Dikonfirmasi', label: 'Belum Dapat Dikonfirmasi', desc: 'Kondisi belum dapat dipastikan karena kendala verifikasi medis.' }
+              { id: 'Selesai', label: 'Selesai / Pulang', desc: 'Perawatan selesai, korban telah sembuh atau diizinkan pulang.' }
             ].map((opt) => (
               <label
                 key={opt.id}
@@ -274,66 +386,114 @@ export default function PetugasVisitFormPage() {
           </div>
         </div>
 
-        {/* ── BAGIAN C: HASIL KUNJUNGAN ── */}
-        <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-5 shadow-xs space-y-4">
+        {/* ── BAGIAN C: CHECKLIST KUNJUNGAN & HASIL KOMUNIKASI ── */}
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-5 sm:p-6 shadow-2xs space-y-4">
           <div className="border-b border-slate-100 pb-2.5">
             <h2 className="text-sm font-bold text-slate-800 flex items-center gap-2">
               <span className="w-5 h-5 rounded-full bg-blue-100 text-[#145DA0] text-xs font-bold flex items-center justify-center">
                 C
               </span>
-              Hasil Kunjungan &amp; Komunikasi
+              Checklist Kunjungan &amp; Hasil Komunikasi
             </h2>
+            <p className="text-[11px] text-slate-500 mt-0.5">
+              Checklist wajib verifikasi petugas sesuai kolom database MySQL tabel visits.
+            </p>
           </div>
 
           <div className="space-y-4 text-xs">
+            {/* 3 Checklist Utama Sesuai Kolom Database visits */}
+            <div className="space-y-2.5">
+              <label className="flex items-start gap-3 p-3 rounded-lg border border-slate-200 hover:border-slate-300 bg-slate-50/60 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={cekKomunikasiKeluarga}
+                  onChange={(e) => setCekKomunikasiKeluarga(e.target.checked)}
+                  className="mt-0.5 rounded text-[#145DA0] focus:ring-[#145DA0] w-4 h-4 cursor-pointer"
+                />
+                <div className="flex-1">
+                  <span className="font-bold text-slate-800 block">
+                    1. Komunikasi dengan Keluarga / Pendamping Korban (cek_komunikasi_keluarga)
+                  </span>
+                  <span className="text-[11px] text-slate-500">
+                    Petugas telah bertatap muka atau berkomunikasi dengan pihak keluarga / penjamin pasien.
+                  </span>
+                </div>
+              </label>
+
+              <label className="flex items-start gap-3 p-3 rounded-lg border border-slate-200 hover:border-slate-300 bg-slate-50/60 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={cekEdukasiSantunan}
+                  onChange={(e) => setCekEdukasiSantunan(e.target.checked)}
+                  className="mt-0.5 rounded text-[#145DA0] focus:ring-[#145DA0] w-4 h-4 cursor-pointer"
+                />
+                <div className="flex-1">
+                  <span className="font-bold text-slate-800 block">
+                    2. Edukasi Hak Santunan Jasa Raharja (cek_edukasi_santunan)
+                  </span>
+                  <span className="text-[11px] text-slate-500">
+                    Menyampaikan informasi hak santunan biaya perawatan RS maksimal Rp20 Juta (atau Rp50 Juta bagi ahli waris jika MD).
+                  </span>
+                </div>
+              </label>
+
+              <label className="flex items-start gap-3 p-3 rounded-lg border border-slate-200 hover:border-slate-300 bg-slate-50/60 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={cekArahanLp}
+                  onChange={(e) => setCekArahanLp(e.target.checked)}
+                  className="mt-0.5 rounded text-[#145DA0] focus:ring-[#145DA0] w-4 h-4 cursor-pointer"
+                />
+                <div className="flex-1">
+                  <span className="font-bold text-slate-800 block">
+                    3. Arahan Pengurusan Laporan Polisi / LP (cek_arahan_lp)
+                  </span>
+                  <span className="text-[11px] text-slate-500">
+                    Mengarahkan dan membantu koordinasi penerbitan Laporan Polisi dari Unit Laka Lantas kepolisian setempat.
+                  </span>
+                </div>
+              </label>
+            </div>
+
+            {/* Catatan Kondisi Korban (catatan_kondisi) */}
             <div>
               <label className="block text-slate-700 font-semibold mb-1">
-                Perkembangan Kondisi Korban <span className="text-red-500">*</span>
+                Catatan Kondisi / Perkembangan Medis Pasien (catatan_kondisi) <span className="text-red-500">*</span>
               </label>
               <textarea
                 required
                 rows={3}
                 value={perkembanganKondisi}
                 onChange={(e) => setPerkembanganKondisi(e.target.value)}
-                placeholder="Jelaskan kondisi klinis korban, tindakan operasi yang dilakukan, atau observasi terkini..."
+                placeholder="Jelaskan kondisi klinis korban, ruangan rawat, tindakan operasi medis, atau observasi dokter..."
                 className="w-full p-3 rounded-lg border border-slate-200 bg-slate-50 focus:bg-white text-slate-800 focus:ring-1 focus:ring-[#145DA0] focus:outline-none leading-relaxed"
               />
             </div>
 
+            {/* Keluarga yang Ditemui */}
             <div>
               <label className="block text-slate-700 font-semibold mb-1">
-                Komunikasi dengan Keluarga / Pendamping Korban
+                Keluarga / Kontak yang Ditemui (Opsional)
               </label>
-              <textarea
-                rows={2}
+              <input
+                type="text"
                 value={komunikasiKeluarga}
                 onChange={(e) => setKomunikasiKeluarga(e.target.value)}
-                placeholder="Contoh: Bertemu dengan istri korban, menyampaikan empati serta penjelasan proses penjaminan..."
-                className="w-full p-3 rounded-lg border border-slate-200 bg-slate-50 focus:bg-white text-slate-800 focus:ring-1 focus:ring-[#145DA0] focus:outline-none leading-relaxed"
+                placeholder="Contoh: Bertemu istri korban (Ibu Ratna, 0812-xxxx)"
+                className="w-full p-2.5 rounded-lg border border-slate-200 bg-slate-50 focus:bg-white text-slate-800 focus:ring-1 focus:ring-[#145DA0] focus:outline-none"
               />
             </div>
 
+            {/* Rencana Tindak Lanjut */}
             <div>
               <label className="block text-slate-700 font-semibold mb-1">
-                Informasi Hak Korban yang Disampaikan
-              </label>
-              <textarea
-                rows={2}
-                value={penyampaianHak}
-                onChange={(e) => setPenyampaianHak(e.target.value)}
-                className="w-full p-3 rounded-lg border border-slate-200 bg-slate-50 focus:bg-white text-slate-800 focus:ring-1 focus:ring-[#145DA0] focus:outline-none leading-relaxed"
-              />
-            </div>
-
-            <div>
-              <label className="block text-slate-700 font-semibold mb-1">
-                Catatan Tindak Lanjut Berikutnya
+                Rencana Tindak Lanjut Berikutnya
               </label>
               <input
                 type="text"
                 value={catatanTindakLanjut}
                 onChange={(e) => setCatatanTindakLanjut(e.target.value)}
-                placeholder="Contoh: Pemantauan ulang 3 hari ke depan, atau koordinasi berkas santunan..."
+                placeholder="Contoh: Pemantauan ulang 3 hari ke depan / verifikasi berkas tagihan RS"
                 className="w-full p-2.5 rounded-lg border border-slate-200 bg-slate-50 focus:bg-white text-slate-800 focus:ring-1 focus:ring-[#145DA0] focus:outline-none"
               />
             </div>
@@ -341,7 +501,7 @@ export default function PetugasVisitFormPage() {
         </div>
 
         {/* ── BAGIAN D: DOKUMENTASI (KAMERA & GPS) ── */}
-        <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-5 shadow-xs space-y-4">
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-5 sm:p-6 shadow-2xs space-y-4">
           <div className="border-b border-slate-100 pb-2.5">
             <h2 className="text-sm font-bold text-slate-800 flex items-center gap-2">
               <span className="w-5 h-5 rounded-full bg-blue-100 text-[#145DA0] text-xs font-bold flex items-center justify-center">

@@ -23,8 +23,77 @@ export default function VictimCard({ victim, onOpenVisit, onOpenMonitoring }) {
 
   const monitoringSla = calculateMonitoringSla(victim);
   const isVisited = !!victim.kunjunganPertama;
-  const isOverdue = firstVisitSla.status === 'TERLAMBAT' || (!isVisited && firstVisitSla.isOverdue);
-  const isWarning = firstVisitSla.status === 'MENDEKATI_TENGGAT';
+  const isMonitoringOverdue = isVisited && monitoringSla.isOverdue && victim.statusPemantauan === 'Pemantauan Aktif';
+  const isOverdue = Boolean(victim.isOverdue || victim.is_overdue) || firstVisitSla.status === 'TERLAMBAT' || (!isVisited && firstVisitSla.isOverdue) || isMonitoringOverdue;
+  const isWarning = firstVisitSla.status === 'MENDEKATI_TENGGAT' || (isVisited && monitoringSla.status === 'MENDEKATI_TENGGAT' && victim.statusPemantauan === 'Pemantauan Aktif');
+
+  // Single primary status badge helper matching system style
+  const renderStatusBadge = () => {
+    const activeEpisode = Array.isArray(victim.careEpisodes) && victim.careEpisodes.length > 0
+      ? victim.careEpisodes[victim.careEpisodes.length - 1]
+      : null;
+
+    const isDischarged = activeEpisode
+      ? Boolean(
+          activeEpisode.status === 'Pulang' ||
+          activeEpisode.kondisiTerakhir === 'Pulang' ||
+          activeEpisode.kondisiTerakhir === 'Sudah Pulang'
+        )
+      : (
+          victim.kondisiTerakhir === 'Sudah Pulang' ||
+          victim.kondisiTerakhir === 'Pulang' ||
+          victim.kondisiTerakhir === 'Selesai' ||
+          victim.statusPemantauan === 'Selesai Dipantau'
+        );
+
+    const isReferred =
+      (typeof victim.kondisiTerakhir === 'string' && victim.kondisiTerakhir.startsWith('Dirujuk')) ||
+      (typeof victim.statusPemantauan === 'string' && victim.statusPemantauan.startsWith('Dirujuk')) ||
+      victim.statusPerawatan === 'Rujukan';
+
+    if (isDischarged) {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+          <span>Selesai</span>
+        </span>
+      );
+    }
+
+    if (isReferred) {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-purple-50 text-purple-700 border border-purple-200">
+          <span className="w-1.5 h-1.5 rounded-full bg-purple-500"></span>
+          <span>Dirujuk</span>
+        </span>
+      );
+    }
+
+    if (victim.statusPerawatan === 'Rawat Lanjutan' || victim.isRawatLanjutan) {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-sky-50 text-sky-700 border border-sky-200">
+          <span className="w-1.5 h-1.5 rounded-full bg-sky-500"></span>
+          <span>Rawatan Lanjutan</span>
+        </span>
+      );
+    }
+
+    if (victim.kondisiTerakhir === 'Meninggal Dunia') {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-red-50 text-red-700 border border-red-200">
+          <span className="w-1.5 h-1.5 rounded-full bg-red-500"></span>
+          <span>Meninggal</span>
+        </span>
+      );
+    }
+
+    return (
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-50 text-[#145DA0] border border-blue-200">
+        <span className="w-1.5 h-1.5 rounded-full bg-[#145DA0]"></span>
+        <span>Masih Dirawat</span>
+      </span>
+    );
+  };
 
   // Calculate SLA time progress out of 72 hours (3 days)
   const receivedTime = new Date(victim.tanggalInformasiDiterima).getTime();
@@ -34,7 +103,19 @@ export default function VictimCard({ victim, onOpenVisit, onOpenMonitoring }) {
   let percentElapsed = 0;
   let remainingHoursText = '';
 
-  if (isVisited) {
+  if (isVisited && victim.statusPemantauan === 'Pemantauan Aktif') {
+    // Pantau SLA 3 hari untuk kunjungan lanjutan berikutnya
+    const lastVisitTime = new Date(victim.tanggalKunjunganTerakhir || victim.kunjunganPertama.tanggalKunjungan).getTime();
+    const elapsedFromLastVisit = now - lastVisitTime;
+    const diffHours = Math.round((seventyTwoHoursMs - elapsedFromLastVisit) / (1000 * 60 * 60));
+    if (isMonitoringOverdue) {
+      remainingHoursText = `Kunjungan ke-2 Terlambat ${Math.abs(diffHours)} jam`;
+      percentElapsed = 100;
+    } else {
+      remainingHoursText = `Batas 3 hari: sisa ${diffHours} jam`;
+      percentElapsed = Math.min(100, Math.round((elapsedFromLastVisit / seventyTwoHoursMs) * 100));
+    }
+  } else if (isVisited) {
     const visitTime = new Date(victim.kunjunganPertama.tanggalKunjungan).getTime();
     percentElapsed = Math.min(100, Math.round(((visitTime - receivedTime) / seventyTwoHoursMs) * 100));
     const hoursTaken = Math.max(1, Math.round((visitTime - receivedTime) / (1000 * 60 * 60)));
@@ -62,12 +143,12 @@ export default function VictimCard({ victim, onOpenVisit, onOpenMonitoring }) {
 
   return (
     <div
-      className={`bg-white rounded-xl border transition-all duration-200 overflow-hidden flex flex-col ${
+      className={`bg-white rounded-2xl border transition-all duration-200 overflow-hidden flex flex-col shadow-2xs ${
         isOverdue
-          ? 'border-rose-300 shadow-[0_2px_12px_rgba(225,29,72,0.08)] ring-1 ring-rose-200'
+          ? 'border-rose-300 ring-1 ring-rose-200'
           : isWarning
-          ? 'border-amber-300 shadow-[0_2px_12px_rgba(245,158,11,0.08)]'
-          : 'border-slate-200/90 shadow-[0_2px_8px_rgba(0,0,0,0.03)] hover:shadow-[0_4px_16px_rgba(0,0,0,0.06)] hover:border-slate-300'
+          ? 'border-amber-300'
+          : 'border-slate-200/90 hover:border-slate-300 hover:shadow-xs'
       }`}
     >
       {/* Top Header Bar */}
@@ -81,7 +162,12 @@ export default function VictimCard({ victim, onOpenVisit, onOpenMonitoring }) {
         }`}
       >
         <div className="flex items-center gap-2">
-          {isOverdue ? (
+          {isMonitoringOverdue ? (
+            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-rose-600 text-white font-bold text-[10px] uppercase tracking-wide shadow-2xs animate-pulse">
+              <AlertCircle className="w-3 h-3" />
+              <span>Kunjungan ke-2 Lewat 3 Hari</span>
+            </span>
+          ) : isOverdue ? (
             <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-rose-600 text-white font-bold text-[10px] uppercase tracking-wide shadow-2xs">
               <AlertCircle className="w-3 h-3" />
               <span>SLA Melewati Batas 3 Hari</span>
@@ -89,12 +175,17 @@ export default function VictimCard({ victim, onOpenVisit, onOpenMonitoring }) {
           ) : isWarning ? (
             <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-500 text-white font-bold text-[10px] uppercase tracking-wide">
               <Clock className="w-3 h-3" />
-              <span>Mendekati Tenggat</span>
+              <span>Tenggat 3 Hari Mendekat</span>
             </span>
-          ) : isVisited ? (
+          ) : isVisited && victim.statusPemantauan !== 'Pemantauan Aktif' ? (
             <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700">
               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-              <span>Kunjungan Tuntas</span>
+              <span>Pemantauan Selesai</span>
+            </span>
+          ) : isVisited ? (
+            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#145DA0]">
+              <Clock className="w-3.5 h-3.5 text-[#145DA0]" />
+              <span>Dalam Batas SLA 3 Hari</span>
             </span>
           ) : (
             <span className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-500">
@@ -121,11 +212,8 @@ export default function VictimCard({ victim, onOpenVisit, onOpenMonitoring }) {
               {victim.usia} Tahun • {victim.jenisKelamin}
             </p>
           </div>
-          <div className="shrink-0">
-            <ConditionBadge
-              kondisi={victim.kondisiTerakhir}
-              statusKonfirmasi={victim.statusKonfirmasiKondisi}
-            />
+          <div className="shrink-0 flex items-center">
+            {renderStatusBadge()}
           </div>
         </div>
 
@@ -135,6 +223,20 @@ export default function VictimCard({ victim, onOpenVisit, onOpenMonitoring }) {
             <Building2 className="w-3.5 h-3.5 text-[#0A3981] shrink-0 mt-0.5" />
             <div className="min-w-0 flex-1">
               <span className="font-semibold text-slate-900 block truncate">{victim.rumahSakit}</span>
+              {victim.rumahSakitTujuan ? (
+                <div className="flex items-center gap-1 text-[10px] text-violet-700 font-bold block truncate">
+                  <span>Dirujuk ke: {victim.rumahSakitTujuan}</span>
+                  {victim.tanggalRujukan && (
+                    <span className="font-normal text-slate-400">
+                      • {new Date(victim.tanggalRujukan).toLocaleDateString('id-ID', { day: 'numeric', month: 'short' })}
+                    </span>
+                  )}
+                </div>
+              ) : victim.rumahSakitAsal && victim.rumahSakitAsal !== victim.rumahSakit ? (
+                <span className={`text-[10px] font-bold block truncate ${victim.isRawatLanjutan ? 'text-sky-700' : 'text-violet-700'}`}>
+                  {victim.isRawatLanjutan ? `Rawat Lanjutan dari: ${victim.rumahSakitAsal}` : `Rujukan dari: ${victim.rumahSakitAsal}`}
+                </span>
+              ) : null}
               <span className="text-[11px] text-slate-500 block truncate">
                 Ruangan: {victim.ruangan || 'Rawat Inap'}
               </span>

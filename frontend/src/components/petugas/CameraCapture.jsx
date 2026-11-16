@@ -23,10 +23,20 @@ export default function CameraCapture({
   const [errorMessage, setErrorMessage] = useState(null);
   const [isInitializing, setIsInitializing] = useState(false);
   const [isProcessingWatermark, setIsProcessingWatermark] = useState(false);
+  const [capturedTimestamp, setCapturedTimestamp] = useState(null);
+  const [realtimeNow, setRealtimeNow] = useState(new Date());
 
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const fileInputRef = useRef(null);
+
+  // Update jam realtime setiap detik untuk preview kamera
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setRealtimeNow(new Date());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   const startCamera = async () => {
     setIsInitializing(true);
@@ -38,20 +48,25 @@ export default function CameraCapture({
 
       stopCamera();
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        },
-        audio: false
-      });
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          },
+          audio: false
+        });
+      } catch (err) {
+        // Fallback untuk webcam laptop / PC atau perangkat tanpa kamera environment
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: false
+        });
+      }
 
       streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
       setIsStreaming(true);
     } catch (err) {
       console.warn('Camera access error:', err);
@@ -68,6 +83,18 @@ export default function CameraCapture({
     }
   };
 
+  // Pastikan stream terhubung dan video langsung play saat elemen video dirender di DOM
+  useEffect(() => {
+    if (isStreaming && videoRef.current && streamRef.current) {
+      if (videoRef.current.srcObject !== streamRef.current) {
+        videoRef.current.srcObject = streamRef.current;
+      }
+      videoRef.current.play().catch((err) => {
+        console.warn('Video auto-play warning:', err);
+      });
+    }
+  }, [isStreaming]);
+
   const stopCamera = () => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
@@ -79,9 +106,12 @@ export default function CameraCapture({
   const processAndApplyWatermark = async (rawUrl) => {
     setIsProcessingWatermark(true);
     try {
+      const nowRealtimeIso = new Date().toISOString();
+      setCapturedTimestamp(nowRealtimeIso);
+
       const watermarkData = {
         petugasNama: metadata.petugasNama || 'Petugas Lapangan Jasa Raharja',
-        waktu: metadata.waktu || new Date().toISOString(),
+        waktu: nowRealtimeIso, // Menggunakan waktu realtime saat pengambilan foto
         lokasi: metadata.rumahSakit || 'Rumah Sakit',
         latitude: metadata.latitude || null,
         longitude: metadata.longitude || null,
@@ -127,6 +157,7 @@ export default function CameraCapture({
 
   const retakePhoto = () => {
     setPhotoDataUrl(null);
+    setCapturedTimestamp(null);
     if (onPhotoCaptured) {
       onPhotoCaptured(null);
     }
@@ -152,12 +183,19 @@ export default function CameraCapture({
     };
   }, []);
 
-  const d = metadata.waktu ? new Date(metadata.waktu) : new Date();
+  const d = capturedTimestamp ? new Date(capturedTimestamp) : (metadata.waktu ? new Date(metadata.waktu) : new Date());
   const formattedTime = d.toLocaleDateString('id-ID', {
     day: '2-digit',
     month: 'short',
     year: 'numeric'
-  }) + ', ' + d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) + ' WIB';
+  }) + ', ' + d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).replace(/:/g, '.') + ' WIB';
+
+  // Format jam realtime berjalan
+  const formattedRealtimeClock = realtimeNow.toLocaleDateString('id-ID', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric'
+  }) + ', ' + realtimeNow.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).replace(/:/g, '.') + ' WIB';
 
   return (
     <div className="space-y-2.5">
@@ -207,7 +245,7 @@ export default function CameraCapture({
               </span>
               <span className="flex items-center gap-1 truncate">
                 <Calendar className="w-3 h-3 text-slate-400 shrink-0" />
-                <span>Waktu: {formattedTime}</span>
+                <span>Waktu Realtime: <strong className="text-white font-mono">{formattedTime}</strong></span>
               </span>
               <span className="flex items-center gap-1 truncate">
                 <MapPin className="w-3 h-3 text-slate-400 shrink-0" />
@@ -220,22 +258,58 @@ export default function CameraCapture({
           </div>
         </div>
       ) : isStreaming ? (
-        /* Live Video Stream */
+        /* Live Video Stream Viewfinder */
         <div className="relative rounded-xl overflow-hidden border border-slate-300 bg-black shadow-sm">
           <video
-            ref={videoRef}
+            ref={(el) => {
+              videoRef.current = el;
+              if (el && streamRef.current && el.srcObject !== streamRef.current) {
+                el.srcObject = streamRef.current;
+                el.play().catch(() => {});
+              }
+            }}
             playsInline
             autoPlay
             muted
-            className="w-full max-h-72 object-contain bg-black"
+            onLoadedMetadata={() => {
+              if (videoRef.current) {
+                videoRef.current.play().catch(() => {});
+              }
+            }}
+            className="w-full max-h-80 object-contain bg-black"
           />
 
-          {/* Viewfinder Overlay */}
-          <div className="absolute top-2 left-2 right-2 bg-slate-900/70 backdrop-blur-xs text-white p-2 rounded-lg text-[10px] space-y-0.5 border border-white/10 pointer-events-none">
-            <p className="font-bold text-blue-300 uppercase tracking-wider">PT JASA RAHARJA • VIEW FINDER</p>
-            <p>Petugas: {metadata.petugasNama || 'Petugas JR'} • Lokasi: {metadata.rumahSakit || 'RS'}</p>
-            {metadata.latitude && (
-              <p className="text-emerald-400 font-mono">GPS: {metadata.latitude}, {metadata.longitude}</p>
+          {/* Logo Jasa Raharja di Kiri Atas Viewfinder (Transparan Murni Tanpa Background Putih) */}
+          <div className="absolute top-3 left-3 z-20 select-none pointer-events-none drop-shadow-md">
+            <img
+              src="/img/logo-jasa-raharja.png"
+              alt="Logo PT Jasa Raharja"
+              className="h-9 w-auto object-contain drop-shadow"
+            />
+          </div>
+
+          {/* Jam Realtime di Kanan Atas Viewfinder */}
+          <div className="absolute top-2.5 right-2.5 z-20 bg-slate-950/80 backdrop-blur-md text-white text-[10px] font-mono px-2.5 py-1.5 rounded-xl border border-white/20 shadow-lg flex items-center gap-1.5 pointer-events-none">
+            <span className="w-2 h-2 rounded-full bg-red-500 animate-ping" />
+            <span className="font-bold text-emerald-400">{formattedRealtimeClock}</span>
+          </div>
+
+          {/* Banner Informasi Kunjungan di Bagian Bawah Viewfinder */}
+          <div className="absolute bottom-16 left-2.5 right-2.5 z-20 bg-slate-950/80 backdrop-blur-md text-white p-2 rounded-lg text-[10px] space-y-0.5 border border-white/15 pointer-events-none">
+            <p className="font-semibold text-slate-200">
+              Petugas: <strong className="text-white">{metadata.petugasNama || 'Petugas Lapangan'}</strong>
+              {metadata.korbanNama && <span> &bull; Pasien: <strong className="text-white">{metadata.korbanNama}</strong></span>}
+            </p>
+            <p className="text-slate-300">
+              Lokasi: <strong className="text-white">{metadata.rumahSakit || 'Rumah Sakit'}</strong>
+            </p>
+            {metadata.latitude ? (
+              <p className="text-emerald-400 font-mono font-bold">
+                Titik GPS: {Number(metadata.latitude).toFixed(6)}, {Number(metadata.longitude).toFixed(6)}
+                {metadata.akurasiLokasi ? ` (±${metadata.akurasiLokasi}m)` : ''}
+              </p>
+            ) : (
+              <p className="text-amber-300 italic">Koordinat GPS belum terkunci</p>
             )}
           </div>
 

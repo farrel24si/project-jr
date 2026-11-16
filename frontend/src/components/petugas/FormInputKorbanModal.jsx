@@ -5,6 +5,7 @@ import { storageService } from '../../services/storageService';
 import { useAuth } from '../../context/AuthContext';
 import CameraCapture from './CameraCapture';
 import GpsCapture from './GpsCapture';
+import PatientTransitionModal from './PatientTransitionModal';
 import {
   User,
   Building2,
@@ -18,7 +19,12 @@ import {
   FileText,
   Phone,
   ShieldAlert,
-  ArrowRight
+  ArrowRight,
+  ArrowUpRight,
+  UserCheck,
+  Eye,
+  Activity,
+  Home
 } from 'lucide-react';
 
 export default function FormInputKorbanModal({ isOpen, onClose, onVictimCreated }) {
@@ -26,7 +32,7 @@ export default function FormInputKorbanModal({ isOpen, onClose, onVictimCreated 
   const { currentUser } = useAuth();
   const officerProfile = currentUser?.profile || {
     id: 'PET-01',
-    nama: 'Adi Putra Pratama, S.Tr.Tra'
+    nama: 'Petugas'
   };
 
   const nowString = useMemo(() => {
@@ -43,7 +49,7 @@ export default function FormInputKorbanModal({ isOpen, onClose, onVictimCreated 
     jenisKelamin: 'Laki-laki',
     telepon: '',
     alamat: '',
-    rumahSakit: 'RSUP Dr. Cipto Mangunkusumo (RSCM)',
+    rumahSakit: 'RS Syafira',
     lokasiKejadian: '',
     tanggalKecelakaan: nowString,
     tanggalMasukRs: nowString,
@@ -51,9 +57,12 @@ export default function FormInputKorbanModal({ isOpen, onClose, onVictimCreated 
     keteranganTambahan: '',
     // Opsi pencatatan kunjungan pertama sekaligus
     catatKunjunganSekaligus: true,
-    kondisiAwal: 'Masih Dirawat',
+    kondisiAwal: 'Rawat Inap',
     hasilKunjunganAwal: '',
     komunikasiKeluarga: '',
+    cekKomunikasiKeluarga: true,
+    cekEdukasiSantunan: true,
+    cekArahanLp: true,
     penyampaianHak: 'Hak santunan biaya perawatan RS maksimal Rp20.000.000,- telah dijelaskan.',
     tindakLanjutAwal: 'Pemantauan perkembangan medis dan konfirmasi surat jaminan RS'
   });
@@ -64,8 +73,24 @@ export default function FormInputKorbanModal({ isOpen, onClose, onVictimCreated 
   // Duplication warning state
   const [duplicateMatches, setDuplicateMatches] = useState([]);
   const [ignoredDuplicateId, setIgnoredDuplicateId] = useState(null);
+  const [transitionTargetVictim, setTransitionTargetVictim] = useState(null);
+  const [transitionType, setTransitionType] = useState('RAWAT_LANJUTAN');
   const [validationError, setValidationError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Cari petugas JR penanggung jawab secara real-time berdasarkan plotting RS
+  const currentAssignedOfficer = useMemo(() => {
+    const allOfficers = storageService.getOfficers();
+    const caseRs = (formData.rumahSakit || '').trim().toLowerCase();
+    return allOfficers.find(
+      (o) => o.status !== 'Nonaktif' && Array.isArray(o.plottingRs) && o.plottingRs.some(
+        (rs) => {
+          const r1 = (rs || '').trim().toLowerCase();
+          return r1 === caseRs || (caseRs.length >= 4 && (r1.includes(caseRs) || caseRs.includes(r1)));
+        }
+      )
+    );
+  }, [formData.rumahSakit]);
 
   // Check duplicates in real-time
   useEffect(() => {
@@ -103,7 +128,7 @@ export default function FormInputKorbanModal({ isOpen, onClose, onVictimCreated 
     navigate(`/petugas/korban/${existingVictimId}`);
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     setValidationError('');
 
@@ -111,6 +136,14 @@ export default function FormInputKorbanModal({ isOpen, onClose, onVictimCreated 
     if (!formData.nama.trim()) {
       setValidationError('Nama korban wajib diisi.');
       return;
+    }
+
+    if (formData.nik && formData.nik.trim()) {
+      const cleanNik = formData.nik.replace(/\D/g, '');
+      if (cleanNik.length !== 16) {
+        setValidationError('NIK harus terdiri dari tepat 16 digit angka sesuai standar database.');
+        return;
+      }
     }
 
     if (!formData.rumahSakit.trim()) {
@@ -129,10 +162,18 @@ export default function FormInputKorbanModal({ isOpen, onClose, onVictimCreated 
       return;
     }
 
-    // Jika catat kunjungan sekaligus, validasi hasil kunjungan
+    // Jika catat kunjungan sekaligus, validasi hasil kunjungan, GPS dan Foto
     if (formData.catatKunjunganSekaligus) {
       if (!formData.hasilKunjunganAwal.trim()) {
         setValidationError('Catatan hasil kunjungan pertama wajib diisi jika memilih catat kunjungan.');
+        return;
+      }
+      if (!gpsData || !gpsData.latitude || !gpsData.longitude) {
+        setValidationError('Harap mengunci lokasi koordinat GPS / maps rumah sakit terlebih dahulu.');
+        return;
+      }
+      if (!photoData) {
+        setValidationError('Harap mengupload atau mengambil dokumentasi foto kunjungan.');
         return;
       }
     }
@@ -140,6 +181,10 @@ export default function FormInputKorbanModal({ isOpen, onClose, onVictimCreated 
     setIsSubmitting(true);
 
     try {
+      // Petugas penanggung jawab otomatis ditentukan berdasarkan penugasan rumah sakit
+      const assignedPetugasId = currentAssignedOfficer ? currentAssignedOfficer.id : null;
+      const assignedPetugasNama = currentAssignedOfficer ? currentAssignedOfficer.nama : 'Belum Ada Petugas Penanggung Jawab';
+
       const victimPayload = {
         nama: formData.nama.trim(),
         nik: formData.nik.trim() || '—',
@@ -153,8 +198,8 @@ export default function FormInputKorbanModal({ isOpen, onClose, onVictimCreated 
         tanggalMasukRs: new Date(formData.tanggalMasukRs).toISOString(),
         tanggalInformasiDiterima: new Date().toISOString(),
         sumberInformasi: formData.sumberInformasi,
-        petugasId: officerProfile.id,
-        namaPetugas: officerProfile.nama,
+        petugasId: assignedPetugasId,
+        namaPetugas: assignedPetugasNama,
         kondisiTerakhir: formData.catatKunjunganSekaligus ? formData.kondisiAwal : 'Masih Dirawat',
         statusKonfirmasiKondisi: formData.catatKunjunganSekaligus ? 'Terkonfirmasi' : 'Belum Dikonfirmasi',
         keteranganTambahan: formData.keteranganTambahan
@@ -162,9 +207,15 @@ export default function FormInputKorbanModal({ isOpen, onClose, onVictimCreated 
 
       let initialVisitPayload = null;
       if (formData.catatKunjunganSekaligus) {
+        const nowActualIso = new Date().toISOString();
         initialVisitPayload = {
-          tanggalKunjungan: new Date(formData.tanggalMasukRs).toISOString(),
+          tanggalKunjungan: nowActualIso,
+          waktuCatatSistem: nowActualIso,
           kondisiKorban: formData.kondisiAwal,
+          cek_komunikasi_keluarga: formData.cekKomunikasiKeluarga,
+          cek_edukasi_santunan: formData.cekEdukasiSantunan,
+          cek_arahan_lp: formData.cekArahanLp,
+          catatan_kondisi: formData.hasilKunjunganAwal,
           hasilKunjungan: formData.hasilKunjunganAwal,
           komunikasiKeluarga: formData.komunikasiKeluarga,
           penyampaianHak: formData.penyampaianHak,
@@ -179,7 +230,7 @@ export default function FormInputKorbanModal({ isOpen, onClose, onVictimCreated 
         };
       }
 
-      const createdVictim = storageService.addVictim(victimPayload, initialVisitPayload);
+      const createdVictim = await storageService.addVictim(victimPayload, initialVisitPayload);
 
       setIsSubmitting(false);
       if (onVictimCreated) {
@@ -196,7 +247,8 @@ export default function FormInputKorbanModal({ isOpen, onClose, onVictimCreated 
   };
 
   return (
-    <Modal
+    <>
+      <Modal
       isOpen={isOpen}
       onClose={onClose}
       title="Input Data Korban Baru & Kunjungan Pertama"
@@ -215,53 +267,169 @@ export default function FormInputKorbanModal({ isOpen, onClose, onVictimCreated 
           </div>
         )}
 
-        {/* Duplication Warning Banner */}
-        {duplicateMatches.length > 0 && (
-          <div className="p-4 rounded-xl bg-amber-50 border border-amber-300 text-amber-950 space-y-3 shadow-xs">
+        {/* ── BAGIAN IDENTIFIKASI PASIEN & CEK RIWAYAT KASUS ── */}
+        {duplicateMatches.length > 0 && ignoredDuplicateId !== 'CONFIRMED_DIFFERENT' && (
+          <div className="p-4 rounded-xl bg-amber-50/90 border-2 border-amber-300 text-amber-950 space-y-4 shadow-sm">
             <div className="flex items-start gap-2.5">
               <ShieldAlert className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
               <div>
-                <p className="font-bold text-amber-900 text-xs uppercase tracking-wide">
-                  Perhatian: Potensi Data Korban Duplikat Terdeteksi
-                </p>
-                <p className="text-[11px] text-amber-800 mt-0.5">
-                  Sistem menemukan <strong>{duplicateMatches.length} data korban serupa</strong> yang telah terdaftar.
-                  Sesuai ketentuan, satu korban hanya boleh memiliki satu data utama; pemantauan berikutnya harus ditambahkan pada korban yang sama, bukan membuat entri korban baru.
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-extrabold text-amber-950 text-xs uppercase tracking-wide">
+                    Identifikasi Pasien: Potensi Riwayat Kasus Ditemukan
+                  </span>
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-200 text-amber-900 border border-amber-300">
+                    Menunggu Konfirmasi Petugas
+                  </span>
+                </div>
+                <p className="text-[11px] text-amber-800 mt-1 leading-relaxed">
+                  Sistem mendeteksi <strong>{duplicateMatches.length} kasus korban serupa</strong> berdasarkan pencocokan NIK, Nama, dan/atau Kasus Kecelakaan.
+                  Periksa ringkasan di bawah sebelum melanjutkan. Korban yang sama harus dihubungkan pada riwayat perawatan berkelanjutan.
                 </p>
               </div>
             </div>
 
-            <div className="space-y-2 bg-white/80 p-3 rounded-lg border border-amber-200">
-              {duplicateMatches.map((dup) => (
-                <div key={dup.id} className="flex items-center justify-between gap-3 text-xs">
-                  <div>
-                    <span className="font-bold text-slate-900">{dup.nama}</span>
-                    <span className="text-slate-500 text-[11px] block">
-                      ID: {dup.id} &bull; NIK: {dup.nik} &bull; {dup.rumahSakit}
-                    </span>
+            {/* List Matching Cases with Comparative Overview */}
+            <div className="space-y-3">
+              {duplicateMatches.map((dup) => {
+                const isDischarged = dup.isDischarged;
+                const isSameHospital = dup.isSameHospital;
+                const isReferred = dup.isReferred;
+
+                return (
+                  <div key={dup.id} className="bg-white rounded-xl p-3.5 border border-amber-200 shadow-2xs space-y-3">
+                    {/* Visual Badges Row */}
+                    <div className="flex items-center justify-between gap-2 flex-wrap border-b border-slate-100 pb-2">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-200 flex items-center gap-1">
+                          <ShieldAlert className="w-3 h-3 text-amber-700" />
+                          <span>Pasien Memiliki Riwayat Kasus Sebelumnya</span>
+                        </span>
+
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border flex items-center gap-1 ${
+                          dup.detectedCondition === 'RAWAT_LANJUTAN_RS_SAMA'
+                            ? 'bg-purple-50 text-purple-800 border-purple-200'
+                            : dup.detectedCondition === 'RAWAT_LANJUTAN_RS_BEDA'
+                            ? 'bg-indigo-50 text-indigo-800 border-indigo-200'
+                            : dup.detectedCondition === 'KEMUNGKINAN_RUJUKAN'
+                            ? 'bg-violet-50 text-violet-800 border-violet-200'
+                            : 'bg-blue-50 text-blue-800 border-blue-200'
+                        }`}>
+                          <Activity className="w-3 h-3" />
+                          <span>{dup.conditionLabel}</span>
+                        </span>
+                      </div>
+
+                      <span className="text-[10px] font-mono text-slate-500 font-bold">
+                        ID: {dup.previousCaseId}
+                      </span>
+                    </div>
+
+                    {/* Comparative Grid */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs bg-slate-50 p-2.5 rounded-lg border border-slate-200/70">
+                      <div>
+                        <span className="text-[10px] text-slate-400 block">Nama Korban:</span>
+                        <strong className="text-slate-900 font-bold">{dup.nama}</strong>
+                        <span className="text-[10px] text-slate-500 block font-mono">NIK: {dup.nik || '—'}</span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] text-slate-400 block">No. LP / Kasus:</span>
+                        <strong className="text-slate-800 font-semibold">{dup.previousLp}</strong>
+                        <span className="text-[10px] text-slate-500 block">
+                          Tgl Laka: {dup.tanggalKecelakaan ? new Date(dup.tanggalKecelakaan).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' }) : '—'}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] text-slate-400 block">RS Sebelumnya:</span>
+                        <strong className="text-[#0A3981] font-bold">{dup.previousHospital}</strong>
+                        <span className="text-[10px] text-slate-500 block">
+                          RS Sekarang: <strong>{formData.rumahSakit || '—'}</strong>
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] text-slate-400 block">Status Sebelumnya:</span>
+                        <span className={`inline-block font-bold text-[11px] ${isDischarged ? 'text-emerald-700' : 'text-sky-700'}`}>
+                          {dup.previousStatus}
+                        </span>
+                        <span className="text-[10px] text-slate-500 block">
+                          Tgl Masuk: {dup.previousAdmissionDate ? new Date(dup.previousAdmissionDate).toLocaleDateString('id-ID', { day: 'numeric', month: 'short' }) : '—'}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Adaptive Action Buttons based on Condition */}
+                    <div className="flex items-center justify-between gap-2 pt-1 flex-wrap">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        {/* Condition 1 & 2: Rawat Lanjutan */}
+                        {isDischarged && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setTransitionTargetVictim(dup);
+                              setTransitionType('RAWAT_LANJUTAN');
+                            }}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-[#0A3981] text-white hover:bg-[#072B62] shadow-2xs transition-all cursor-pointer"
+                          >
+                            <Activity className="w-3.5 h-3.5" />
+                            <span>
+                              {isSameHospital
+                                ? 'Konfirmasi Rawat Lanjutan (RS Sama)'
+                                : 'Konfirmasi Rawat Lanjutan (RS Berbeda)'}
+                            </span>
+                          </button>
+                        )}
+
+                        {/* Condition 3: Rujukan (Pasien Masih Dirawat & RS Berbeda) */}
+                        {!isDischarged && !isSameHospital && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setTransitionTargetVictim(dup);
+                              setTransitionType('RUJUKAN');
+                            }}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-violet-700 text-white hover:bg-violet-800 shadow-2xs transition-all cursor-pointer"
+                          >
+                            <ArrowUpRight className="w-3.5 h-3.5" />
+                            <span>Konfirmasi Rujukan ke RS Ini</span>
+                          </button>
+                        )}
+
+                        {/* Secondary Button: Lihat Riwayat Sebelumnya */}
+                        <button
+                          type="button"
+                          onClick={() => handleOpenExistingVictim(dup.id)}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors cursor-pointer"
+                        >
+                          <Eye className="w-3.5 h-3.5 text-slate-500" />
+                          <span>Lihat Riwayat Kasus Sebelumnya</span>
+                        </button>
+                      </div>
+
+                      {/* Detail Link */}
+                      <button
+                        type="button"
+                        onClick={() => handleOpenExistingVictim(dup.id)}
+                        className="text-[11px] font-bold text-[#145DA0] hover:underline flex items-center gap-1"
+                      >
+                        <span>Buka Detail Korban</span>
+                        <ArrowRight className="w-3 h-3" />
+                      </button>
+                    </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => handleOpenExistingVictim(dup.id)}
-                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-bold bg-[#145DA0] text-white hover:bg-[#0f497e] shrink-0"
-                  >
-                    <span>Buka Data Korban</span>
-                    <ArrowRight className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              ))}
+                );
+              })}
             </div>
 
-            <div className="flex items-center justify-between pt-1">
+            {/* Bottom Different Case Override */}
+            <div className="flex items-center justify-between pt-1 border-t border-amber-200/80">
               <span className="text-[11px] text-amber-900 font-medium">
-                Yakin ini kasus kecelakaan atau korban yang berbeda?
+                Kecelakaan terjadi pada korban yang berbeda dan bukan kelanjutan kasus di atas?
               </span>
               <button
                 type="button"
                 onClick={() => setIgnoredDuplicateId('CONFIRMED_DIFFERENT')}
                 className="text-[11px] font-bold text-amber-900 underline hover:text-amber-950 cursor-pointer"
               >
-                Konfirmasi: Lanjutkan Buat Data Baru
+                Tandai sebagai Kasus Berbeda (Buat Baru)
               </button>
             </div>
           </div>
@@ -383,16 +551,37 @@ export default function FormInputKorbanModal({ isOpen, onClose, onVictimCreated 
                 onChange={handleChange}
                 className="w-full rounded-lg border border-slate-300 px-3 py-2 text-slate-800 bg-white focus:outline-none focus:ring-1 focus:ring-[#145DA0]"
               >
-                <option value="RSUP Dr. Cipto Mangunkusumo (RSCM)">RSUP Dr. Cipto Mangunkusumo (RSCM)</option>
-                <option value="RSUD Tarakan Jakarta">RSUD Tarakan Jakarta</option>
-                <option value="RSUP Fatmawati">RSUP Fatmawati</option>
-                <option value="RS Polri Said Sukanto">RS Polri Said Sukanto</option>
-                <option value="RS Columbia Asia Pulomas">RS Columbia Asia Pulomas</option>
-                <option value="RS Hermina Kemayoran">RS Hermina Kemayoran</option>
-                <option value="RSUD Koja">RSUD Koja</option>
-                <option value="RS Sumber Waras">RS Sumber Waras</option>
-                <option value="RS Pelni Slipi">RS Pelni Slipi</option>
+                <option value="RS Syafira">RS Syafira (Pekanbaru - Terdaftar)</option>
+                <option value="RS Prima">RS Prima (Pekanbaru - Terdaftar)</option>
+                <option value="RSUD Arifin Achmad">RSUD Arifin Achmad (Pekanbaru)</option>
+                <option value="RS Awal Bros Sudirman">RS Awal Bros Sudirman (Pekanbaru)</option>
+                <option value="RS Awal Bros Panam">RS Awal Bros Panam (Pekanbaru)</option>
+                <option value="RS Santa Maria Pekanbaru">RS Santa Maria (Pekanbaru)</option>
+                <option value="RS Sansani Pekanbaru">RS Sansani (Pekanbaru)</option>
+                <option value="RS Tabrani Rab">RS Tabrani Rab (Pekanbaru)</option>
+                <option value="RS Bhayangkara Pekanbaru">RS Bhayangkara (Pekanbaru)</option>
+                <option value="RSUD Petala Bumi">RSUD Petala Bumi (Pekanbaru)</option>
+                <option value="RSUD Kota Dumai">RSUD Kota Dumai</option>
+                <option value="RSUD Mandau Duri">RSUD Mandau (Duri, Bengkalis)</option>
+                <option value="RSUD Puri Husada Tembilahan">RSUD Puri Husada (Tembilahan, Inhil)</option>
               </select>
+
+              {/* Status Penugasan Petugas JR Penanggung Jawab */}
+              <div className="mt-2 p-2.5 rounded-lg bg-blue-50/80 border border-blue-200/90 flex items-center justify-between text-xs">
+                <span className="text-slate-600 font-semibold flex items-center gap-1.5">
+                  <UserCheck className="w-4 h-4 text-[#0A3981]" />
+                  <span>Petugas JR Penanggung Jawab:</span>
+                </span>
+                {currentAssignedOfficer ? (
+                  <span className="font-extrabold text-[#0A3981] bg-white px-2.5 py-1 rounded-md border border-blue-200 shadow-2xs">
+                    {currentAssignedOfficer.nama} ({currentAssignedOfficer.id})
+                  </span>
+                ) : (
+                  <span className="font-bold text-amber-700 bg-amber-50 px-2.5 py-1 rounded-md border border-amber-300">
+                    Belum Ada Petugas Penanggung Jawab
+                  </span>
+                )}
+              </div>
             </div>
 
             {/* Tempat Kecelakaan */}
@@ -492,11 +681,11 @@ export default function FormInputKorbanModal({ isOpen, onClose, onVictimCreated 
                     onChange={handleChange}
                     className="w-full rounded-lg border border-slate-300 px-3 py-2 text-slate-800 bg-white"
                   >
-                    <option value="Masih Dirawat">Masih Dirawat</option>
-                    <option value="Sudah Pulang">Sudah Pulang</option>
-                    <option value="Dirujuk">Dirujuk ke RS Lain</option>
+                    <option value="Rawat Inap">Rawat Inap</option>
+                    <option value="Luka Ringan">Luka Ringan</option>
+                    <option value="Luka Berat">Luka Berat</option>
                     <option value="Meninggal Dunia">Meninggal Dunia</option>
-                    <option value="Belum Dapat Dikonfirmasi">Belum Dapat Dikonfirmasi</option>
+                    <option value="Selesai">Selesai / Pulang</option>
                   </select>
                 </div>
 
@@ -513,6 +702,43 @@ export default function FormInputKorbanModal({ isOpen, onClose, onVictimCreated 
                     className="w-full rounded-lg border border-slate-300 px-3 py-2 text-slate-800 bg-white"
                   />
                 </div>
+              </div>
+
+              {/* Checklist 3 SOP Kunjungan Database */}
+              <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 space-y-1.5">
+                <span className="font-semibold text-slate-700 block text-[11px] uppercase tracking-wide">
+                  Checklist SOP Kunjungan Pertama
+                </span>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    name="cekKomunikasiKeluarga"
+                    checked={formData.cekKomunikasiKeluarga}
+                    onChange={handleChange}
+                    className="rounded text-[#145DA0] focus:ring-[#145DA0] w-4 h-4 cursor-pointer"
+                  />
+                  <span className="text-slate-800 font-medium">1. Komunikasi langsung dengan korban / ahli waris</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    name="cekEdukasiSantunan"
+                    checked={formData.cekEdukasiSantunan}
+                    onChange={handleChange}
+                    className="rounded text-[#145DA0] focus:ring-[#145DA0] w-4 h-4 cursor-pointer"
+                  />
+                  <span className="text-slate-800 font-medium">2. Edukasi hak dan kepastian santunan Jasa Raharja</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    name="cekArahanLp"
+                    checked={formData.cekArahanLp}
+                    onChange={handleChange}
+                    className="rounded text-[#145DA0] focus:ring-[#145DA0] w-4 h-4 cursor-pointer"
+                  />
+                  <span className="text-slate-800 font-medium">3. Arahan pengurusan Laporan Polisi (LP) Laka Lantas</span>
+                </label>
               </div>
 
               <div>
@@ -577,6 +803,26 @@ export default function FormInputKorbanModal({ isOpen, onClose, onVictimCreated 
         </div>
       </form>
     </Modal>
+
+    {/* Dialog Konfirmasi Transisi Perawatan / Rujukan */}
+    {transitionTargetVictim && (
+      <PatientTransitionModal
+        isOpen={Boolean(transitionTargetVictim)}
+        onClose={() => setTransitionTargetVictim(null)}
+        victim={transitionTargetVictim}
+        transitionType={transitionType}
+        targetHospitalDefault={formData.rumahSakit || transitionTargetVictim.rumahSakit}
+        onConfirmed={(updated) => {
+          setTransitionTargetVictim(null);
+          onClose();
+          if (onVictimCreated) {
+            onVictimCreated(updated);
+          }
+          navigate(`/petugas/korban/${updated.id}`);
+        }}
+      />
+    )}
+  </>
   );
 }
 

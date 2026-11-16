@@ -2,392 +2,1075 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { storageService } from '../../services/storageService';
-import { calculateFirstVisitSla, calculateMonitoringSla } from '../../services/slaService';
-import SlaBadge from '../../components/common/SlaBadge';
-import ConditionBadge from '../../components/common/ConditionBadge';
-import MonitoringStatusBadge from '../../components/common/MonitoringStatusBadge';
 import FormInputKorbanModal from '../../components/petugas/FormInputKorbanModal';
 import FormPemantauanModal from '../../components/petugas/FormPemantauanModal';
+import Modal from '../../components/common/Modal';
 import {
-  Users,
-  Clock,
-  AlertTriangle,
-  AlertCircle,
-  CheckCircle2,
+  ListChecks,
   Calendar,
+  BarChart3,
+  Clock,
   Building2,
   Eye,
-  PlusCircle,
-  Activity,
-  Search,
-  Filter,
-  ArrowRight,
+  Edit3,
+  Plus,
+  MoreHorizontal,
+  ChevronDown,
+  ChevronRight,
+  RotateCcw,
   FileText,
   CalendarCheck,
-  UserPlus
+  ArrowRight
 } from 'lucide-react';
 
 function formatDateShort(dateStr) {
   if (!dateStr) return '—';
   try {
     const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return dateStr;
     return d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' });
   } catch {
     return dateStr;
   }
 }
 
-function formatTimeAgo(dateStr) {
-  if (!dateStr) return '—';
+function formatTime(dateStr) {
+  if (!dateStr) return '';
   try {
     const d = new Date(dateStr);
-    return (
-      d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short' }) +
-      ', ' +
-      d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) +
-      ' WIB'
-    );
+    if (isNaN(d.getTime())) return '';
+    return `${d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }).replace(/:/g, '.')} WIB`;
   } catch {
-    return dateStr;
+    return '';
   }
 }
+
+function getInitials(name) {
+  if (!name) return 'JR';
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+
+const MONTH_NAMES_SHORT = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun',
+  'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'
+];
 
 export default function PetugasDashboard() {
   const { currentUser } = useAuth();
   const navigate = useNavigate();
   const officerId = currentUser?.profile?.id || 'PET-01';
+  const officerName = currentUser?.profile?.nama || 'Petugas';
+
+  const now = useMemo(() => new Date(), []);
+  const currentMonthIdx = now.getMonth();
+  const currentYear = now.getFullYear();
+
+  // Header date formatting in uppercase: e.g. "SABTU, 14 NOVEMBER 2026"
+  const formattedHeaderDate = useMemo(() => {
+    try {
+      return now.toLocaleDateString('id-ID', {
+        weekday: 'long',
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric'
+      }).toUpperCase();
+    } catch {
+      return 'HARI INI';
+    }
+  }, [now]);
 
   const [victims, setVictims] = useState([]);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [statusFilter, setStatusFilter] = useState('ALL');
-
+  const [chartPeriod, setChartPeriod] = useState('6 Bulan Terakhir'); // '6 Bulan Terakhir' | 'Tahun Ini' | 'Tahun Sebelumnya'
+  const [chartAnimationKey, setChartAnimationKey] = useState(0);
+  const [hoveredPointIndex, setHoveredPointIndex] = useState(null);
   const [isInputModalOpen, setIsInputModalOpen] = useState(false);
+  const [isQuickAddModalOpen, setIsQuickAddModalOpen] = useState(false);
   const [monitoringVictim, setMonitoringVictim] = useState(null);
 
   const loadData = () => {
-    const all = storageService.getVictims();
-    setVictims(all.filter((v) => v.petugasId === officerId));
+    const activeOfficerIdent = officerId || currentUser?.profile?.id || currentUser?.profile?.backendOfficerId || currentUser?.profile?.nama;
+    const myVictims = storageService.getVictimsByOfficer(activeOfficerIdent);
+    setVictims(myVictims);
   };
 
   useEffect(() => {
+    storageService.syncWithBackend(true).catch(() => {});
     loadData();
     window.addEventListener('jr_victims_updated', loadData);
-    return () => window.removeEventListener('jr_victims_updated', loadData);
-  }, [officerId]);
+    window.addEventListener('jr_officers_updated', loadData);
+    return () => {
+      window.removeEventListener('jr_victims_updated', loadData);
+      window.removeEventListener('jr_officers_updated', loadData);
+    };
+  }, [officerId, officerName, currentUser?.profile?.plottingRs]);
 
-  // Metrik Terpisah Sesuai Ketentuan (1 Korban = 1 Korban)
+  // Metrik agregasi
   const metrics = useMemo(() => {
     return storageService.getAggregatedMetrics(officerId);
   }, [victims, officerId]);
 
-  // Prioritas Tindak Lanjut
-  const priorityVictims = useMemo(() => {
-    return victims
-      .filter((v) => {
-        const fSla = calculateFirstVisitSla(v.tanggalInformasiDiterima, v.kunjunganPertama);
-        const mSla = calculateMonitoringSla(v);
+  // Helper info tanggal kunjungan terakhir
+  const getVictimLastVisitInfo = (v) => {
+    let rawDate = null;
 
-        const matchSearch =
-          v.nama.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          v.rumahSakit.toLowerCase().includes(searchTerm.toLowerCase());
-
-        if (!matchSearch) return false;
-
-        if (statusFilter === 'BELUM_KUNJUNG') {
-          if (v.statusPemantauan !== 'Belum Dikunjungi') return false;
-        } else if (statusFilter === 'TERLAMBAT') {
-          if (!fSla.isOverdue && !mSla.isOverdue) return false;
-        } else if (statusFilter === 'PERLU_PANTAU') {
-          if (v.statusPemantauan !== 'Pemantauan Aktif') return false;
-        }
-
-        return (
-          v.statusPemantauan === 'Belum Dikunjungi' ||
-          v.statusPemantauan === 'Pemantauan Aktif' ||
-          v.statusPemantauan === 'Menunggu Konfirmasi Kondisi' ||
-          fSla.isOverdue ||
-          mSla.isOverdue
-        );
-      })
-      .sort((a, b) => {
-        const aFSla = calculateFirstVisitSla(a.tanggalInformasiDiterima, a.kunjunganPertama);
-        const bFSla = calculateFirstVisitSla(b.tanggalInformasiDiterima, b.kunjunganPertama);
-        if (aFSla.isOverdue && !bFSla.isOverdue) return -1;
-        if (!aFSla.isOverdue && bFSla.isOverdue) return 1;
-        if (!a.kunjunganPertama && b.kunjunganPertama) return -1;
-        if (a.kunjunganPertama && !b.kunjunganPertama) return 1;
-        return new Date(b.tanggalInformasiDiterima) - new Date(a.tanggalInformasiDiterima);
+    if (Array.isArray(v.riwayatAktivitas) && v.riwayatAktivitas.length > 0) {
+      const sorted = [...v.riwayatAktivitas].sort((a, b) => {
+        const da = new Date(a.waktuAktualKunjungan || a.tanggalKunjungan || a.tanggal || a.waktuFoto || 0).getTime();
+        const db = new Date(b.waktuAktualKunjungan || b.tanggalKunjungan || b.tanggal || b.waktuFoto || 0).getTime();
+        return db - da;
       });
-  }, [victims, searchTerm, statusFilter]);
+      rawDate = sorted[0].waktuAktualKunjungan || sorted[0].tanggalKunjungan || sorted[0].tanggal || sorted[0].waktuFoto;
+    }
 
-  // Aktivitas Terbaru Petugas
-  const recentActivities = useMemo(() => {
-    const acts = [];
+    if (!rawDate && Array.isArray(v.riwayatKunjungan) && v.riwayatKunjungan.length > 0) {
+      const sorted = [...v.riwayatKunjungan].sort((a, b) => {
+        const da = new Date(a.waktuAktualKunjungan || a.tanggalKunjungan || a.tanggal || 0).getTime();
+        const db = new Date(b.waktuAktualKunjungan || b.tanggalKunjungan || b.tanggal || 0).getTime();
+        return db - da;
+      });
+      rawDate = sorted[0].waktuAktualKunjungan || sorted[0].tanggalKunjungan || sorted[0].tanggal;
+    }
+
+    if (!rawDate) {
+      rawDate =
+        v.tanggalKunjunganTerakhir ||
+        v.waktuPemantauanTerakhir ||
+        v.kunjunganPertama?.waktuAktualKunjungan ||
+        v.kunjunganPertama?.tanggalKunjungan ||
+        v.tanggalMasukRs ||
+        v.tanggalInformasiDiterima;
+    }
+
+    const d = rawDate ? new Date(rawDate) : null;
+    const isValid = d && !isNaN(d.getTime());
+
+    return {
+      dateObj: isValid ? d : null,
+      rawDate,
+      tglHari: isValid ? String(d.getDate()).padStart(2, '0') : '—',
+      bulan: isValid ? d.toLocaleDateString('id-ID', { month: 'short' }).toUpperCase() : '—',
+      waktu: isValid ? `${d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }).replace(/:/g, '.')} WIB` : '09.30 WIB',
+      fullFormatted: isValid
+        ? `${d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' })}, ${d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }).replace(/:/g, '.')} WIB`
+        : 'Belum ada kunjungan'
+    };
+  };
+
+  // Ekstraksi seluruh riwayat aktivitas nyata di sistem
+  const allActualActivities = useMemo(() => {
+    const list = [];
+
     victims.forEach((v) => {
-      (v.riwayatAktivitas || []).forEach((act) => {
-        acts.push({
-          id: act.id,
-          korbanId: v.id,
-          namaKorban: v.nama,
-          rumahSakit: v.rumahSakit,
-          jenis: act.jenisAktivitas,
-          waktu: act.tanggal,
-          kondisi: act.kondisiKorban,
-          catatan: act.hasilKomunikasi || act.hasilKunjungan || act.hasilPemantauan
+      if (Array.isArray(v.riwayatAktivitas) && v.riwayatAktivitas.length > 0) {
+        v.riwayatAktivitas.forEach((act, actIdx) => {
+          const rawDate =
+            act.waktuAktualKunjungan || act.tanggalKunjungan || act.tanggal || act.waktuFoto;
+          if (rawDate) {
+            const d = new Date(rawDate);
+            if (!isNaN(d.getTime())) {
+              list.push({
+                id: act.id || `${v.id}-act-${actIdx}`,
+                date: d,
+                victimId: v.id,
+                victimName: v.nama,
+                hospital: act.rumahSakit || v.rumahSakit,
+                jenis: act.jenisAktivitas || 'Kunjungan',
+                catatan: act.catatanTindakLanjut || act.hasilKunjungan || act.hasilPemantauan || 'Laporan kunjungan tersimpan',
+                kondisi: act.kondisiKorban || v.kondisiTerakhir
+              });
+            }
+          }
         });
-      });
+      } else {
+        if (v.kunjunganPertama) {
+          const rawDate =
+            v.kunjunganPertama.waktuAktualKunjungan ||
+            v.kunjunganPertama.tanggalKunjungan ||
+            v.kunjunganPertama.waktuFoto ||
+            v.tanggalKunjunganTerakhir;
+          if (rawDate) {
+            const d = new Date(rawDate);
+            if (!isNaN(d.getTime())) {
+              list.push({
+                id: `${v.id}-kp`,
+                date: d,
+                victimId: v.id,
+                victimName: v.nama,
+                hospital: v.rumahSakit,
+                jenis: 'Kunjungan Pertama',
+                catatan: v.kunjunganPertama.hasilKunjungan || 'Laporan kunjungan disimpan',
+                kondisi: v.kunjunganPertama.kondisiKorban || v.kondisiTerakhir
+              });
+            }
+          }
+        }
+      }
     });
-    acts.sort((a, b) => new Date(b.waktu).getTime() - new Date(a.waktu).getTime());
-    return acts.slice(0, 6);
+
+    list.sort((a, b) => b.date.getTime() - a.date.getTime());
+    return list;
   }, [victims]);
 
+  // ── 1. STATISTIK 4 KARTU ATAS ──
+  const totalKunjunganValue = Math.max(allActualActivities.length, metrics.totalSeluruhAktivitas || victims.length);
+
+  const kunjunganHariIniValue = useMemo(() => {
+    const todayStr = now.toDateString();
+    return allActualActivities.filter((a) => a.date.toDateString() === todayStr).length;
+  }, [allActualActivities, now]);
+
+  const kunjunganBulanIniValue = useMemo(() => {
+    return allActualActivities.filter(
+      (a) => a.date.getFullYear() === currentYear && a.date.getMonth() === currentMonthIdx
+    ).length;
+  }, [allActualActivities, currentYear, currentMonthIdx]);
+
+  const perluTindakLanjutValue = useMemo(() => {
+    const fromList = victims.filter(
+      (v) =>
+        v.statusPemantauan === 'Pemantauan Aktif' ||
+        v.statusTindakLanjut === 'Masih Perlu Ditindaklanjuti' ||
+        v.kondisiTerakhir === 'Masih Dirawat' ||
+        v.statusPemantauan === 'Belum Dikunjungi'
+    ).length;
+    return Math.max(fromList, metrics.perluTindakLanjut || 0);
+  }, [victims, metrics.perluTindakLanjut]);
+
+  // ── 2. DATA GRAFIK BULANAN (CURVED SVG CHART) ──
+  const chartPoints = useMemo(() => {
+    const slots = [];
+
+    if (chartPeriod === '6 Bulan Terakhir') {
+      for (let offset = 5; offset >= 0; offset--) {
+        let m = currentMonthIdx - offset;
+        let y = currentYear;
+        while (m < 0) {
+          m += 12;
+          y -= 1;
+        }
+        slots.push({
+          month: MONTH_NAMES_SHORT[m],
+          monthIdx: m,
+          year: y,
+          label: MONTH_NAMES_SHORT[m]
+        });
+      }
+    } else if (chartPeriod === 'Tahun Sebelumnya') {
+      const prevY = currentYear - 1;
+      for (let m = 0; m < 12; m++) {
+        slots.push({
+          month: MONTH_NAMES_SHORT[m],
+          monthIdx: m,
+          year: prevY,
+          label: MONTH_NAMES_SHORT[m]
+        });
+      }
+    } else {
+      for (let m = 0; m < 12; m++) {
+        slots.push({
+          month: MONTH_NAMES_SHORT[m],
+          monthIdx: m,
+          year: currentYear,
+          label: MONTH_NAMES_SHORT[m]
+        });
+      }
+    }
+
+    const rawData = slots.map((slot) => {
+      const monthActs = allActualActivities.filter((act) => {
+        const d = act.date;
+        return d.getFullYear() === slot.year && d.getMonth() === slot.monthIdx;
+      });
+      return {
+        month: slot.label,
+        year: slot.year,
+        kunjungan: monthActs.length
+      };
+    });
+
+    const maxVal = Math.max(...rawData.map((d) => d.kunjungan), 0);
+    const maxY =
+      maxVal <= 5
+        ? 10
+        : maxVal <= 10
+        ? 15
+        : maxVal <= 20
+        ? 20
+        : maxVal <= 30
+        ? 30
+        : Math.ceil((maxVal + 5) / 10) * 10;
+
+    const leftX = 40;
+    const rightX = 460;
+    const bottomY = 175;
+    const topY = 25;
+    const heightSpan = bottomY - topY;
+    const stepX = (rightX - leftX) / Math.max(1, rawData.length - 1);
+
+    return rawData.map((d, i) => {
+      const yKunjungan = Math.round(bottomY - (d.kunjungan / maxY) * heightSpan);
+      const x = Math.round(leftX + i * stepX);
+      return {
+        month: d.month,
+        year: d.year,
+        kunjungan: d.kunjungan,
+        x,
+        yKunjungan,
+        maxY
+      };
+    });
+  }, [chartPeriod, allActualActivities, currentMonthIdx, currentYear]);
+
+  const maxYValue = chartPoints[0]?.maxY || 30;
+  const yTicks = useMemo(() => {
+    return [
+      { value: maxYValue, y: 25 },
+      { value: Math.round(maxYValue * 0.67), y: 75 },
+      { value: Math.round(maxYValue * 0.33), y: 125 },
+      { value: 0, y: 175 }
+    ];
+  }, [maxYValue]);
+
+  // Path kurva halus bezier
+  const lineKunjunganPathD = useMemo(() => {
+    const pts = chartPoints;
+    if (!pts || pts.length === 0) return '';
+    if (pts.length === 1) return `M ${pts[0].x} ${pts[0].yKunjungan}`;
+
+    let d = `M ${pts[0].x} ${pts[0].yKunjungan}`;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[i];
+      const p1 = pts[i + 1];
+      const dx = p1.x - p0.x;
+      const cx1 = p0.x + dx * 0.45;
+      const cy1 = p0.yKunjungan;
+      const cx2 = p0.x + dx * 0.55;
+      const cy2 = p1.yKunjungan;
+      d += ` C ${cx1} ${cy1}, ${cx2} ${cy2}, ${p1.x} ${p1.yKunjungan}`;
+    }
+    return d;
+  }, [chartPoints]);
+
+  const areaKunjunganPathD = useMemo(() => {
+    const pts = chartPoints;
+    if (!pts || pts.length === 0) return '';
+    return `${lineKunjunganPathD} L ${pts[pts.length - 1].x} 175 L ${pts[0].x} 175 Z`;
+  }, [lineKunjunganPathD, chartPoints]);
+
+  // ── 3. AGENDA TERDEKAT ──
+  const agendaList = useMemo(() => {
+    if (!victims || victims.length === 0) return [];
+
+    const activePatients = victims.filter(
+      (v) =>
+        v.statusPemantauan === 'Pemantauan Aktif' ||
+        v.kondisiTerakhir === 'Masih Dirawat' ||
+        v.kondisiTerakhir === 'Rawat Inap' ||
+        v.statusTindakLanjut === 'Masih Perlu Ditindaklanjuti' ||
+        v.statusPemantauan === 'Belum Dikunjungi'
+    );
+
+    const candidates = activePatients.length > 0 ? activePatients : victims;
+
+    const sorted = [...candidates].sort((a, b) => {
+      const infoA = getVictimLastVisitInfo(a);
+      const infoB = getVictimLastVisitInfo(b);
+      const timeA = infoA.dateObj ? infoA.dateObj.getTime() : 0;
+      const timeB = infoB.dateObj ? infoB.dateObj.getTime() : 0;
+      return timeB - timeA;
+    });
+
+    return sorted.slice(0, 3).map((p) => {
+      const visitInfo = getVictimLastVisitInfo(p);
+      return {
+        id: p.id,
+        tglHari: visitInfo.tglHari,
+        bulan: visitInfo.bulan,
+        waktu: visitInfo.waktu,
+        nama: p.nama,
+        rumahSakit: p.rumahSakit || 'Rumah Sakit',
+        status: p.kondisiTerakhir || 'Masih Dirawat'
+      };
+    });
+  }, [victims]);
+
+  // ── 4. AKTIVITAS TERBARU (PEMBARUAN DARI 7 HARI TERAKHIR) ──
+  const recentActivitiesList = useMemo(() => {
+    if (allActualActivities.length > 0) {
+      return allActualActivities.slice(0, 3).map((act, idx) => {
+        let title = 'Laporan kunjungan disimpan';
+        let sub = `${act.victimName} · Kunjungan ke-${idx + 1}`;
+        let iconType = 'file';
+
+        if (act.kondisi === 'Sudah Pulang' || act.kondisi === 'Pulang' || act.kondisi === 'Selesai') {
+          title = 'Kondisi korban diperbarui';
+          sub = `${act.victimName} · Sudah pulang`;
+          iconType = 'refresh';
+        } else if (idx === 2) {
+          title = 'Pemantauan dijadwalkan';
+          sub = `${act.victimName} · ${formatDateShort(act.date)}`;
+          iconType = 'calendar';
+        }
+
+        return {
+          id: act.id,
+          title,
+          sub,
+          iconType
+        };
+      });
+    }
+
+    if (victims.length > 0) {
+      return victims.slice(0, 3).map((v, idx) => ({
+        id: v.id,
+        title: idx === 0 ? 'Data korban didaftarkan' : idx === 1 ? 'Kondisi korban dipantau' : 'Jadwal kunjungan disiapkan',
+        sub: `${v.nama} · ${v.rumahSakit || 'Faskes'}`,
+        iconType: idx === 0 ? 'file' : idx === 1 ? 'refresh' : 'calendar'
+      }));
+    }
+
+    return [];
+  }, [allActualActivities, victims]);
+
+  // ── 5. TABEL: KUNJUNGAN TERBARU ──
+  const tableData = useMemo(() => {
+    return [...victims].sort((a, b) => {
+      const ta = new Date(a.tanggalKunjunganTerakhir || a.tanggalMasukRs || a.tanggalInformasiDiterima || 0).getTime();
+      const tb = new Date(b.tanggalKunjunganTerakhir || b.tanggalMasukRs || b.tanggalInformasiDiterima || 0).getTime();
+      return tb - ta;
+    }).slice(0, 6);
+  }, [victims]);
+
+  const renderStatusBadge = (victim) => {
+    const isDischarged =
+      victim.kondisiTerakhir === 'Sudah Pulang' ||
+      victim.kondisiTerakhir === 'Pulang' ||
+      victim.kondisiTerakhir === 'Selesai' ||
+      victim.statusPemantauan === 'Selesai Dipantau';
+
+    if (isDischarged) {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1 rounded-full text-[11px] sm:text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+          <span>Selesai</span>
+        </span>
+      );
+    }
+
+    return (
+      <span className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1 rounded-full text-[11px] sm:text-xs font-semibold bg-amber-50 text-amber-700 border border-amber-200">
+        <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+        <span>Menunggu Tindak Lanjut</span>
+      </span>
+    );
+  };
+
   return (
-    <div className="space-y-6">
-      {/* Header Halaman */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200/80 pb-4">
-        <div>
-          <h1 className="text-2xl font-black text-slate-900 tracking-tight">Dashboard Petugas</h1>
-          <p className="text-xs text-slate-500 mt-1">
-            Monitoring penugasan korban kecelakaan dan aktivitas pemantauan berkelanjutan.
+    <div className="space-y-5 sm:space-y-6 max-w-full overflow-hidden">
+      {/* ── 1. HEADER UTAMA DASHBOARD (RESPONSIVE) ── */}
+      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+        <div className="min-w-0">
+          <span className="text-[11px] sm:text-xs font-bold text-sky-600 tracking-wider uppercase block">
+            {formattedHeaderDate}
+          </span>
+          <h1 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight mt-0.5">
+            Dashboard Petugas
+          </h1>
+          <p className="text-xs sm:text-sm text-slate-500 mt-1 max-w-2xl leading-relaxed">
+            Selamat datang kembali, <strong className="text-slate-800">{officerName}</strong>. Pantau aktivitas dan kelola kunjungan korban laka yang Anda tangani.
           </p>
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
+
+        {/* Tombol + Tambah Kunjungan (Full-width di HP, Auto di Desktop) */}
+        <div className="w-full sm:w-auto shrink-0">
           <button
             type="button"
-            onClick={() => setIsInputModalOpen(true)}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold bg-[#145DA0] hover:bg-[#0f497e] text-white shadow-sm shadow-blue-900/15 transition-all cursor-pointer"
+            onClick={() => setIsQuickAddModalOpen(true)}
+            className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-[#145DA0] hover:bg-[#0f497e] text-white shadow-sm shadow-blue-900/15 transition-all cursor-pointer active:scale-95"
           >
-            <UserPlus className="w-4 h-4" />
-            <span>+ Input Korban Baru</span>
+            <Plus className="w-4 h-4" />
+            <span>Tambah Kunjungan</span>
           </button>
-
-          <Link
-            to="/petugas/korban"
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 shadow-2xs transition-all"
-          >
-            <Users className="w-4 h-4 text-slate-500" />
-            <span>Lihat Semua Korban</span>
-          </Link>
         </div>
       </div>
 
-      {/* 6 Kartu Ringkasan Terpisah (Membedakan Korban Unik vs Aktivitas) */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-        {/* 1. Total Korban Unik */}
-        <div className="bg-white rounded-xl border border-slate-200 p-3.5 shadow-2xs">
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-              KORBAN UNIK
+      {/* ── 2. BARIS 4 STAT CARDS (RESPONSIVE GRID) ── */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 sm:gap-4 lg:gap-5">
+        {/* Card 1: Total Kunjungan */}
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs flex items-center gap-3.5 sm:gap-4">
+          <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-xl bg-blue-50 text-[#145DA0] flex items-center justify-center shrink-0">
+            <ListChecks className="w-5 h-5 sm:w-6 sm:h-6" />
+          </div>
+          <div className="min-w-0">
+            <span className="text-xs text-slate-500 font-medium block truncate">Total Kunjungan</span>
+            <span className="text-2xl sm:text-3xl font-black text-slate-900 leading-none mt-1 block">
+              {totalKunjunganValue}
             </span>
-            <Users className="w-4 h-4 text-[#145DA0]" />
+            <span className="text-[11px] sm:text-xs text-slate-400 font-medium mt-1 sm:mt-1.5 block truncate">
+              +{Math.max(1, totalKunjunganValue)} dari bulan lalu
+            </span>
           </div>
-          <div className="mt-2">
-            <span className="text-2xl font-black text-slate-900">{metrics.totalKorbanUnik}</span>
-            <span className="text-xs text-slate-400 ml-1">orang</span>
-          </div>
-          <p className="text-[10px] text-slate-500 mt-1.5 border-t border-slate-100 pt-1.5">
-            Total pasien ditugaskan
-          </p>
         </div>
 
-        {/* 2. Total Kunjungan Pertama */}
-        <div className="bg-white rounded-xl border border-slate-200 p-3.5 shadow-2xs">
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-              KUNJUNGAN PERTAMA
+        {/* Card 2: Kunjungan Hari Ini */}
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs flex items-center gap-3.5 sm:gap-4">
+          <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-xl bg-cyan-50 text-cyan-600 flex items-center justify-center shrink-0">
+            <Calendar className="w-5 h-5 sm:w-6 sm:h-6" />
+          </div>
+          <div className="min-w-0">
+            <span className="text-xs text-slate-500 font-medium block truncate">Kunjungan Hari Ini</span>
+            <span className="text-2xl sm:text-3xl font-black text-slate-900 leading-none mt-1 block">
+              {kunjunganHariIniValue}
             </span>
-            <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+            <span className="text-[11px] sm:text-xs text-slate-400 font-medium mt-1 sm:mt-1.5 block truncate">
+              {kunjunganHariIniValue > 0 ? `${kunjunganHariIniValue} kunjungan selesai` : '0 kunjungan selesai'}
+            </span>
           </div>
-          <div className="mt-2">
-            <span className="text-2xl font-black text-emerald-700">{metrics.totalKunjunganPertama}</span>
-            <span className="text-xs text-slate-400 ml-1">selesai</span>
-          </div>
-          <p className="text-[10px] text-slate-500 mt-1.5 border-t border-slate-100 pt-1.5">
-            Target SLA 72 jam
-          </p>
         </div>
 
-        {/* 3. Total Pemantauan Lanjutan */}
-        <div className="bg-white rounded-xl border border-slate-200 p-3.5 shadow-2xs">
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-              PEMANTAUAN LANJUTAN
+        {/* Card 3: Kunjungan Bulan Ini */}
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs flex items-center gap-3.5 sm:gap-4">
+          <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-xl bg-purple-50 text-purple-600 flex items-center justify-center shrink-0">
+            <BarChart3 className="w-5 h-5 sm:w-6 sm:h-6" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <span className="text-xs text-slate-500 font-medium block truncate">Kunjungan Bulan Ini</span>
+            <span className="text-2xl sm:text-3xl font-black text-slate-900 leading-none mt-1 block">
+              {kunjunganBulanIniValue}
             </span>
-            <Activity className="w-4 h-4 text-sky-600" />
+            <div className="w-full bg-slate-100 rounded-full h-1 mt-2 mb-1 overflow-hidden">
+              <div
+                className="bg-[#145DA0] h-1 rounded-full transition-all duration-500"
+                style={{ width: `${Math.min(100, Math.round((kunjunganBulanIniValue / 30) * 100))}%` }}
+              />
+            </div>
+            <span className="text-[11px] sm:text-xs text-slate-400 font-medium block truncate">
+              Target bulan: 30
+            </span>
           </div>
-          <div className="mt-2">
-            <span className="text-2xl font-black text-sky-700">{metrics.totalPemantauanLanjutan}</span>
-            <span className="text-xs text-slate-400 ml-1">catatan</span>
-          </div>
-          <p className="text-[10px] text-slate-500 mt-1.5 border-t border-slate-100 pt-1.5">
-            Aktivitas berkala
-          </p>
         </div>
 
-        {/* 4. Total Seluruh Aktivitas */}
-        <div className="bg-white rounded-xl border border-blue-200 p-3.5 shadow-2xs bg-blue-50/20">
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] font-bold text-[#145DA0] uppercase tracking-wider">
-              TOTAL AKTIVITAS
+        {/* Card 4: Perlu Tindak Lanjut */}
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs flex items-center gap-3.5 sm:gap-4">
+          <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center shrink-0">
+            <Clock className="w-5 h-5 sm:w-6 sm:h-6" />
+          </div>
+          <div className="min-w-0">
+            <span className="text-xs text-slate-500 font-medium block truncate">Perlu Tindak Lanjut</span>
+            <span className="text-2xl sm:text-3xl font-black text-slate-900 leading-none mt-1 block">
+              {perluTindakLanjutValue}
             </span>
-            <FileText className="w-4 h-4 text-[#145DA0]" />
-          </div>
-          <div className="mt-2">
-            <span className="text-2xl font-black text-[#145DA0]">{metrics.totalSeluruhAktivitas}</span>
-            <span className="text-xs text-blue-600 ml-1">kegiatan</span>
-          </div>
-          <p className="text-[10px] text-blue-700 mt-1.5 border-t border-blue-100 pt-1.5">
-            Kunjungan + pantau
-          </p>
-        </div>
-
-        {/* 5. Pemantauan Aktif */}
-        <div className="bg-white rounded-xl border border-slate-200 p-3.5 shadow-2xs">
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-              PEMANTAUAN AKTIF
+            <span className="text-[11px] sm:text-xs text-slate-400 font-medium mt-1 sm:mt-1.5 block truncate">
+              Perlu perhatian Anda
             </span>
-            <Clock className="w-4 h-4 text-sky-600" />
           </div>
-          <div className="mt-2">
-            <span className="text-2xl font-black text-sky-800">{metrics.pemantauanAktif}</span>
-            <span className="text-xs text-slate-400 ml-1">pasien</span>
-          </div>
-          <p className="text-[10px] text-slate-500 mt-1.5 border-t border-slate-100 pt-1.5">
-            Masih dirawat / dirujuk
-          </p>
-        </div>
-
-        {/* 6. Perlu Tindak Lanjut */}
-        <div className="bg-white rounded-xl border border-amber-200 p-3.5 shadow-2xs bg-amber-50/20">
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] font-bold text-amber-800 uppercase tracking-wider">
-              PERLU TINDAK LANJUT
-            </span>
-            <AlertTriangle className="w-4 h-4 text-amber-600" />
-          </div>
-          <div className="mt-2">
-            <span className="text-2xl font-black text-amber-800">{metrics.perluTindakLanjut}</span>
-            <span className="text-xs text-amber-700 ml-1">kasus</span>
-          </div>
-          <p className="text-[10px] text-amber-800 mt-1.5 border-t border-amber-100 pt-1.5">
-            Perlu kunjungan/pantau
-          </p>
         </div>
       </div>
 
-      {/* Bagian Prioritas Tindak Lanjut */}
-      <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
-        <div className="p-4 sm:p-5 border-b border-slate-200 flex flex-col md:flex-row md:items-center justify-between gap-3">
+      {/* ── 3. BARIS TENGAH: 3 WIDGET SEJAJAR (RESPONSIVE 12-COL GRID) ── */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-12 gap-4 sm:gap-5 items-stretch">
+        {/* Kolom 1: Aktivitas Kunjungan Bulanan (Tablet: 2 col, Desktop: 6 / 12) */}
+        <div className="col-span-1 md:col-span-2 lg:col-span-6 bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs flex flex-col justify-between">
           <div>
-            <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 text-amber-500" />
-              Prioritas Tindak Lanjut
-            </h2>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Daftar korban yang memerlukan kunjungan awal atau pemantauan lanjutan segera.
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 border-b border-slate-100 pb-3">
+              <div>
+                <h2 className="text-sm font-bold text-slate-900">Aktivitas Kunjungan Bulanan</h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Jumlah kunjungan Anda selama 6 bulan terakhir
+                </p>
+              </div>
+
+              <div className="relative self-start sm:self-auto">
+                <select
+                  value={chartPeriod}
+                  onChange={(e) => {
+                    setChartPeriod(e.target.value);
+                    setChartAnimationKey((prev) => prev + 1);
+                    setHoveredPointIndex(null);
+                  }}
+                  className="appearance-none pl-3 pr-8 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-1 focus:ring-[#145DA0] cursor-pointer"
+                >
+                  <option value="6 Bulan Terakhir">6 Bulan Terakhir</option>
+                  <option value="Tahun Ini">Tahun Ini</option>
+                  <option value="Tahun Sebelumnya">Tahun Sebelumnya</option>
+                </select>
+                <ChevronDown className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              </div>
+            </div>
+
+            {/* Area Line Chart SVG (Touch Responsive) */}
+            <div className="pt-4 overflow-hidden">
+              <svg
+                key={chartAnimationKey}
+                viewBox="0 0 500 200"
+                className="w-full h-44 sm:h-52 overflow-visible select-none"
+              >
+                <defs>
+                  <linearGradient id="petugasAreaGradient" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#3B82F6" stopOpacity="0.22" />
+                    <stop offset="100%" stopColor="#3B82F6" stopOpacity="0.01" />
+                  </linearGradient>
+                </defs>
+
+                {/* Grid Lines Sumbu Y */}
+                {yTicks.map((tick, idx) => (
+                  <React.Fragment key={idx}>
+                    <line
+                      x1="35"
+                      y1={tick.y}
+                      x2="470"
+                      y2={tick.y}
+                      stroke={tick.y === 175 ? '#E2E8F0' : '#F1F5F9'}
+                      strokeDasharray={tick.y === 175 ? undefined : '3 3'}
+                    />
+                    <text x="25" y={tick.y + 4} fill="#94A3B8" fontSize="10" textAnchor="end">
+                      {tick.value}
+                    </text>
+                  </React.Fragment>
+                ))}
+
+                {/* Area Gradient */}
+                <path
+                  d={areaKunjunganPathD}
+                  fill="url(#petugasAreaGradient)"
+                />
+
+                {/* Garis Kurva Biru Halus */}
+                <path
+                  d={lineKunjunganPathD}
+                  fill="none"
+                  stroke="#3B82F6"
+                  strokeWidth="2.75"
+                  strokeLinecap="round"
+                />
+
+                {/* Titik Point Data Bulat */}
+                {chartPoints.map((pt, i) => {
+                  const isHovered = hoveredPointIndex === i;
+                  return (
+                    <g
+                      key={i}
+                      className="cursor-pointer"
+                      onMouseEnter={() => setHoveredPointIndex(i)}
+                      onMouseLeave={() => setHoveredPointIndex(null)}
+                      onTouchStart={() => setHoveredPointIndex(i)}
+                    >
+                      {/* Area touch target diperbesar untuk mobile */}
+                      <rect
+                        x={pt.x - 20}
+                        y="15"
+                        width="40"
+                        height="165"
+                        fill="transparent"
+                      />
+
+                      <circle
+                        cx={pt.x}
+                        cy={pt.yKunjungan}
+                        r={isHovered ? 6 : 4}
+                        fill="#FFFFFF"
+                        stroke="#3B82F6"
+                        strokeWidth="2.5"
+                        className="transition-all"
+                      />
+
+                      {/* Tooltip Hover / Touch */}
+                      {isHovered && (
+                        <g transform={`translate(${pt.x}, ${Math.max(30, pt.yKunjungan - 12)})`}>
+                          <rect
+                            x="-38"
+                            y="-28"
+                            width="76"
+                            height="24"
+                            rx="6"
+                            fill="#0F172A"
+                          />
+                          <polygon points="-3,-4 0,0 3,-4" fill="#0F172A" />
+                          <text
+                            x="0"
+                            y="-12"
+                            fill="#FFFFFF"
+                            fontSize="9.5"
+                            fontWeight="bold"
+                            textAnchor="middle"
+                          >
+                            {pt.kunjungan} Kunjungan
+                          </text>
+                        </g>
+                      )}
+                    </g>
+                  );
+                })}
+
+                {/* Sumbu X (Label Bulan) */}
+                {chartPoints.map((pt, i) => (
+                  <text
+                    key={i}
+                    x={pt.x}
+                    y="194"
+                    fill={hoveredPointIndex === i ? '#145DA0' : '#94A3B8'}
+                    fontSize="10"
+                    fontWeight={hoveredPointIndex === i ? 'bold' : 'normal'}
+                    textAnchor="middle"
+                  >
+                    {pt.month}
+                  </text>
+                ))}
+              </svg>
+            </div>
+          </div>
+        </div>
+
+        {/* Kolom 2: Agenda Terdekat (Tablet: 1 col, Desktop: 3 / 12) */}
+        <div className="col-span-1 md:col-span-1 lg:col-span-3 bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs flex flex-col justify-between">
+          <div>
+            <div className="border-b border-slate-100 pb-3">
+              <h2 className="text-sm font-bold text-slate-900">Agenda Terdekat</h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Kunjungan yang perlu diperhatikan
+              </p>
+            </div>
+
+            {/* List Agenda dengan Kotak Tanggal di Sisi Kiri */}
+            <div className="divide-y divide-slate-100 mt-1">
+              {agendaList.length === 0 ? (
+                <div className="py-8 text-center text-slate-400 text-xs">
+                  Belum ada agenda kunjungan terdekat.
+                </div>
+              ) : (
+                agendaList.map((item) => (
+                  <div key={item.id} className="py-3 sm:py-3.5 flex items-center justify-between gap-2.5 sm:gap-3 group">
+                    <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
+                      {/* Box Tanggal Bergaris Biru */}
+                      <div className="w-11 py-1.5 rounded-xl border border-blue-200 bg-blue-50/50 flex flex-col items-center justify-center shrink-0">
+                        <span className="text-sm font-extrabold text-[#145DA0] leading-none">
+                          {item.tglHari}
+                        </span>
+                        <span className="text-[9px] font-bold text-[#145DA0] uppercase tracking-wider mt-0.5">
+                          {item.bulan}
+                        </span>
+                      </div>
+
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1 text-[10px] text-slate-400">
+                          <Clock className="w-3 h-3 text-slate-400 shrink-0" />
+                          <span>{item.waktu}</span>
+                        </div>
+                        <Link
+                          to={`/petugas/korban/${item.id}`}
+                          className="font-bold text-xs text-slate-900 hover:text-[#145DA0] truncate block mt-0.5"
+                        >
+                          {item.nama}
+                        </Link>
+                        <p className="text-[10px] text-slate-400 truncate mt-0.5">
+                          {item.rumahSakit}
+                        </p>
+                      </div>
+                    </div>
+
+                    <Link
+                      to={`/petugas/korban/${item.id}`}
+                      className="text-slate-400 hover:text-slate-600 p-1 shrink-0"
+                      title="Lihat Detail Korban"
+                    >
+                      <MoreHorizontal className="w-4 h-4" />
+                    </Link>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div className="pt-3 border-t border-slate-100 text-center">
+            <Link
+              to="/petugas/pemantauan"
+              className="text-xs font-semibold text-[#145DA0] hover:underline inline-flex items-center gap-1"
+            >
+              <span>Lihat semua agenda</span>
+              <ChevronRight className="w-3.5 h-3.5" />
+            </Link>
+          </div>
+        </div>
+
+        {/* Kolom 3: Aktivitas Terbaru (Tablet: 1 col, Desktop: 3 / 12) */}
+        <div className="col-span-1 md:col-span-1 lg:col-span-3 bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div>
+                <h2 className="text-sm font-bold text-slate-900">Aktivitas terbaru</h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Pembaruan dari 7 hari terakhir
+                </p>
+              </div>
+              <Link
+                to="/petugas/riwayat"
+                className="text-xs font-semibold text-[#145DA0] hover:underline"
+              >
+                Lihat riwayat
+              </Link>
+            </div>
+
+            {/* List Aktivitas Timeline */}
+            <div className="space-y-3 sm:space-y-3.5 mt-3 sm:mt-3.5">
+              {recentActivitiesList.length === 0 ? (
+                <div className="py-8 text-center text-slate-400 text-xs">
+                  Belum ada pembaruan aktivitas terbaru.
+                </div>
+              ) : (
+                recentActivitiesList.map((item, idx) => (
+                  <div key={idx} className="flex items-start gap-3">
+                    <div className="w-9 h-9 rounded-xl bg-blue-50 text-[#145DA0] flex items-center justify-center shrink-0 border border-blue-100">
+                      {item.iconType === 'file' && <FileText className="w-4 h-4" />}
+                      {item.iconType === 'refresh' && <RotateCcw className="w-4 h-4" />}
+                      {item.iconType === 'calendar' && <CalendarCheck className="w-4 h-4" />}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <strong className="text-xs font-bold text-slate-900 block leading-tight truncate">
+                        {item.title}
+                      </strong>
+                      <span className="text-[11px] text-slate-400 block mt-0.5 truncate">
+                        {item.sub}
+                      </span>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div className="pt-3 border-t border-slate-100 text-center">
+            <Link
+              to="/petugas/riwayat"
+              className="text-xs font-semibold text-[#145DA0] hover:underline inline-flex items-center gap-1"
+            >
+              <span>Lihat semua aktivitas</span>
+              <ChevronRight className="w-3.5 h-3.5" />
+            </Link>
+          </div>
+        </div>
+      </div>
+
+      {/* ── 4. TABEL / KARTU: KUNJUNGAN TERBARU (DUAL RESPONSIVE) ── */}
+      <div className="bg-white rounded-2xl border border-slate-200/90 shadow-2xs overflow-hidden">
+        {/* Table Header Controls */}
+        <div className="p-4 sm:p-5 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h2 className="text-base font-bold text-slate-900">Kunjungan Terbaru</h2>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Aktivitas kunjungan terakhir yang Anda catat
             </p>
           </div>
 
-          <div className="flex items-center gap-2.5 flex-wrap sm:flex-nowrap">
-            <div className="relative w-full sm:w-60">
-              <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-              <input
-                type="text"
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="Cari nama atau RS..."
-                className="w-full pl-8 pr-3 py-1.5 rounded-lg border border-slate-200 text-xs text-slate-700 bg-slate-50 focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#145DA0]"
-              />
-            </div>
-
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              className="px-3 py-1.5 rounded-lg border border-slate-200 text-xs text-slate-700 bg-slate-50 focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#145DA0]"
-            >
-              <option value="ALL">Semua Prioritas</option>
-              <option value="BELUM_KUNJUNG">Belum Dikunjungi</option>
-              <option value="TERLAMBAT">Kunjungan Terlambat</option>
-              <option value="PERLU_PANTAU">Pemantauan Aktif</option>
-            </select>
-          </div>
+          <Link
+            to="/petugas/riwayat"
+            className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-semibold border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 shadow-2xs transition-colors"
+          >
+            <span>Lihat Semua Kunjungan</span>
+          </Link>
         </div>
 
-        {/* Tabel Prioritas */}
-        <div className="overflow-x-auto">
+        {/* ── TAMPILAN MOBILE: CARD LIST (HP < 768px) ── */}
+        <div className="md:hidden divide-y divide-slate-100">
+          {tableData.length === 0 ? (
+            <div className="py-10 text-center text-slate-400 text-xs">
+              Belum ada aktivitas kunjungan terbaru yang dicatat.
+            </div>
+          ) : (
+            tableData.map((v, idx) => {
+              const initials = getInitials(v.nama);
+              const lastVisitInfo = getVictimLastVisitInfo(v);
+
+              return (
+                <div key={v.id} className="p-4 space-y-3 hover:bg-slate-50/70 transition-colors">
+                  {/* Baris 1: Inisial, Nama, ID & Status Badge */}
+                  <div className="flex items-start justify-between gap-2.5">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className="w-9 h-9 rounded-full bg-blue-50 text-[#145DA0] font-bold text-xs flex items-center justify-center shrink-0 border border-blue-100">
+                        {initials}
+                      </div>
+                      <div className="min-w-0">
+                        <Link
+                          to={`/petugas/korban/${v.id}`}
+                          className="font-bold text-xs text-slate-900 hover:text-[#145DA0] truncate block"
+                        >
+                          {v.nama}
+                        </Link>
+                        <span className="text-[10px] text-slate-400 font-mono block mt-0.5 truncate">
+                          {v.nomorTiket || v.nomorLaporan || `JR/PKU/${currentYear}/00${800 + idx * 11}`}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="shrink-0">
+                      {renderStatusBadge(v)}
+                    </div>
+                  </div>
+
+                  {/* Baris 2: Rumah Sakit & Info Tanggal */}
+                  <div className="bg-slate-50/70 p-3 rounded-xl border border-slate-100 text-xs space-y-2">
+                    <div className="flex items-center gap-1.5 text-slate-700 font-medium">
+                      <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                      <span className="truncate">{v.rumahSakit || '—'}</span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-200/60 text-[11px]">
+                      <div>
+                        <span className="text-slate-400 block text-[10px]">Tgl Kecelakaan:</span>
+                        <span className="font-semibold text-slate-700 block">
+                          {formatDateShort(v.tanggalKecelakaan || v.tanggalInformasiDiterima)}
+                        </span>
+                        <span className="text-[10px] text-slate-400 block">
+                          {formatTime(v.tanggalKecelakaan || v.tanggalInformasiDiterima) || '09.30 WIB'}
+                        </span>
+                      </div>
+
+                      <div className="text-right">
+                        <span className="text-slate-400 block text-[10px]">Tgl Kunjungan:</span>
+                        <span className="font-semibold text-slate-700 block">
+                          {formatDateShort(lastVisitInfo.rawDate)}
+                        </span>
+                        <span className="text-[10px] text-slate-400 block">
+                          {lastVisitInfo.waktu}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Baris 3: Tombol Aksi Mobile (Hanya Lihat Detail & Catat - Tanpa Hapus Sesuai Instruksi) */}
+                  <div className="flex items-center gap-2 pt-0.5">
+                    <Link
+                      to={`/petugas/korban/${v.id}`}
+                      className="flex-1 py-2 px-3 rounded-xl border border-blue-200 bg-blue-50/70 text-[#145DA0] hover:bg-blue-100 text-xs font-bold flex items-center justify-center gap-1.5 shadow-2xs transition-colors"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>Lihat Detail</span>
+                    </Link>
+
+                    <button
+                      type="button"
+                      onClick={() => setMonitoringVictim(v)}
+                      className="flex-1 py-2 px-3 rounded-xl border border-amber-200 bg-amber-50/70 text-amber-700 hover:bg-amber-100 text-xs font-bold flex items-center justify-center gap-1.5 shadow-2xs transition-colors cursor-pointer"
+                    >
+                      <Edit3 className="w-3.5 h-3.5" />
+                      <span>Catat Kunjungan</span>
+                    </button>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        {/* ── TAMPILAN DESKTOP: FULL TABLE (LAYAR TABLET & DESKTOP >= 768px) ── */}
+        <div className="hidden md:block overflow-x-auto">
           <table className="w-full text-left border-collapse text-xs">
             <thead>
-              <tr className="bg-slate-50/80 border-b border-slate-200 text-slate-600 font-semibold">
-                <th className="py-3 px-4">Nama Korban</th>
-                <th className="py-3 px-4">Rumah Sakit</th>
-                <th className="py-3 px-4">Tgl Masuk RS</th>
-                <th className="py-3 px-4">Status Pemantauan</th>
-                <th className="py-3 px-4">Kondisi Terakhir</th>
-                <th className="py-3 px-4">Status SLA</th>
-                <th className="py-3 px-4 text-right">Aksi</th>
+              <tr className="bg-slate-50/70 border-b border-slate-200/80 text-slate-400 font-bold uppercase tracking-wider text-[10px]">
+                <th className="py-3.5 px-4 w-12 text-center">NO.</th>
+                <th className="py-3.5 px-4">KORBAN / ID BERKAS</th>
+                <th className="py-3.5 px-4">RUMAH SAKIT</th>
+                <th className="py-3.5 px-4">TANGGAL KECELAKAAN</th>
+                <th className="py-3.5 px-4">TANGGAL KUNJUNGAN</th>
+                <th className="py-3.5 px-4 text-center">STATUS</th>
+                <th className="py-3.5 px-4 text-center w-24">AKSI</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {priorityVictims.length === 0 ? (
+              {tableData.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-10 text-center text-slate-400">
-                    Tidak ada korban yang memerlukan prioritas tindak lanjut mendesak.
+                  <td colSpan={7} className="py-12 text-center text-slate-400">
+                    Belum ada aktivitas kunjungan terbaru yang dicatat.
                   </td>
                 </tr>
               ) : (
-                priorityVictims.map((v) => {
-                  const firstVisitSla = calculateFirstVisitSla(
-                    v.tanggalInformasiDiterima,
-                    v.kunjunganPertama
-                  );
-                  const monSla = calculateMonitoringSla(v);
-                  const isVisited = !!v.kunjunganPertama;
-                  const activeSla = !isVisited ? firstVisitSla : monSla;
+                tableData.map((v, idx) => {
+                  const initials = getInitials(v.nama);
+                  const nomorUrut = String(idx + 1).padStart(2, '0');
+                  const lastVisitInfo = getVictimLastVisitInfo(v);
 
                   return (
                     <tr key={v.id} className="hover:bg-slate-50/70 transition-colors">
-                      <td className="py-3.5 px-4 font-bold text-slate-900 whitespace-nowrap">
-                        <Link to={`/petugas/korban/${v.id}`} className="hover:underline hover:text-[#145DA0]">
-                          {v.nama}
-                        </Link>
+                      {/* NO. */}
+                      <td className="py-3.5 px-4 font-mono text-slate-400 text-center text-xs">
+                        {nomorUrut}
                       </td>
-                      <td className="py-3.5 px-4 text-slate-800 font-medium whitespace-nowrap">
-                        {v.rumahSakit}
+
+                      {/* KORBAN / ID BERKAS */}
+                      <td className="py-3.5 px-4 whitespace-nowrap">
+                        <div className="flex items-center gap-3">
+                          <div className="w-8 h-8 rounded-full bg-blue-50 text-[#145DA0] font-bold text-xs flex items-center justify-center shrink-0 border border-blue-100">
+                            {initials}
+                          </div>
+                          <div>
+                            <Link
+                              to={`/petugas/korban/${v.id}`}
+                              className="font-bold text-xs text-slate-900 hover:text-[#145DA0] hover:underline block"
+                            >
+                              {v.nama}
+                            </Link>
+                            <span className="text-[10px] text-slate-400 font-mono block mt-0.5">
+                              {v.nomorTiket || v.nomorLaporan || `JR/PKU/${currentYear}/00${800 + idx * 11}`}
+                            </span>
+                          </div>
+                        </div>
                       </td>
-                      <td className="py-3.5 px-4 text-slate-700 whitespace-nowrap font-medium">
-                        {formatDateShort(v.tanggalMasukRs || v.tanggalInformasiDiterima)}
+
+                      {/* RUMAH SAKIT */}
+                      <td className="py-3.5 px-4 whitespace-nowrap">
+                        <div className="flex items-center gap-1.5 text-xs font-medium text-slate-700">
+                          <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                          <span>{v.rumahSakit || '—'}</span>
+                        </div>
                       </td>
-                      <td className="py-3 px-4 whitespace-nowrap">
-                        <MonitoringStatusBadge status={v.statusPemantauan} />
+
+                      {/* TANGGAL KECELAKAAN */}
+                      <td className="py-3.5 px-4 whitespace-nowrap">
+                        <span className="text-slate-800 font-medium block">
+                          {formatDateShort(v.tanggalKecelakaan || v.tanggalInformasiDiterima)}
+                        </span>
+                        <span className="text-[10px] text-slate-400 block mt-0.5">
+                          {formatTime(v.tanggalKecelakaan || v.tanggalInformasiDiterima) || '09.30 WIB'}
+                        </span>
                       </td>
-                      <td className="py-3 px-4 whitespace-nowrap">
-                        <ConditionBadge
-                          kondisi={v.kondisiTerakhir}
-                          statusKonfirmasi={v.statusKonfirmasiKondisi}
-                        />
+
+                      {/* TANGGAL KUNJUNGAN */}
+                      <td className="py-3.5 px-4 whitespace-nowrap">
+                        <span className="text-slate-800 font-medium block">
+                          {formatDateShort(lastVisitInfo.rawDate)}
+                        </span>
+                        <span className="text-[10px] text-slate-400 block mt-0.5">
+                          {lastVisitInfo.waktu}
+                        </span>
                       </td>
-                      <td className="py-3 px-4 whitespace-nowrap">
-                        <SlaBadge slaInfo={activeSla} />
+
+                      {/* STATUS */}
+                      <td className="py-3.5 px-4 text-center whitespace-nowrap">
+                        {renderStatusBadge(v)}
                       </td>
-                      <td className="py-3 px-4 text-right whitespace-nowrap">
-                        <div className="flex items-center justify-end gap-1.5">
+
+                      {/* AKSI: HANYA LIHAT DETAIL & EDIT/FORM (TOMBOL HAPUS DI DALAM DETAIL SESUAI INSTRUKSI) */}
+                      <td className="py-3.5 px-4 text-center whitespace-nowrap">
+                        <div className="flex items-center justify-center gap-1.5">
+                          {/* Tombol Lihat Detail */}
+                          <Link
+                            to={`/petugas/korban/${v.id}`}
+                            className="w-7 h-7 rounded-lg border border-blue-200 bg-blue-50 text-[#145DA0] hover:bg-blue-100 flex items-center justify-center transition-colors shadow-2xs"
+                            title="Lihat Detail Korban"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                          </Link>
+
+                          {/* Tombol Catat / Form Pemantauan */}
                           <button
                             type="button"
                             onClick={() => setMonitoringVictim(v)}
-                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-sky-50 text-[#145DA0] hover:bg-sky-100 border border-sky-200 transition-colors cursor-pointer"
-                            title="Lakukan pemantauan"
+                            className="w-7 h-7 rounded-lg border border-amber-200 bg-amber-50 text-amber-600 hover:bg-amber-100 flex items-center justify-center transition-colors shadow-2xs cursor-pointer"
+                            title="Catat Kunjungan / Pemantauan"
                           >
-                            <Activity className="w-3.5 h-3.5" />
-                            <span>+ Pantau</span>
+                            <Edit3 className="w-3.5 h-3.5" />
                           </button>
-                          <Link
-                            to={`/petugas/korban/${v.id}`}
-                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors"
-                          >
-                            <Eye className="w-3.5 h-3.5" />
-                            <span>Detail</span>
-                          </Link>
                         </div>
                       </td>
                     </tr>
@@ -399,69 +1082,70 @@ export default function PetugasDashboard() {
         </div>
       </div>
 
-      {/* Bagian Aktivitas Terbaru Petugas */}
-      <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-4 sm:p-5">
-        <div className="flex items-center justify-between border-b border-slate-100 pb-3 mb-3">
-          <div>
-            <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
-              <CalendarCheck className="w-4 h-4 text-[#145DA0]" />
-              Aktivitas Terbaru Petugas
-            </h2>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Seluruh riwayat kunjungan dan pemantauan lanjutan yang berhasil dicatat.
-            </p>
-          </div>
-          <Link
-            to="/petugas/riwayat"
-            className="text-xs font-semibold text-[#145DA0] hover:underline flex items-center gap-1"
-          >
-            <span>Semua Riwayat</span>
-            <ArrowRight className="w-3.5 h-3.5" />
-          </Link>
-        </div>
-
-        {recentActivities.length === 0 ? (
-          <p className="py-6 text-center text-xs text-slate-400">
-            Belum ada aktivitas kunjungan atau pemantauan yang dicatat.
-          </p>
-        ) : (
-          <div className="space-y-2.5">
-            {recentActivities.map((act) => (
-              <div
-                key={act.id}
-                className="flex items-start justify-between gap-3 p-3 rounded-xl bg-slate-50/80 border border-slate-100 hover:bg-slate-50 transition-colors"
-              >
-                <div className="flex items-start gap-3">
-                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5 ${
-                    act.jenis === 'Kunjungan Pertama' ? 'bg-emerald-100 text-emerald-700' : 'bg-blue-100 text-[#145DA0]'
-                  }`}>
-                    {act.jenis === 'Kunjungan Pertama' ? <CheckCircle2 className="w-4 h-4" /> : <Activity className="w-4 h-4" />}
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-bold text-xs text-slate-800">{act.namaKorban}</span>
-                      <span className="text-[10px] bg-white border border-slate-200 text-slate-600 px-2 py-0.5 rounded-full font-medium">
-                        {act.jenis}
-                      </span>
-                      <span className="text-[10px] text-slate-500">{act.rumahSakit}</span>
-                    </div>
-                    <p className="text-xs text-slate-600 mt-1 line-clamp-1">{act.catatan}</p>
-                  </div>
-                </div>
-                <div className="text-right shrink-0">
-                  <span className="text-[11px] text-slate-400 block">{formatTimeAgo(act.waktu)}</span>
-                  <Link
-                    to={`/petugas/korban/${act.korbanId}`}
-                    className="text-[11px] text-[#145DA0] font-semibold hover:underline mt-1 inline-block"
-                  >
-                    Detail Korban
-                  </Link>
-                </div>
+      {/* ── MODAL PILIH AKSI KUNJUNGAN CEPAT ── */}
+      {isQuickAddModalOpen && (
+        <Modal
+          isOpen={isQuickAddModalOpen}
+          onClose={() => setIsQuickAddModalOpen(false)}
+          title="Tambah Kunjungan / Pemantauan Pasien"
+          subtitle="Pilih opsi untuk mencatat kunjungan pasien atau memasukkan data korban laka baru."
+          maxWidth="max-w-md"
+        >
+          <div className="space-y-3 pt-1 text-xs">
+            <button
+              type="button"
+              onClick={() => {
+                setIsQuickAddModalOpen(false);
+                navigate('/petugas/korban');
+              }}
+              className="w-full p-4 rounded-xl border border-slate-200 hover:border-blue-300 hover:bg-blue-50/50 text-left transition-colors flex items-start gap-3 cursor-pointer group"
+            >
+              <div className="w-9 h-9 rounded-lg bg-blue-100 text-[#145DA0] flex items-center justify-center shrink-0 group-hover:bg-[#145DA0] group-hover:text-white transition-colors">
+                <ListChecks className="w-5 h-5" />
               </div>
-            ))}
+              <div className="flex-1">
+                <strong className="text-slate-900 block font-bold text-xs group-hover:text-[#145DA0]">
+                  Pilih dari Daftar Pasien Terdaftar
+                </strong>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Catat kunjungan atau pemantauan berkala untuk korban laka yang sedang dirawat di rumah sakit.
+                </p>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setIsQuickAddModalOpen(false);
+                setIsInputModalOpen(true);
+              }}
+              className="w-full p-4 rounded-xl border border-slate-200 hover:border-blue-300 hover:bg-blue-50/50 text-left transition-colors flex items-start gap-3 cursor-pointer group"
+            >
+              <div className="w-9 h-9 rounded-lg bg-blue-100 text-[#145DA0] flex items-center justify-center shrink-0 group-hover:bg-[#145DA0] group-hover:text-white transition-colors">
+                <Plus className="w-5 h-5" />
+              </div>
+              <div className="flex-1">
+                <strong className="text-slate-900 block font-bold text-xs group-hover:text-[#145DA0]">
+                  Input Data Korban Baru
+                </strong>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Tambahkan data korban baru dari IRSMS / laporan faskes ke sistem pemantauan.
+                </p>
+              </div>
+            </button>
+
+            <div className="flex items-center justify-end pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setIsQuickAddModalOpen(false)}
+                className="w-full sm:w-auto px-4 py-2 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 font-semibold cursor-pointer"
+              >
+                Tutup
+              </button>
+            </div>
           </div>
-        )}
-      </div>
+        </Modal>
+      )}
 
       {/* Modal Input Korban Baru */}
       <FormInputKorbanModal

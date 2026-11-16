@@ -1,7 +1,7 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
-import { LayoutDashboard, Users, CalendarCheck, History, FileText, BarChart3 } from 'lucide-react';
+import { LayoutDashboard, Users, CalendarCheck, History, FileText, BarChart3, User } from 'lucide-react';
 
 export default function MobileNav() {
   const { isPetugas, isKabag } = useAuth();
@@ -10,20 +10,23 @@ export default function MobileNav() {
     { to: '/petugas', label: 'Dashboard', icon: LayoutDashboard, end: true },
     { to: '/petugas/korban', label: 'Korban', icon: Users },
     { to: '/petugas/pemantauan', label: 'Pemantauan', icon: CalendarCheck },
-    { to: '/petugas/riwayat', label: 'Riwayat', icon: History }
+    { to: '/petugas/riwayat', label: 'Riwayat', icon: History },
+    { to: '/petugas/profil', label: 'Profil', icon: User }
   ];
 
   const kabagTabs = [
     { to: '/kabag', label: 'Dashboard', icon: LayoutDashboard, end: true },
-    { to: '/kabag/monitoring', label: 'Monitoring', icon: FileText },
-    { to: '/kabag/kinerja', label: 'Kinerja', icon: BarChart3 }
+    { to: '/kabag/monitoring', label: 'Korban', icon: Users },
+    { to: '/kabag/kinerja', label: 'Kinerja', icon: BarChart3 },
+    { to: '/kabag/laporan', label: 'Laporan', icon: FileText },
+    { to: '/kabag/profil', label: 'Profil', icon: User }
   ];
 
   const tabs = isKabag ? kabagTabs : petugasTabs;
 
   return (
     <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white border-t border-slate-200 shadow-lg">
-      <div className={`grid ${tabs.length === 4 ? 'grid-cols-4' : 'grid-cols-3'} max-w-md mx-auto`}>
+      <div className={`grid ${tabs.length === 5 ? 'grid-cols-5' : (tabs.length === 4 ? 'grid-cols-4' : 'grid-cols-3')} max-w-md mx-auto`}>
         {tabs.map((tab) => {
           const Icon = tab.icon;
           return (

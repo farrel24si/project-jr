@@ -30,7 +30,20 @@ const statusConfig = {
 
 export default function MonitoringStatusBadge({ status, showIcon = true, size = 'sm' }) {
   const currentStatus = status || 'Belum Dikunjungi';
-  const config = statusConfig[currentStatus] || statusConfig['Belum Dikunjungi'];
+  let config = statusConfig[currentStatus];
+
+  if (!config && typeof currentStatus === 'string' && currentStatus.startsWith('Dirujuk')) {
+    config = {
+      className: 'bg-violet-50 text-violet-800 border-violet-300',
+      icon: Activity,
+      dot: 'bg-violet-500',
+      label: currentStatus
+    };
+  }
+
+  if (!config) {
+    config = statusConfig['Belum Dikunjungi'];
+  }
   const Icon = config.icon;
 
   const sizeClasses = size === 'xs'

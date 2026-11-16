@@ -8,6 +8,30 @@ const conditionConfig = {
     dot: 'bg-sky-500',
     label: 'Masih Dirawat'
   },
+  'Rawat Inap': {
+    className: 'bg-sky-50 text-sky-800 border-sky-200',
+    icon: Activity,
+    dot: 'bg-sky-500',
+    label: 'Rawat Inap'
+  },
+  'Luka Ringan': {
+    className: 'bg-amber-50 text-amber-800 border-amber-200',
+    icon: Activity,
+    dot: 'bg-amber-500',
+    label: 'Luka Ringan'
+  },
+  'Luka Berat': {
+    className: 'bg-orange-50 text-orange-800 border-orange-200',
+    icon: AlertOctagon,
+    dot: 'bg-orange-600',
+    label: 'Luka Berat'
+  },
+  'Selesai': {
+    className: 'bg-emerald-50 text-emerald-800 border-emerald-200',
+    icon: Home,
+    dot: 'bg-emerald-500',
+    label: 'Selesai'
+  },
   'Sudah Pulang': {
     className: 'bg-emerald-50 text-emerald-800 border-emerald-200',
     icon: Home,
@@ -25,6 +49,30 @@ const conditionConfig = {
     icon: ArrowUpRight,
     dot: 'bg-violet-500',
     label: 'Dirujuk'
+  },
+  'Rujukan': {
+    className: 'bg-violet-50 text-violet-800 border-violet-200',
+    icon: ArrowUpRight,
+    dot: 'bg-violet-500',
+    label: 'Rujukan'
+  },
+  'Rawat Pertama': {
+    className: 'bg-blue-50 text-blue-800 border-blue-200',
+    icon: Activity,
+    dot: 'bg-blue-600',
+    label: 'Rawat Pertama'
+  },
+  'Rawat Lanjutan': {
+    className: 'bg-purple-50 text-purple-800 border-purple-200',
+    icon: Activity,
+    dot: 'bg-purple-600',
+    label: 'Rawat Lanjutan'
+  },
+  'Monitoring Berjalan': {
+    className: 'bg-indigo-50 text-indigo-800 border-indigo-200',
+    icon: Activity,
+    dot: 'bg-indigo-600',
+    label: 'Monitoring Berjalan'
   },
   'Meninggal Dunia': {
     className: 'bg-red-50 text-red-800 border-red-200',
@@ -48,7 +96,20 @@ const conditionConfig = {
 
 export default function ConditionBadge({ kondisi, statusKonfirmasi, size = 'sm' }) {
   const currentCondition = kondisi || 'Belum Dapat Dikonfirmasi';
-  const config = conditionConfig[currentCondition] || conditionConfig['Masih Dirawat'];
+  let config = conditionConfig[currentCondition];
+
+  if (!config && typeof currentCondition === 'string' && currentCondition.startsWith('Dirujuk')) {
+    config = {
+      className: 'bg-violet-50 text-violet-800 border-violet-200',
+      icon: ArrowUpRight,
+      dot: 'bg-violet-500',
+      label: currentCondition
+    };
+  }
+
+  if (!config) {
+    config = conditionConfig['Masih Dirawat'];
+  }
   const Icon = config.icon;
 
   const sizeClasses = size === 'xs'

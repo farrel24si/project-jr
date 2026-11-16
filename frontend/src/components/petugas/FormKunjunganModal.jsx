@@ -1,16 +1,28 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import Modal from '../common/Modal';
 import CameraModal from './CameraModal';
 import GpsCapture from './GpsCapture';
 import { storageService } from '../../services/storageService';
+import { cachePhoto } from '../../services/photoService';
 import { useAuth } from '../../context/AuthContext';
-import { Save, AlertCircle, CheckCircle2, Camera, RefreshCw } from 'lucide-react';
+import { checkVisitInterval } from '../../services/slaService';
+import { Save, AlertCircle, AlertTriangle, CheckCircle2, Camera, RefreshCw, Clock, Lock } from 'lucide-react';
 
 export default function FormKunjunganModal({ isOpen, onClose, victim, onVisitSaved }) {
   const { currentUser } = useAuth();
 
+  const nowString = () => {
+    const now = new Date();
+    const tzOffset = now.getTimezoneOffset() * 60000;
+    return new Date(now.getTime() - tzOffset).toISOString().slice(0, 16);
+  };
+
   const [formData, setFormData] = useState({
-    kondisiKorban: victim?.kondisiTerakhir || 'Masih Dirawat',
+    waktuKunjungan: nowString(),
+    kondisiKorban: victim?.kondisiTerakhir || 'Rawat Inap',
+    cekKomunikasiKeluarga: true,
+    cekEdukasiSantunan: true,
+    cekArahanLp: true,
     hasilKunjungan: '',
     komunikasiKeluarga: '',
     penyampaianHak: 'Hak santunan biaya perawatan RS maksimal Rp20.000.000,- (atau Rp50.000.000,- jika meninggal dunia).',
@@ -25,30 +37,58 @@ export default function FormKunjunganModal({ isOpen, onClose, victim, onVisitSav
   const [validationError, setValidationError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  useEffect(() => {
+    if (isOpen) {
+      setFormData((prev) => ({
+        ...prev,
+        waktuKunjungan: nowString()
+      }));
+    }
+  }, [isOpen]);
+
   if (!victim) return null;
 
+  const isFirstVisit = !victim.kunjunganPertama && (victim.riwayatAktivitas || []).filter((a) => a.statusKunjungan !== 'Menunggu').length === 0;
+
+  const previousVisitDate = victim?.tanggalKunjunganTerakhir || 
+                            victim?.waktuPemantauanTerakhir || 
+                            victim?.kunjunganPertama?.tanggalKunjungan || 
+                            victim?.tanggalInformasiDiterima;
+
+  const intervalCheck = useMemo(() => {
+    return checkVisitInterval(previousVisitDate, formData.waktuKunjungan);
+  }, [previousVisitDate, formData.waktuKunjungan]);
+
   const handleChange = (e) => {
-    const { name, value } = e.target;
-    setFormData((prev) => ({ ...prev, [name]: value }));
+    const { name, value, type, checked } = e.target;
+    setFormData((prev) => ({
+      ...prev,
+      [name]: type === 'checkbox' ? checked : value
+    }));
     setValidationError('');
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     setValidationError('');
 
-    if (!formData.hasilKunjungan.trim()) {
-      setValidationError('Catatan hasil kunjungan wajib diisi.');
+    if (new Date(formData.waktuKunjungan) > new Date(Date.now() + 5 * 60000)) {
+      setValidationError('Waktu kunjungan aktual tidak boleh di masa mendatang. Harap masukkan waktu saat kunjungan telah benar-benar dilakukan.');
       return;
     }
 
-    if (!photoData) {
-      setValidationError('Foto bukti kunjungan wajib diambil.');
+    if (!formData.hasilKunjungan.trim()) {
+      setValidationError('Catatan kondisi & hasil kunjungan wajib diisi.');
       return;
     }
 
     if (!gpsData || !gpsData.latitude || !gpsData.longitude) {
-      setValidationError('Koordinat GPS wajib terdeteksi.');
+      setValidationError('Harap mengunci lokasi koordinat GPS / maps rumah sakit terlebih dahulu.');
+      return;
+    }
+
+    if (!photoData) {
+      setValidationError('Harap mengupload atau mengambil dokumentasi foto kunjungan.');
       return;
     }
 
@@ -56,9 +96,15 @@ export default function FormKunjunganModal({ isOpen, onClose, victim, onVisitSav
 
     try {
       const visitPayload = {
-        tanggalKunjungan: new Date().toISOString(),
+        tanggalKunjungan: new Date(formData.waktuKunjungan).toISOString(),
+        waktuAktualKunjungan: new Date(formData.waktuKunjungan).toISOString(),
+        waktuPencatatanSistem: new Date().toISOString(),
         petugasNama: currentUser?.profile?.nama || 'Petugas Jasa Raharja',
         kondisiKorban: formData.kondisiKorban,
+        cek_komunikasi_keluarga: formData.cekKomunikasiKeluarga,
+        cek_edukasi_santunan: formData.cekEdukasiSantunan,
+        cek_arahan_lp: formData.cekArahanLp,
+        catatan_kondisi: formData.hasilKunjungan,
         hasilKunjungan: formData.hasilKunjungan,
         komunikasiKeluarga: formData.komunikasiKeluarga,
         penyampaianHak: formData.penyampaianHak,
@@ -72,14 +118,26 @@ export default function FormKunjunganModal({ isOpen, onClose, victim, onVisitSav
         waktuFoto: gpsData.waktu || new Date().toISOString()
       };
 
-      const updated = storageService.addVisit(victim.id, visitPayload);
+      if (photoData) {
+        cachePhoto(victim.id, photoData);
+        if (victim.caseId) {
+          cachePhoto(victim.caseId, photoData);
+          cachePhoto(`case_${victim.caseId}`, photoData);
+        }
+        if (victim.activeVisitId) {
+          cachePhoto(victim.activeVisitId, photoData);
+          cachePhoto(`VISIT-${victim.activeVisitId}`, photoData);
+        }
+      }
+
+      const updated = await storageService.addVisit(victim.id, visitPayload);
       if (onVisitSaved) {
         onVisitSaved(updated);
       }
       onClose();
     } catch (err) {
       console.error(err);
-      setValidationError('Gagal menyimpan kunjungan.');
+      setValidationError(err.message || 'Gagal menyimpan kunjungan.');
       setIsSubmitting(false);
     }
   };
@@ -89,7 +147,7 @@ export default function FormKunjunganModal({ isOpen, onClose, victim, onVisitSav
       <Modal
         isOpen={isOpen}
         onClose={onClose}
-        title="Formulir Kunjungan Rumah Sakit"
+        title={isFirstVisit ? 'Formulir Kunjungan Pertama' : 'Formulir Kunjungan Selanjutnya'}
         subtitle={`${victim.nama} (${victim.rumahSakit})`}
         maxWidth="max-w-2xl"
       >
@@ -101,10 +159,51 @@ export default function FormKunjunganModal({ isOpen, onClose, victim, onVisitSav
             </div>
           )}
 
+          {/* Tanggal & Waktu Kunjungan Aktual (Otomatis & Terkunci Sistem) */}
+          <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="block font-semibold text-slate-700">
+                Tanggal &amp; Waktu Kunjungan Aktual <span className="text-rose-500">*</span>
+              </label>
+              <span className="inline-flex items-center gap-1 text-[10px] text-slate-600 font-semibold bg-slate-200/80 px-2 py-0.5 rounded">
+                <Lock className="w-3 h-3 text-slate-500" />
+                Terkunci Sistem
+              </span>
+            </div>
+            <input
+              type="datetime-local"
+              name="waktuKunjungan"
+              readOnly
+              disabled
+              value={formData.waktuKunjungan}
+              className="w-full rounded-md border border-slate-200 px-3 py-2 text-slate-600 bg-slate-100 font-medium cursor-not-allowed select-none"
+            />
+            <p className="text-[10px] text-slate-500">
+              Tanggal dan jam dicatat otomatis oleh sistem sesuai waktu aktual saat ini (terkunci / tidak dapat diubah).
+            </p>
+            {previousVisitDate && (
+              <div className="mt-2">
+                {intervalCheck.isOverdue ? (
+                  <div className="p-2.5 bg-rose-50 border border-rose-300 rounded-lg flex items-start gap-2 text-rose-900">
+                    <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5 animate-pulse" />
+                    <span className="text-[11px] leading-relaxed">
+                      <strong>Peringatan: Kunjungan Melewati Batas 3 Hari!</strong> Berjarak {intervalCheck.durationText} dari kunjungan sebelumnya. Batas maksimal SLA interval adalah 72 jam.
+                    </span>
+                  </div>
+                ) : (
+                  <div className="p-2 bg-emerald-50 border border-emerald-200 rounded-lg flex items-center gap-2 text-emerald-800 text-[11px]">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                    <span>Interval kunjungan sesuai jadwal SLA ({intervalCheck.durationText}).</span>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block font-semibold text-slate-700 mb-1">
-                Kondisi Korban Saat Kunjungan
+                Kondisi Korban Saat Kunjungan (Status)
               </label>
               <select
                 name="kondisiKorban"
@@ -112,10 +211,11 @@ export default function FormKunjunganModal({ isOpen, onClose, victim, onVisitSav
                 onChange={handleChange}
                 className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-slate-800"
               >
-                <option value="Masih Dirawat">Masih Dirawat</option>
-                <option value="Pulang">Pulang</option>
-                <option value="Dirujuk">Dirujuk</option>
+                <option value="Rawat Inap">Rawat Inap</option>
+                <option value="Luka Ringan">Luka Ringan</option>
+                <option value="Luka Berat">Luka Berat</option>
                 <option value="Meninggal Dunia">Meninggal Dunia</option>
+                <option value="Selesai">Selesai / Sembuh Pulang</option>
               </select>
             </div>
 
@@ -128,22 +228,61 @@ export default function FormKunjunganModal({ isOpen, onClose, victim, onVisitSav
                 name="komunikasiKeluarga"
                 value={formData.komunikasiKeluarga}
                 onChange={handleChange}
-                placeholder="Nama & hubungan keluarga"
+                placeholder="Nama & hubungan keluarga / perawat RS"
                 className="w-full rounded-md border border-slate-300 px-3 py-2 text-slate-800"
               />
             </div>
           </div>
 
+          {/* Checklist 3 SOP Kunjungan Sesuai Database */}
+          <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 space-y-2">
+            <span className="font-semibold text-slate-700 block text-[11px] uppercase tracking-wide">
+              Checklist SOP Kunjungan (Verifikasi Lapangan)
+            </span>
+            <div className="space-y-1.5">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  name="cekKomunikasiKeluarga"
+                  checked={formData.cekKomunikasiKeluarga}
+                  onChange={handleChange}
+                  className="rounded text-[#0A3981] focus:ring-[#0A3981] w-4 h-4 cursor-pointer"
+                />
+                <span className="text-slate-800 font-medium">1. Komunikasi langsung dengan korban / ahli waris</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  name="cekEdukasiSantunan"
+                  checked={formData.cekEdukasiSantunan}
+                  onChange={handleChange}
+                  className="rounded text-[#0A3981] focus:ring-[#0A3981] w-4 h-4 cursor-pointer"
+                />
+                <span className="text-slate-800 font-medium">2. Edukasi hak dan kepastian santunan Jasa Raharja</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  name="cekArahanLp"
+                  checked={formData.cekArahanLp}
+                  onChange={handleChange}
+                  className="rounded text-[#0A3981] focus:ring-[#0A3981] w-4 h-4 cursor-pointer"
+                />
+                <span className="text-slate-800 font-medium">3. Arahan pengurusan Laporan Polisi (LP) Laka Lantas</span>
+              </label>
+            </div>
+          </div>
+
           <div>
             <label className="block font-semibold text-slate-700 mb-1">
-              Hasil Kunjungan Medis
+              Catatan Kondisi Korban &amp; Hasil Kunjungan <span className="text-rose-500">*</span>
             </label>
             <textarea
               name="hasilKunjungan"
               rows={2}
               value={formData.hasilKunjungan}
               onChange={handleChange}
-              placeholder="Catatan kondisi fisik / tindakan medis pasien"
+              placeholder="Catatan kondisi luka fisik, tindakan medis dokter, atau penjaminan RS..."
               className="w-full rounded-md border border-slate-300 p-2.5 text-slate-800"
               required
             />
@@ -167,7 +306,7 @@ export default function FormKunjunganModal({ isOpen, onClose, victim, onVisitSav
             {/* Foto Bukti via Modal Popup */}
             <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 space-y-2">
               <label className="block font-semibold text-slate-700">
-                Foto Bukti Kunjungan
+                Foto Bukti Kunjungan <span className="text-rose-500">*</span>
               </label>
 
               {photoData ? (
@@ -204,7 +343,10 @@ export default function FormKunjunganModal({ isOpen, onClose, victim, onVisitSav
 
             {/* GPS Capture */}
             <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
-              <GpsCapture onLocationCaptured={(loc) => setGpsData(loc)} />
+              <GpsCapture
+                onLocationCaptured={(loc) => setGpsData(loc)}
+                hospitalName={victim.rumahSakit}
+              />
             </div>
           </div>
 

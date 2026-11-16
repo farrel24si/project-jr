@@ -11,19 +11,25 @@ import {
 } from 'lucide-react';
 
 const HOSPITAL_COORDINATES = {
-  'RSUP Dr. Cipto Mangunkusumo': { lat: -6.197210, lng: 106.848320, accuracy: 8 },
-  'RS Polri Said Sukanto': { lat: -6.269100, lng: 106.868800, accuracy: 6 },
-  'RSUD Tarakan': { lat: -6.168500, lng: 106.808000, accuracy: 9 },
-  'RSUP Fatmawati': { lat: -6.294200, lng: 106.794600, accuracy: 7 },
-  'RS Columbia Asia Pulomas': { lat: -6.177500, lng: 106.883400, accuracy: 8 },
-  'RS Hermina Jatinegara': { lat: -6.224100, lng: 106.864700, accuracy: 10 },
-  'RS Siloam Kebon Jeruk': { lat: -6.191200, lng: 106.764500, accuracy: 8 }
+  'RS Syafira': { lat: 0.499680, lng: 101.454750, accuracy: 5 },
+  'RS Prima': { lat: 0.482310, lng: 101.418920, accuracy: 5 },
+  'RSUD Arifin Achmad': { lat: 0.528350, lng: 101.448550, accuracy: 6 },
+  'RS Awal Bros Sudirman': { lat: 0.505240, lng: 101.451890, accuracy: 5 },
+  'RS Awal Bros Panam': { lat: 0.468200, lng: 101.378900, accuracy: 7 },
+  'RS Santa Maria Pekanbaru': { lat: 0.531200, lng: 101.441800, accuracy: 6 },
+  'RS Sansani Pekanbaru': { lat: 0.472100, lng: 101.391200, accuracy: 8 },
+  'RS Tabrani Rab': { lat: 0.514300, lng: 101.449700, accuracy: 6 },
+  'RS Bhayangkara Pekanbaru': { lat: 0.522800, lng: 101.447900, accuracy: 5 },
+  'RSUD Petala Bumi': { lat: 0.520400, lng: 101.455200, accuracy: 6 },
+  'RSUD Kota Dumai': { lat: 1.673800, lng: 101.446800, accuracy: 8 },
+  'RSUD Mandau Duri': { lat: 1.258900, lng: 101.218500, accuracy: 8 },
+  'RSUD Puri Husada Tembilahan': { lat: -0.322100, lng: 103.155400, accuracy: 9 }
 };
 
 export default function GpsCapture({
   onLocationCaptured,
   initialLocation = null,
-  hospitalName = 'RSUP Dr. Cipto Mangunkusumo'
+  hospitalName = 'RS Syafira'
 }) {
   const [location, setLocation] = useState(initialLocation);
   const [isLoading, setIsLoading] = useState(false);
@@ -84,17 +90,17 @@ export default function GpsCapture({
       accuracy: 8
     };
 
-    const mockLoc = {
+    const hospitalGpsLocation = {
       latitude: coords.lat,
       longitude: coords.lng,
       akurasiLokasi: coords.accuracy,
       waktu: new Date().toISOString(),
       isSimulated: true
     };
-    setLocation(mockLoc);
+    setLocation(hospitalGpsLocation);
     setErrorMessage(null);
     if (onLocationCaptured) {
-      onLocationCaptured(mockLoc);
+      onLocationCaptured(hospitalGpsLocation);
     }
   };
 
