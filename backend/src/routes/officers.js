@@ -80,10 +80,19 @@ router.post('/', authenticate, authorize('kabag'), async (req, res) => {
   }
 });
 
-router.put('/:id', authenticate, authorize('kabag'), async (req, res) => {
+router.put('/:id', authenticate, authorize('kabag', 'petugas'), async (req, res) => {
   let conn;
   try {
     const body = req.body || {};
+    const isKabag = req.user.role === 'kabag';
+
+    // Petugas hanya boleh memperbarui data kontak/profil dirinya sendiri, tidak boleh mengubah status aktif
+    if (!isKabag) {
+      if (!req.user.officerId || String(req.user.officerId) !== String(req.params.id) || body.is_active !== undefined) {
+        return res.status(403).json({ success: false, message: 'Akses ditolak.' });
+      }
+    }
+
     const payload = pickOfficerPayload(body);
     if (Object.keys(payload).length === 0 && typeof body.is_active !== 'boolean') {
       return res.status(400).json({ success: false, message: 'Tidak ada field yang diubah.' });

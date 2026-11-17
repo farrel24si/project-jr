@@ -396,9 +396,16 @@ export function mapBackendCaseToVictim(caseData, visitsData = [], registeredOffi
     activePendingVisit.elapsedHours = Math.round((nowMs - prevTime) / (1000 * 60 * 60));
   }
 
-  // Status Pemantauan diselaraskan dengan status_kondisi dan visits
+  // Status Pemantauan diselaraskan dengan status_pemantauan, status_kondisi, dan visits
   let statusPemantauan = 'Belum Dikunjungi';
-  if (caseData.status_kondisi === 'Selesai' || caseData.status_kondisi === 'Meninggal Dunia') {
+  if (caseData.status_pemantauan === 'Diarsipkan') {
+    statusPemantauan = 'Diarsipkan';
+  } else if (
+    caseData.status_kondisi === 'Selesai' ||
+    caseData.status_kondisi === 'Sudah Pulang' ||
+    caseData.status_kondisi === 'Meninggal Dunia' ||
+    caseData.status_pemantauan === 'Selesai Dipantau'
+  ) {
     statusPemantauan = 'Selesai Dipantau';
   } else if (completedVisits.length > 0) {
     statusPemantauan = 'Pemantauan Aktif';

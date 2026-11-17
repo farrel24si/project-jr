@@ -5,9 +5,9 @@ const { authenticate, authorize } = require('../middleware/auth');
 
 const router = express.Router();
 
-router.use(authenticate, authorize('kabag'));
+router.use(authenticate);
 
-router.get('/', async (req, res) => {
+router.get('/', authorize('kabag'), async (req, res) => {
   try {
     const [users] = await pool.execute(`
       SELECT
@@ -24,7 +24,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-router.post('/', async (req, res) => {
+router.post('/', authorize('kabag'), async (req, res) => {
   try {
     const { username, password, role = 'petugas', officer_id = null } = req.body || {};
 
@@ -66,10 +66,21 @@ router.post('/', async (req, res) => {
   }
 });
 
-router.put('/:id', async (req, res) => {
+router.put('/:id', authorize('kabag', 'petugas'), async (req, res) => {
   try {
     const { password, role, officer_id, is_active } = req.body || {};
     const userId = req.params.id;
+    const isKabag = req.user.role === 'kabag';
+
+    // Petugas hanya boleh mengubah kata sandi akun miliknya sendiri
+    if (!isKabag) {
+      if (String(req.user.userId) !== String(userId)) {
+        return res.status(403).json({ success: false, message: 'Akses ditolak.' });
+      }
+      if (role !== undefined || officer_id !== undefined || is_active !== undefined) {
+        return res.status(403).json({ success: false, message: 'Petugas hanya diizinkan mengubah kata sandi akun sendiri.' });
+      }
+    }
 
     const [[existing]] = await pool.execute('SELECT * FROM users WHERE id = ?', [userId]);
     if (!existing) return res.status(404).json({ success: false, message: 'User tidak ditemukan.' });
@@ -145,7 +156,7 @@ router.put('/:id', async (req, res) => {
 });
 
 // Soft delete
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', authorize('kabag'), async (req, res) => {
   const userId = req.params.id;
   if (String(req.user.userId) === String(userId)) {
     return res.status(400).json({ success: false, message: 'Tidak dapat menonaktifkan akun sendiri.' });

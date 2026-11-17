@@ -24,7 +24,7 @@ Dokumen acuan integrasi untuk tim pengembang Frontend. Menggantikan mock `localS
 }
 ```
 
-**Gagal / Error (`400`, `401`, `403`, `404`, `409`, `422`, `500`):**
+**Gagal / Error (`400`, `401`, `403`, `404`, `409`, `422`, `429`, `500`):**
 ```json
 {
   "success": false,
@@ -92,6 +92,10 @@ Dokumen acuan integrasi untuk tim pengembang Frontend. Menggantikan mock `localS
   ```
 - **Catatan Frontend**:
   - Simpan `token` di Secure Storage / Cookie / Memory state.
+  - Field `username` menerima **tiga bentuk**: username (`andi`), email kedinasan (`andi@jasaraharja.co.id`, dicocokkan ke `officers.email`), atau prefix email (`andi`).
+  - Objek `user` pada response login juga memuat `email`, `telepon`, dan `nip` (bernilai `null` untuk akun tanpa data petugas, misalnya Kabag).
+  - **Rate limit:** lebih dari 15 login gagal dalam 15 menit dari IP yang sama dibalas `429` dengan pesan `Terlalu banyak percobaan login gagal. Silakan coba lagi beberapa saat.` Percobaan yang berhasil mereset hitungan.
+  - `username` dan `password` wajib bertipe string; tipe lain dibalas `400`.
   - Role yang tersedia: `'kabag'` (akses seluruh fitur & master data) dan `'petugas'` (akses terbatas tugas lapangan).
 
 ### 2.2 Cek Sesi Akun Aktif
@@ -109,10 +113,21 @@ Dokumen acuan integrasi untuk tim pengembang Frontend. Menggantikan mock `localS
       "officer_id": 1,
       "nama": "Andi Pratama",
       "jabatan": "Petugas",
-      "wilayah": "Pekanbaru"
+      "wilayah": "Pekanbaru",
+      "nip": "19930512 201902 1 004",
+      "telepon": "081234567890",
+      "email": "andi@jasaraharja.co.id"
     }
   }
   ```
+
+---
+
+### 2.3 Logout
+- **Method / Endpoint**: `POST /auth/logout`
+- **Auth**: Bearer Token
+- **Response 200 OK**: `{ "success": true, "message": "Logout berhasil." }`
+- **Catatan**: JWT bersifat stateless, jadi endpoint ini tidak mencabut token di server. Frontend tetap wajib menghapus token lokal. Endpoint ada agar pemanggilan logout dari frontend tidak berujung `404`.
 
 ---
 
@@ -161,6 +176,10 @@ Dokumen acuan integrasi untuk tim pengembang Frontend. Menggantikan mock `localS
   ```
 - **Catatan Frontend**:
   - `is_overdue` bernilai `1` jika ada visit berstatus `Menunggu` yang jadwalnya sudah lewat dari waktu server saat query dijalankan. Gunakan badge merah di dashboard jika bernilai `1`.
+  - Setiap item sekarang juga memuat `status_pemantauan` (`Belum Dikunjungi`, `Pemantauan Aktif`, `Menunggu Konfirmasi Kondisi`, `Selesai Dipantau`, `Diarsipkan`) beserta `nomor_laporan`, `ruangan_rs`, `jenis_kelamin`, `alamat`, `telepon_korban`, `tgl_laka`, `tgl_masuk`, `kronologi`, `no_pelapor_wa`, dan `sumber_informasi`.
+  - Kasus `status_pemantauan = 'Diarsipkan'` (laka tunggal) tidak punya petugas, visit, SLA, maupun notifikasi. Jangan tampilkan sebagai tugas aktif. Tampilkan badge arsip dan hanya untuk Kabag.
+  - Setelah kunjungan berstatus terminal (`Selesai`, `Meninggal Dunia`, `Sudah Pulang`), `status_pemantauan` menjadi `Selesai Dipantau` dan tidak ada visit lanjutan.
+  - **Visibilitas petugas:** petugas melihat kasus yang saat ini di-assign kepadanya **dan** kasus yang pernah ia kunjungi atau rujuk (riwayat read-only). Aksi tulis (submit kunjungan, update keterjaminan) tetap hanya untuk petugas yang sedang di-assign. `GET /cases/:id` dan `GET /uploads/:filename` memakai aturan akses baca yang sama.
 
 ### 3.2 Detail Kasus & Riwayat Kunjungan
 - **Method / Endpoint**: `GET /cases/:id`
@@ -275,6 +294,7 @@ Dokumen acuan integrasi untuk tim pengembang Frontend. Menggantikan mock `localS
   6. Role `petugas`: Petugas HANYA boleh menginput untuk RS yang aktif di-plotting ke dirinya (`403 Forbidden` jika RS di luar plotting tugasnya). Untuk selain laka tunggal, kasus otomatis di-assign ke petugas penginput.
   7. Field `assigned_officer_id` atau `officer_id` pada request body diabaikan untuk mencegah eskalasi wewenang.
   8. Untuk selain laka tunggal, backend otomatis membuat nomor tiket unik `JR-XXXXXX` dan menjadwalkan visit ke-1 dengan batas SLA 72 jam ke depan dalam 1 transaksi database.
+  9. `tgl_laka`, `tgl_masuk`, dan `tgl_gl` pada `POST /cases` menerima `DD/MM/YYYY` **atau** string ISO datetime (`YYYY-MM-DDTHH:mm...`, misalnya dari `<input type="datetime-local">`). Backend menyimpannya sebagai `DD/MM/YYYY`, bagian jam dibuang, dan tanggal dihitung dalam zona waktu server. `YYYY-MM-DD` tanpa jam tetap ditolak `422`. `PATCH /cases/:id/keterjaminan` tetap hanya menerima `DD/MM/YYYY`.
 - **Response 201 Created**:
   ```json
   {
@@ -470,7 +490,7 @@ Dokumen acuan integrasi untuk tim pengembang Frontend. Menggantikan mock `localS
 
 ## 5. Master Data (tulis khusus role `kabag`)
 
-Semua endpoint berikut memerlukan Bearer Token. Endpoint GET rumah sakit/petugas dan plotting memerlukan login (keduanya boleh dibaca petugas dan Kabag); semua perubahan rumah sakit/petugas/plotting/user hanya role `kabag`.
+Semua endpoint berikut memerlukan Bearer Token. Endpoint GET rumah sakit/petugas dan plotting memerlukan login (keduanya boleh dibaca petugas dan Kabag); semua perubahan rumah sakit/petugas/plotting/user hanya role `kabag`, dengan dua pengecualian untuk petugas (lihat 5.2 dan 5.4).
 
 ### 5.1 Rumah Sakit (`/hospitals`)
 - `GET /hospitals` -> Default hanya RS aktif. Kabag dapat meminta `?include_inactive=true` untuk menyertakan RS nonaktif. Respons `{ success, data: Hospital[] }`.
@@ -482,7 +502,7 @@ Semua endpoint berikut memerlukan Bearer Token. Endpoint GET rumah sakit/petugas
 - `GET /officers` -> Default petugas aktif; Kabag dapat memakai `?include_inactive=true`. Respons berisi data petugas ditambah `username`, `role`, `akun_aktif` bila akun tertaut.
 - `GET /officers/:id` -> Detail petugas (login; dapat membaca data petugas nonaktif), `404` bila tidak ada.
 - `POST /officers` -> Kabag. Body wajib `nama`; opsional `nip`, `jabatan`, `telepon`, `email`, `wilayah`. `201`; `409` NIP/email duplikat.
-- `PUT /officers/:id` -> Kabag. Partial update field petugas dan/atau boolean `is_active`. Menonaktifkan petugas juga menonaktifkan akun tertaut. `200` atau `404`.
+- `PUT /officers/:id` -> Kabag. Partial update field petugas dan/atau boolean `is_active`. Menonaktifkan petugas juga menonaktifkan akun tertaut. `200` atau `404`. **Petugas juga boleh memanggil endpoint ini untuk profil dirinya sendiri** (misalnya `telepon`), tetapi tidak boleh mengirim `is_active` dan tidak boleh mengubah petugas lain (`403`).
 - `DELETE /officers/:id` -> Soft-delete petugas dan menonaktifkan akun tertaut. `200` atau `404`.
 
 ### 5.3 Plotting Penugasan Petugas ke RS (`/officers/:id/hospitals`)
@@ -491,7 +511,7 @@ Semua endpoint berikut memerlukan Bearer Token. Endpoint GET rumah sakit/petugas
 - `DELETE /officers/:officerId/hospitals/:hospitalId` -> Kabag; menonaktifkan relasi (`ended_at` diisi, riwayat dipertahankan), `200` atau `404`.
 
 ### 5.4 Manajemen User Akun (`/users`)
-Semua endpoint memerlukan role `kabag`.
+Semua endpoint memerlukan role `kabag`, kecuali `PUT /users/:id` yang juga boleh dipakai petugas **hanya untuk mengganti `password` akunnya sendiri** (`403` bila menyentuh akun lain atau mengirim `role`, `officer_id`, `is_active`). Frontend tidak perlu dan tidak boleh memakai kredensial Kabag untuk mengganti password petugas.
 - `GET /users` -> Daftar akun, termasuk field petugas tertaut; password hash tidak dikirim.
 - `POST /users` -> Body wajib `username`, `password`; `role` opsional (default `petugas`). Untuk `role: 'petugas'`, `officer_id` wajib dan harus petugas aktif; untuk Kabag boleh `null`. `201`; `409` username duplikat.
 - `PUT /users/:id` -> Update parsial `password`, `role`, `officer_id`, `is_active`. Tidak bisa menonaktifkan akun Kabag sendiri. `200`/`404`.
@@ -542,5 +562,5 @@ const imageUrl = URL.createObjectURL(blob);
 ```
 
 ### 7.3 Format Tanggal & Angka
-- Semua tanggal dari API berupa string `DD/MM/YYYY` (bukan ISO). Kirim balik dengan format sama; `YYYY-MM-DD` dari datepicker browser wajib dikonversi dulu.
+- Semua tanggal dari API berupa string `DD/MM/YYYY` (bukan ISO). Kirim balik dengan format sama; `YYYY-MM-DD` dari datepicker browser wajib dikonversi dulu. Pengecualian: `POST /cases` juga menerima ISO datetime (lihat 3.3 aturan 9).
 - Nominal uang tidak lagi ada di kontrak API. Kalau butuh menampilkan angka lain (misal statistik jumlah kasus), gunakan angka murni dari respons.

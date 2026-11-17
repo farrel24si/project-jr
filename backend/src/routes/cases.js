@@ -15,9 +15,27 @@ const OPTIONAL_FIELDS = [
 
 const VALID_KETERJAMINAN = ['Belum Dikonfirmasi', 'Terjamin JR'];
 
+function normalizeCaseDateInput(value) {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  const trimmed = String(value).trim();
+  if (!trimmed) return '';
+  // Dukungan format datetime-local / ISO 8601 dari form UI frontend (misal 2026-11-16T05:30:00.000Z)
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(trimmed)) {
+    const d = new Date(trimmed);
+    if (!Number.isNaN(d.getTime())) {
+      const dd = String(d.getDate()).padStart(2, '0');
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const yyyy = d.getFullYear();
+      return normalizeDateDDMMYYYY(`${dd}/${mm}/${yyyy}`);
+    }
+  }
+  return normalizeDateDDMMYYYY(trimmed);
+}
+
 function validOptionalFields(body) {
   for (const field of ['tgl_laka', 'tgl_masuk', 'tgl_gl']) {
-    if (body[field] !== undefined && body[field] !== null && normalizeDateDDMMYYYY(body[field]) === null) return false;
+    if (body[field] !== undefined && body[field] !== null && normalizeCaseDateInput(body[field]) === null) return false;
   }
   if (body.umur !== undefined && (!Number.isInteger(body.umur) || body.umur < 0)) return false;
   if (body.nik !== undefined && body.nik !== null && !/^\d{16}$/.test(String(body.nik))) return false;
@@ -39,7 +57,7 @@ router.post('/', authenticate, authorize('kabag', 'petugas'), async (req, res) =
     }
     if (!validOptionalFields(body)) {
       const badDateField = ['tgl_laka', 'tgl_masuk', 'tgl_gl'].find(
-        (f) => body[f] !== undefined && body[f] !== null && normalizeDateDDMMYYYY(body[f]) === null
+        (f) => body[f] !== undefined && body[f] !== null && normalizeCaseDateInput(body[f]) === null
       );
       const message = badDateField
         ? `Tanggal ${badDateField} tidak valid. Gunakan format DD/MM/YYYY.`
@@ -73,7 +91,7 @@ router.post('/', authenticate, authorize('kabag', 'petugas'), async (req, res) =
       ...OPTIONAL_FIELDS.reduce((values, field) => ({
         ...values,
         [field]: ['tgl_laka', 'tgl_masuk', 'tgl_gl'].includes(field) && body[field] !== undefined && body[field] !== null
-          ? normalizeDateDDMMYYYY(body[field])
+          ? normalizeCaseDateInput(body[field])
           : body[field]
       }), {}),
       hospital_id: hospital.id,
@@ -303,16 +321,22 @@ router.get('/', authenticate, async (req, res) => {
 
     let whereClause = '';
     if (!isKabag) {
-      whereClause = 'WHERE c.assigned_officer_id = ?';
-      params.push(req.user.officerId);
+      whereClause = `WHERE (
+        c.assigned_officer_id = ?
+        OR EXISTS (SELECT 1 FROM visits v_own WHERE v_own.case_id = c.id AND v_own.officer_id = ?)
+        OR EXISTS (SELECT 1 FROM case_referrals r_own WHERE r_own.case_id = c.id AND (r_own.previous_officer_id = ? OR r_own.referred_by_officer_id = ?))
+      )`;
+      params.push(req.user.officerId, req.user.officerId, req.user.officerId, req.user.officerId);
     }
 
     const [cases] = await pool.execute(`
       SELECT
-        c.id, c.nomor_tiket, c.rumah_sakit, c.hospital_id,
+        c.id, c.nomor_tiket, c.nomor_laporan, c.rumah_sakit, c.hospital_id, c.ruangan_rs,
         c.assigned_officer_id, ao.nama AS assigned_officer_nama,
-        c.nama_korban, c.nik, c.umur, c.jenis_laka,
-        c.status_kondisi, c.status_pemantauan, c.status_keterjaminan, c.no_gl, c.tgl_gl, c.waktu_lapor_wa, c.created_at,
+        c.nama_korban, c.nik, c.umur, c.jenis_kelamin, c.alamat, c.telepon_korban,
+        c.tgl_laka, c.tgl_masuk, c.kronologi, c.jenis_laka,
+        c.status_kondisi, c.status_pemantauan, c.status_keterjaminan, c.no_gl, c.tgl_gl,
+        c.no_pelapor_wa, c.sumber_informasi, c.waktu_lapor_wa, c.created_at,
         h.nama_rs AS hospital_nama, h.latitude AS hospital_lat, h.longitude AS hospital_lng,
         h.radius_meter AS hospital_radius,
         COUNT(CASE WHEN v.status_kunjungan = 'Menunggu' THEN v.id END) AS tugas_menunggu,
@@ -360,11 +384,6 @@ router.get('/:id', authenticate, async (req, res) => {
       return res.status(404).json({ success: false, message: 'Kasus tidak ditemukan.' });
     }
 
-    // Petugas hanya boleh lihat kasus yang di-assign
-    if (!isKabag && String(caseData.assigned_officer_id) !== String(req.user.officerId)) {
-      return res.status(403).json({ success: false, message: 'Akses ditolak.' });
-    }
-
     const [referrals] = await pool.execute(`
       SELECT r.*,
         sh.nama_rs AS source_hospital_nama,
@@ -394,6 +413,21 @@ router.get('/:id', authenticate, async (req, res) => {
       WHERE v.case_id = ?
       ORDER BY v.kunjungan_ke ASC
     `, [id]);
+
+    // Petugas boleh melihat kasus yang di-assign kepadanya ATAU kasus yang pernah ia kunjungi/rujuk (read-only history)
+    if (!isKabag) {
+      const myOffId = String(req.user.officerId || '');
+      const isCurrentAssignee = String(caseData.assigned_officer_id || '') === myOffId;
+      const hasVisited = visits.some((v) => v.officer_id && String(v.officer_id) === myOffId);
+      const hasReferred = referrals.some(
+        (r) =>
+          (r.previous_officer_id && String(r.previous_officer_id) === myOffId) ||
+          (r.referred_by_officer_id && String(r.referred_by_officer_id) === myOffId)
+      );
+      if (!isCurrentAssignee && !hasVisited && !hasReferred) {
+        return res.status(403).json({ success: false, message: 'Akses ditolak.' });
+      }
+    }
 
     // Bentuk kontrak hospital sebagai objek terpisah
     const hospital = caseData.hospital_db_id

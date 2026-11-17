@@ -14,7 +14,7 @@ router.get('/:filename', authenticate, async (req, res) => {
 
   try {
     const [[visit]] = await pool.execute(
-      `SELECT v.foto_bukti_url, c.assigned_officer_id
+      `SELECT v.foto_bukti_url, v.officer_id AS visit_officer_id, c.id AS case_id, c.assigned_officer_id
        FROM visits v
        JOIN cases c ON c.id = v.case_id
        WHERE v.foto_bukti_url = ?
@@ -25,8 +25,22 @@ router.get('/:filename', authenticate, async (req, res) => {
     if (!visit) {
       return res.status(404).json({ success: false, message: 'Bukti foto tidak ditemukan.' });
     }
-    if (req.user.role !== 'kabag' && String(visit.assigned_officer_id) !== String(req.user.officerId)) {
-      return res.status(403).json({ success: false, message: 'Akses bukti foto ditolak.' });
+    if (req.user.role !== 'kabag') {
+      const myOffId = String(req.user.officerId || '');
+      const isAllowedDirect =
+        String(visit.assigned_officer_id || '') === myOffId ||
+        String(visit.visit_officer_id || '') === myOffId;
+      if (!isAllowedDirect) {
+        const [[refMatch]] = await pool.execute(
+          `SELECT id FROM case_referrals
+           WHERE case_id = ? AND (previous_officer_id = ? OR referred_by_officer_id = ?)
+           LIMIT 1`,
+          [visit.case_id, req.user.officerId, req.user.officerId]
+        );
+        if (!refMatch) {
+          return res.status(403).json({ success: false, message: 'Akses bukti foto ditolak.' });
+        }
+      }
     }
 
     res.set('X-Content-Type-Options', 'nosniff');

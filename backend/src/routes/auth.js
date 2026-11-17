@@ -60,13 +60,20 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ success: false, message: 'username dan password wajib diisi.' });
     }
 
+    const cleanInput = username.trim();
+    const emailPrefix = cleanInput.toLowerCase().endsWith('@jasaraharja.co.id')
+      ? cleanInput.split('@')[0]
+      : cleanInput;
+
     const [[user]] = await pool.execute(
-      `SELECT u.*, o.nama AS nama_petugas
+      `SELECT u.*, o.nama AS nama_petugas, o.email AS officer_email, o.telepon AS officer_telepon, o.nip AS officer_nip
        FROM users u
        LEFT JOIN officers o ON o.id = u.officer_id
-       WHERE u.username = ? AND u.is_active = 1
+       WHERE (u.username = ? OR u.username = ? OR LOWER(o.email) = LOWER(?))
+         AND u.is_active = 1
+       ORDER BY (u.username = ?) DESC, u.id ASC
        LIMIT 1`,
-      [username.trim()]
+      [cleanInput, emailPrefix, cleanInput, cleanInput]
     );
 
     if (!user) {
@@ -90,7 +97,10 @@ router.post('/login', async (req, res) => {
       officerId: user.officer_id || null,
       username: user.username,
       role: user.role,
-      nama: user.nama_petugas || user.username
+      nama: user.nama_petugas || user.username,
+      email: user.officer_email || null,
+      telepon: user.officer_telepon || null,
+      nip: user.officer_nip || null
     };
 
     const token = jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
@@ -107,6 +117,14 @@ router.post('/login', async (req, res) => {
 });
 
 /**
+ * POST /api/auth/logout
+ * Endpoint logout untuk kompatibilitas frontend (stateless JWT)
+ */
+router.post('/logout', (req, res) => {
+  res.json({ success: true, message: 'Logout berhasil.' });
+});
+
+/**
  * GET /api/auth/me
  * Header: Authorization: Bearer <token>
  */
@@ -114,7 +132,7 @@ router.get('/me', authenticate, async (req, res) => {
   try {
     const [[user]] = await pool.execute(
       `SELECT u.id, u.username, u.role, u.last_login_at,
-              o.id AS officer_id, o.nama, o.jabatan, o.wilayah
+              o.id AS officer_id, o.nama, o.nip, o.jabatan, o.wilayah, o.telepon, o.email
        FROM users u
        LEFT JOIN officers o ON o.id = u.officer_id
        WHERE u.id = ? AND u.is_active = 1`,
