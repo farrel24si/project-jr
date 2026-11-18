@@ -1,6 +1,7 @@
 const {
   default: makeWASocket,
   useMultiFileAuthState,
+  makeCacheableSignalKeyStore,
   DisconnectReason
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
@@ -17,6 +18,57 @@ let activeSocket = null;
 let whatsappConnected = false;
 let reconnectAttempts = 0;
 let reconnectTimer = null;
+
+// Cache pesan terkirim (maks 500 pesan) untuk melayani retry dekripsi ("Menunggu pesan ini") dari perangkat penerima
+const MAX_SENT_MESSAGES_CACHE = 500;
+const sentMessagesCache = new Map();
+
+function cacheSentMessage(msg) {
+  if (!msg || !msg.key || !msg.key.id || !msg.message) return;
+  if (sentMessagesCache.size >= MAX_SENT_MESSAGES_CACHE) {
+    const oldestKey = sentMessagesCache.keys().next().value;
+    if (oldestKey !== undefined) sentMessagesCache.delete(oldestKey);
+  }
+  sentMessagesCache.set(msg.key.id, msg.message);
+  if (msg.key.remoteJid) {
+    sentMessagesCache.set(`${msg.key.remoteJid}:${msg.key.id}`, msg.message);
+  }
+}
+
+async function getCachedSentMessage(key) {
+  if (!key || !key.id) return undefined;
+  if (key.remoteJid && sentMessagesCache.has(`${key.remoteJid}:${key.id}`)) {
+    return sentMessagesCache.get(`${key.remoteJid}:${key.id}`);
+  }
+  return sentMessagesCache.get(key.id);
+}
+
+// Filter log internal libsignal ("Closing session:", "Opening session:") agar tidak membocorkan buffer kunci ke terminal
+let libsignalConsoleFiltered = false;
+function suppressLibsignalConsoleNoise() {
+  if (libsignalConsoleFiltered) return;
+  libsignalConsoleFiltered = true;
+  const origInfo = console.info;
+  const origWarn = console.warn;
+  const NOISE_PREFIXES = [
+    'Closing session:',
+    'Opening session:',
+    'Removing old closed session:',
+    'Session already open'
+  ];
+  console.info = function (...args) {
+    if (typeof args[0] === 'string' && NOISE_PREFIXES.some((p) => args[0].startsWith(p))) {
+      return;
+    }
+    return origInfo.apply(console, args);
+  };
+  console.warn = function (...args) {
+    if (typeof args[0] === 'string' && NOISE_PREFIXES.some((p) => args[0].startsWith(p))) {
+      return;
+    }
+    return origWarn.apply(console, args);
+  };
+}
 
 // Template #FORMAT dasar — tanpa baris RS karena RS dideteksi dari nama grup.
 // Versi dengan baris RS dipakai untuk pesan DM/grup tidak dikenali.
@@ -379,13 +431,41 @@ function clearSession() {
 }
 
 async function startWhatsAppBot() {
+  suppressLibsignalConsoleNoise();
+  const silentLogger = pino({ level: 'silent' });
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
 
+  const authKeys = typeof makeCacheableSignalKeyStore === 'function'
+    ? makeCacheableSignalKeyStore(state.keys, silentLogger)
+    : state.keys;
+
   const sock = makeWASocket({
-    auth: state,
-    logger: pino({ level: 'silent' }),
-    printQRInTerminal: false
+    auth: {
+      creds: state.creds,
+      keys: authKeys
+    },
+    logger: silentLogger,
+    printQRInTerminal: false,
+    getMessage: getCachedSentMessage
   });
+
+  // Bungkus sendMessage agar setiap pesan keluar otomatis tersimpan di sentMessagesCache
+  // untuk melayani permintaan retry dekripsi ("Menunggu pesan ini") dari perangkat penerima.
+  const originalSendMessage = sock.sendMessage.bind(sock);
+  sock.sendMessage = async (jid, content, options) => {
+    const sent = await originalSendMessage(jid, content, options);
+    if (sent) {
+      cacheSentMessage(sent);
+    } else if (content && typeof content === 'object' && typeof content.text === 'string') {
+      // Fallback defensif bila objek fullMsg tidak dikembalikan
+      cacheSentMessage({
+        key: { remoteJid: jid, id: options?.messageId },
+        message: { conversation: content.text }
+      });
+    }
+    return sent;
+  };
+
   activeSocket = sock;
   whatsappConnected = false;
 
@@ -437,6 +517,11 @@ async function startWhatsAppBot() {
   });
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    for (const msg of messages) {
+      if (msg?.key?.fromMe && msg?.message) {
+        cacheSentMessage(msg);
+      }
+    }
     if (type !== 'notify') return;
     for (const msg of messages) {
       try {
@@ -464,5 +549,7 @@ module.exports = {
   loadActiveAliases,
   loadActiveGroupBindings,
   loadGroupRoutingRules,
-  getActiveWhatsAppSocket
+  getActiveWhatsAppSocket,
+  cacheSentMessage,
+  getCachedSentMessage
 };

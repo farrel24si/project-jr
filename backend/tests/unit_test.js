@@ -2,7 +2,13 @@ const assert = require('assert');
 const { spawnSync } = require('child_process');
 const path = require('path');
 const { parseLaporanRS, normalizeStatus, normalizeDateDDMMYYYY, generateNomorTiket } = require('../src/bot/parser');
-const { detectHospitalFromGroup, resolveHospitalFromGroup, handleMessage } = require('../src/bot/whatsapp');
+const {
+  detectHospitalFromGroup,
+  resolveHospitalFromGroup,
+  handleMessage,
+  cacheSentMessage,
+  getCachedSentMessage
+} = require('../src/bot/whatsapp');
 const { mapKeterjaminanFromJenisLaka } = require('../src/services/caseCreation');
 const { haversine } = require('../src/utils/geo');
 const {
@@ -652,6 +658,19 @@ function testResolveHospitalFromGroup() {
 }
 
 
+async function testSentMessageRetryCache() {
+  const sampleMsg = {
+    key: { remoteJid: '6281234567890@s.whatsapp.net', fromMe: true, id: 'MSG-RETRY-001' },
+    message: { conversation: 'Pesan pengingat SLA' }
+  };
+  cacheSentMessage(sampleMsg);
+  const byJidAndId = await getCachedSentMessage({ remoteJid: '6281234567890@s.whatsapp.net', id: 'MSG-RETRY-001' });
+  const byIdOnly = await getCachedSentMessage({ id: 'MSG-RETRY-001' });
+  assert.deepStrictEqual(byJidAndId, { conversation: 'Pesan pengingat SLA' });
+  assert.deepStrictEqual(byIdOnly, { conversation: 'Pesan pengingat SLA' });
+  console.log('PASS testSentMessageRetryCache');
+}
+
 function testMapKeterjaminanFromJenisLaka() {
   assert.strictEqual(mapKeterjaminanFromJenisLaka('Tidak Tunggal'), 'Terjamin JR');
   assert.strictEqual(mapKeterjaminanFromJenisLaka('Tunggal'), 'Belum Dikonfirmasi');
@@ -701,6 +720,7 @@ const tests = [
   testDetectHospitalFromGroup,
   testDetectHospitalLongestFirst,
   testResolveHospitalFromGroup,
+  testSentMessageRetryCache,
   testMapKeterjaminanFromJenisLaka
 ];
 
