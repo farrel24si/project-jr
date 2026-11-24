@@ -56,9 +56,13 @@ INSERT IGNORE INTO hospital_aliases (hospital_id, alias_normalized, alias_displa
 SELECT h.id, a.alias_normalized, a.alias_display, 1
 FROM (
   SELECT 'rs prima' AS alias_normalized, 'RS Prima' AS alias_display, 'RS Prima Pekanbaru' AS nama_rs UNION ALL
-  SELECT 'rs syafira', 'RS Syafira', 'RS Syafira Pekanbaru'
+  SELECT 'prima pekanbaru', 'Prima Pekanbaru', 'RS Prima Pekanbaru' UNION ALL
+  SELECT 'prima', 'Prima', 'RS Prima Pekanbaru' UNION ALL
+  SELECT 'rs syafira', 'RS Syafira', 'RS Syafira Pekanbaru' UNION ALL
+  SELECT 'syafira pekanbaru', 'Syafira Pekanbaru', 'RS Syafira Pekanbaru' UNION ALL
+  SELECT 'syafira', 'Syafira', 'RS Syafira Pekanbaru'
 ) a
-JOIN hospitals h ON h.nama_rs = a.nama_rs;
+JOIN hospitals h ON LOWER(REPLACE(h.nama_rs, ' - ', ' ')) = LOWER(REPLACE(a.nama_rs, ' - ', ' '));
 
 -- Master Petugas Lapangan Jasa Raharja
 CREATE TABLE IF NOT EXISTS officers (

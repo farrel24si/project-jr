@@ -120,6 +120,255 @@ function normalizeSubjectTerm(value) {
     .trim();
 }
 
+function containsNormalizedTerm(haystackNorm, needleNorm) {
+  if (!haystackNorm || !needleNorm) return false;
+  const escaped = needleNorm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|\\s)${escaped}(?:\\s|$)`, 'i').test(haystackNorm);
+}
+
+// Token jenis fasilitas / gelar yang tidak boleh berdiri sendiri sebagai kata kunci RS
+const GENERIC_FACILITY_TOKENS = new Set([
+  'rs', 'rsud', 'rsu', 'rsd', 'rsia', 'rbia', 'rsau', 'upt', 'uptd', 'bk',
+  'klinik', 'utama', 'umum', 'rumah', 'sakit', 'daerah', 'hospital',
+  'medical', 'medika', 'centre', 'center', 'prof', 'dr', 'ibu', 'dan', 'anak',
+  'mata', 'eye', 'kelas', 'd', 'tk', 'iv', '01', '07', '04', 'pemerintah', 'lanud'
+]);
+
+// Token nama kota/wilayah di ujung nama RS yang sering tidak ditulis di nama grup WA
+const TRAILING_LOCATION_TOKENS = new Set([
+  'pekanbaru', 'pku', 'riau', 'polda', 'kota', 'kab', 'kabupaten', 'kec', 'kecamatan',
+  'rohul', 'rokan', 'hulu', 'kuansing', 'pelalawan', 'kampar', 'siak',
+  'pasir', 'pangaraian', 'bagan', 'batu'
+]);
+
+// Seluruh token lokasi/cabang yang tidak boleh menjadi kata kunci tunggal tanpa nama RS
+const ALL_LOCATION_TOKENS = new Set([
+  ...TRAILING_LOCATION_TOKENS,
+  'kuantan', 'dumai', 'duri', 'bengkalis', 'bangkinang', 'rengat',
+  'tembilahan', 'siapi', 'api', 'ujung', 'tanjung', 'sorek',
+  'tualang', 'mandau', 'sei', 'guntung', 'teluk', 'panam', 'sudirman', 'hangtuah'
+]);
+
+function isValidHospitalKeyword(phraseNorm) {
+  if (!phraseNorm || phraseNorm.length < 3) return false;
+  const tokens = phraseNorm.split(' ').filter(Boolean);
+  if (tokens.length === 0) return false;
+
+  const hasDistinctiveToken = tokens.some(
+    (t) => !GENERIC_FACILITY_TOKENS.has(t) && !ALL_LOCATION_TOKENS.has(t)
+  );
+  if (hasDistinctiveToken) {
+    return true;
+  }
+
+  // Untuk RS yang namanya murni kombinasi fasilitas + wilayah (mis. RSUD Kota Dumai, RS Pekanbaru Medical Centre),
+  // wajib memuat minimal 2 token serta mengkombinasikan token fasilitas/medis dan token lokasi.
+  const hasLocation = tokens.some((t) => ALL_LOCATION_TOKENS.has(t));
+  const hasFacility = tokens.some((t) => GENERIC_FACILITY_TOKENS.has(t));
+  return tokens.length >= 2 && hasLocation && hasFacility;
+}
+
+function stripTrailingLocationTokens(normStr) {
+  const tokens = normStr.split(' ').filter(Boolean);
+  let end = tokens.length;
+  while (end > 1 && TRAILING_LOCATION_TOKENS.has(tokens[end - 1])) {
+    end -= 1;
+  }
+  const candidate = tokens.slice(0, end).join(' ');
+  return isValidHospitalKeyword(candidate) ? candidate : normStr;
+}
+
+function stripLeadingFacilityTokens(normStr) {
+  const tokens = normStr.split(' ').filter(Boolean);
+  let start = 0;
+  while (start < tokens.length - 1 && GENERIC_FACILITY_TOKENS.has(tokens[start])) {
+    start += 1;
+  }
+  return tokens.slice(start).join(' ');
+}
+
+/**
+ * Ekstraksi kandidat kata kunci & singkatan dari nama kanonis RS.
+ * Menangani penghilangan embel-embel lokasi di ujung ("- PEKANBARU", "Pekanbaru", "Polda - Riau"),
+ * penghilangan awalan ("RS", "RSUD", "RS Umum", "RS Prof. Dr."), serta singkatan umum ("AB", "PMC", dll).
+ * @param {string} namaRs
+ * @returns {string[]} daftar kandidat kata kunci ter-normalisasi (terpanjang ke terpendek)
+ */
+function extractHospitalKeywords(namaRs) {
+  if (typeof namaRs !== 'string' || !namaRs.trim()) return [];
+
+  const candidates = new Set();
+  const addCandidate = (rawOrNorm) => {
+    const norm = normalizeSubjectTerm(rawOrNorm);
+    if (isValidHospitalKeyword(norm)) {
+      candidates.add(norm);
+    }
+  };
+
+  const fullNorm = normalizeSubjectTerm(namaRs);
+  addCandidate(fullNorm);
+
+  // 1. Ambil akronim di dalam tanda kurung bila ada, mis. "(PBEC)", "(UNRI)"
+  const parenMatches = namaRs.matchAll(/\(([A-Za-z0-9\s]{2,15})\)/g);
+  for (const match of parenMatches) {
+    const acr = normalizeSubjectTerm(match[1]);
+    if (acr.length >= 3) {
+      addCandidate(acr);
+      addCandidate(`rs ${acr}`);
+    }
+  }
+  const withoutParens = namaRs.replace(/\([^)]*\)/g, ' ');
+  addCandidate(withoutParens);
+
+  // 2. Potong bagian setelah tanda hubung " - " (umumnya "- PEKANBARU", "- RIAU", "- PELALAWAN")
+  const stems = new Set([fullNorm, normalizeSubjectTerm(withoutParens)]);
+  if (withoutParens.includes('-')) {
+    const beforeHyphen = withoutParens.split('-')[0];
+    const beforeHyphenNorm = normalizeSubjectTerm(beforeHyphen);
+    if (isValidHospitalKeyword(beforeHyphenNorm)) {
+      stems.add(beforeHyphenNorm);
+      addCandidate(beforeHyphenNorm);
+    }
+  }
+
+  // 3. Buang token wilayah/kota di ujung (mis. "Pekanbaru", "Polda Riau", "Kota Pekanbaru")
+  for (const s of [...stems]) {
+    const strippedLoc = stripTrailingLocationTokens(s);
+    if (strippedLoc && isValidHospitalKeyword(strippedLoc)) {
+      stems.add(strippedLoc);
+      addCandidate(strippedLoc);
+    }
+  }
+
+  // 4. Untuk setiap stem, bentuk variasi tanpa awalan RS/RSUD/Umum/Prof.Dr. dan tanpa akhiran "Hospital"
+  for (const stem of [...stems]) {
+    const core = stripLeadingFacilityTokens(stem);
+    if (core && isValidHospitalKeyword(core)) {
+      addCandidate(core);
+      addCandidate(`rs ${core}`);
+      if (stem.startsWith('rsud ')) {
+        addCandidate(`rsud ${core}`);
+      } else if (stem.startsWith('rs umum ') || stem.startsWith('rsu ')) {
+        addCandidate(`rsu ${core}`);
+      } else if (stem.startsWith('rs ibu dan anak ') || stem.startsWith('rbia ') || stem.startsWith('rsia ')) {
+        addCandidate(`rsia ${core}`);
+      }
+
+      // Jika diakhiri kata "hospital" (mis. "eka hospital", "aulia hospital"), tambahkan bentuk singkatnya
+      if (core.endsWith(' hospital')) {
+        const withoutHospital = core.replace(/\s+hospital$/, '').trim();
+        if (isValidHospitalKeyword(withoutHospital)) {
+          addCandidate(withoutHospital);
+          addCandidate(`rs ${withoutHospital}`);
+        }
+      }
+    }
+  }
+
+  // 5. Variasi khusus & singkatan populer RS di Riau / Pekanbaru
+  if (fullNorm.includes('awal bros')) {
+    for (const existing of [...candidates]) {
+      if (existing.includes('awal bros')) {
+        addCandidate(existing.replace(/\bawal bros\b/g, 'ab'));
+      }
+    }
+    if (fullNorm === 'rs awal bros pekanbaru') {
+      addCandidate('rs awal bros sudirman');
+      addCandidate('awal bros sudirman');
+      addCandidate('rs ab sudirman');
+      addCandidate('ab sudirman');
+    }
+    if (fullNorm.includes('ahmad yani')) {
+      addCandidate('rs awal bros a yani');
+      addCandidate('awal bros a yani');
+      addCandidate('rs ab a yani');
+      addCandidate('ab a yani');
+      addCandidate('rs ab ahmad yani');
+      addCandidate('ab ahmad yani');
+    }
+    if (fullNorm.includes('hangtuah')) {
+      addCandidate('rs awal bros hang tuah');
+      addCandidate('awal bros hang tuah');
+      addCandidate('rs ab hang tuah');
+      addCandidate('ab hang tuah');
+      addCandidate('rs hangtuah');
+      addCandidate('rs hang tuah');
+    }
+  }
+
+  if (fullNorm.includes('pekanbaru medical centre') || fullNorm.includes('pekanbaru medical center')) {
+    addCandidate('rs pekanbaru medical center');
+    addCandidate('pekanbaru medical center');
+    addCandidate('pekanbaru medical centre');
+    addCandidate('rs pmc pekanbaru');
+    addCandidate('rs pmc');
+    addCandidate('pmc pekanbaru');
+    addCandidate('pmc');
+  }
+
+  if (fullNorm.includes('arifin achmad')) {
+    addCandidate('rsud arifin ahmad pekanbaru');
+    addCandidate('rsud arifin ahmad');
+    addCandidate('rs arifin ahmad');
+    addCandidate('arifin ahmad');
+    addCandidate('rsud arifin');
+    addCandidate('rs arifin');
+  }
+
+  if (fullNorm.includes('tabrani')) {
+    addCandidate('rs prof tabrani');
+    addCandidate('prof dr tabrani');
+    addCandidate('prof tabrani');
+    addCandidate('rs dr tabrani');
+    addCandidate('rs tabrani rab');
+    addCandidate('tabrani rab');
+  }
+
+  if (fullNorm.includes('aulia')) {
+    addCandidate('aulia soebrantas');
+    addCandidate('rs aulia soebrantas');
+  }
+
+  if (fullNorm.includes('murni teguh eria')) {
+    addCandidate('rs murni teguh pekanbaru');
+    addCandidate('rs murni teguh');
+    addCandidate('murni teguh');
+    addCandidate('rs eria bunda');
+    addCandidate('eria bunda');
+    addCandidate('rs eria');
+  }
+
+  if (fullNorm.includes('bhayangkara')) {
+    addCandidate('rs bhayangkara pekanbaru');
+    addCandidate('bhayangkara pekanbaru');
+    addCandidate('rs bhayangkara polda');
+    addCandidate('bhayangkara polda');
+  }
+
+  return [...candidates].sort((a, b) => b.length - a.length);
+}
+
+/**
+ * Eliminasi kandidat RS yang hanya cocok karena kata kuncinya merupakan
+ * sub-frasa (prefix/substring berbatas kata) dari kata kunci RS lain yang lebih spesifik
+ * di dalam teks yang sama (contoh: "rs awal bros" ter-subsumsi oleh "rs awal bros panam").
+ * Kata kunci yang identik (kwA === kwB) TIDAK saling men-subsumsi agar tetap terdeteksi ambigu.
+ */
+function filterSubsumedHospitalMatches(entries) {
+  if (entries.length <= 1) return entries;
+  return entries.filter((entryA) => {
+    const isSubsumedByAnother = entries.some((entryB) => {
+      if (entryB.hospital.id === entryA.hospital.id) return false;
+      return entryA.matchedTerms.every((termA) =>
+        entryB.matchedTerms.some(
+          (termB) => termB !== termA && containsNormalizedTerm(termB, termA)
+        )
+      );
+    });
+    return !isSubsumedByAnother;
+  });
+}
+
 /**
  * Muat seluruh RS aktif dari DB, urutkan nama terpanjang ke terpendek
  * untuk menghindari substring match yang terlalu pendek.
@@ -173,39 +422,47 @@ async function loadGroupRoutingRules() {
 }
 
 /**
- * Cocokkan nama RS dari judul grup (canonical name, batas kata eksak).
- * Fallback terakhir; nol atau lebih dari satu hasil -> null.
+ * Cocokkan nama RS dari judul grup (canonical name maupun ekstraksi kata kunci/singkatan).
+ * Nol atau lebih dari satu hasil -> null.
  * @param {string} groupSubject  judul grup WhatsApp
  * @param {Array}  hospitals     hasil loadActiveHospitals()
  * @returns {object|null}  RS yang cocok (tepat satu), atau null
  */
 function detectHospitalFromGroup(groupSubject, hospitals) {
-  if (!groupSubject) return null;
+  if (!groupSubject || !Array.isArray(hospitals) || hospitals.length === 0) return null;
 
   const subjectNorm = normalizeSubjectTerm(groupSubject);
   if (!subjectNorm) return null;
 
-  const matches = hospitals.filter((h) => {
+  // 1. Cek kecocokan nama kanonis utuh terlebih dahulu.
+  const canonicalMatches = hospitals.filter((h) => {
     const nameNorm = normalizeSubjectTerm(h.nama_rs);
-    if (!nameNorm) return false;
-    // Exact substring; pastikan bukan bagian dari kata lain dengan batas spasi/awal/akhir
-    const regex = new RegExp(`(?:^|\\s)${nameNorm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\s|$)`, 'i');
-    return regex.test(subjectNorm);
+    return containsNormalizedTerm(subjectNorm, nameNorm);
   });
 
-  return matches.length === 1 ? matches[0] : null;
+  if (canonicalMatches.length === 1) return canonicalMatches[0];
+  if (canonicalMatches.length > 1) return null;
+
+  // 2. Ekstraksi kata kunci & nama singkat (tanpa "Pekanbaru", tanpa awalan/gelar, atau singkatan).
+  const keywordEntries = [];
+  for (const h of hospitals) {
+    const keywords = extractHospitalKeywords(h.nama_rs);
+    const matchedTerms = keywords.filter((kw) => containsNormalizedTerm(subjectNorm, kw));
+    if (matchedTerms.length > 0) {
+      keywordEntries.push({ hospital: h, matchedTerms });
+    }
+  }
+
+  const distinctEntries = filterSubsumedHospitalMatches(keywordEntries);
+  return distinctEntries.length === 1 ? distinctEntries[0].hospital : null;
 }
 
 /**
  * Resolver RS dari grup WhatsApp dengan urutan deterministik:
  *   1. Binding JID grup aktif yang persis (exact).
  *   2. Alias aktif unik (ter-normalisasi) cocok di judul grup.
- *   3. Fallback canonical group-name existing, hanya bila tepat satu.
- * Nol/ambigu -> null. Tidak pernah fuzzy/LIKE.
- *
- * Alias direpresentasikan sebagai kemunculan alias_normalized dengan batas kata
- * di judul grup ter-normalisasi. Group subject normal: alias `RS Prima` cocok
- * pada judul `JR - RS Prima`.
+ *   3. Fallback ekstraksi kata kunci & canonical group-name, hanya bila tepat satu.
+ * Nol/ambigu -> null.
  *
  * @param {string} groupSubject judul grup WhatsApp
  * @param {string} groupJid     JID grup (mis. 123456789@g.us); opsional
@@ -234,24 +491,27 @@ function resolveHospitalFromGroup(groupSubject, groupJid, hospitals, aliases = [
   if (groupSubject) {
     const subjectNorm = normalizeSubjectTerm(groupSubject);
     if (subjectNorm) {
-      const aliasMatches = aliases.filter((alias) => {
-        if (!alias.alias_normalized || alias.is_active === 0) return false;
-        if (!activeByHospital(alias.hospital_id)) return false;
+      const matchedByHospitalId = new Map();
+      for (const alias of aliases) {
+        if (!alias.alias_normalized || alias.is_active === 0) continue;
+        const hospital = activeByHospital(alias.hospital_id);
+        if (!hospital) continue;
         const aliasNorm = normalizeSubjectTerm(alias.alias_normalized);
-        if (!aliasNorm) return false;
-        const regex = new RegExp(
-          `(?:^|\\s)${aliasNorm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\s|$)`,
-          'i'
-        );
-        return regex.test(subjectNorm);
-      });
-      const uniqueHospitalIds = [...new Set(aliasMatches.map((m) => m.hospital_id))];
-      if (uniqueHospitalIds.length === 1) return activeByHospital(uniqueHospitalIds[0]);
-      if (uniqueHospitalIds.length > 1) return null; // ambigu, jangan pernah menebak
+        if (!aliasNorm) continue;
+        if (containsNormalizedTerm(subjectNorm, aliasNorm)) {
+          if (!matchedByHospitalId.has(hospital.id)) {
+            matchedByHospitalId.set(hospital.id, { hospital, matchedTerms: [] });
+          }
+          matchedByHospitalId.get(hospital.id).matchedTerms.push(aliasNorm);
+        }
+      }
+      const aliasEntries = filterSubsumedHospitalMatches([...matchedByHospitalId.values()]);
+      if (aliasEntries.length === 1) return aliasEntries[0].hospital;
+      if (aliasEntries.length > 1) return null; // ambigu, jangan pernah menebak
     }
   }
 
-  // 3. Fallback canonical group-name existing, hanya bila tepat satu.
+  // 3. Fallback canonical & keyword extraction, hanya bila tepat satu.
   return detectHospitalFromGroup(groupSubject, hospitals);
 }
 
@@ -301,12 +561,14 @@ async function handleMessage(sock, msg) {
 
   // ------------------------------------------------------------- resolve RS
   let resolvedHospital = null;
+  let loadedAliases = null;
 
-  // 1. Coba deteksi dari grup: binding JID aktif -> alias unik -> canonical.
+  // 1. Coba deteksi dari grup: binding JID aktif -> alias unik -> kata kunci / canonical.
   if (isGroup) {
     try {
       const meta = await sock.groupMetadata(jid);
       const { aliases, groupBindings } = await loadGroupRoutingRules();
+      loadedAliases = aliases;
       resolvedHospital = resolveHospitalFromGroup(
         meta.subject,
         jid,
@@ -322,13 +584,26 @@ async function handleMessage(sock, msg) {
   // 2. Baris RS: di pesan dipakai bila grup tidak memberi hasil,
   //    atau sebagai konfirmasi bila hasilnya sama.
   const namaFromMsg = parsed.data.rumah_sakit
-    ? parsed.data.rumah_sakit.trim().toLowerCase().replace(/\s+/g, ' ')
+    ? normalizeSubjectTerm(parsed.data.rumah_sakit)
     : null;
 
   if (namaFromMsg) {
-    const matchFromMsg = hospitals.find(
-      (h) => h.nama_rs.trim().toLowerCase().replace(/\s+/g, ' ') === namaFromMsg
+    let matchFromMsg = hospitals.find(
+      (h) => normalizeSubjectTerm(h.nama_rs) === namaFromMsg
     );
+
+    if (!matchFromMsg) {
+      if (!loadedAliases) {
+        loadedAliases = await loadActiveAliases();
+      }
+      matchFromMsg = resolveHospitalFromGroup(
+        parsed.data.rumah_sakit,
+        null,
+        hospitals,
+        loadedAliases,
+        []
+      );
+    }
 
     if (!matchFromMsg) {
       const namaRS = hospitals.map((h) => `• ${h.nama_rs}`).join('\n');
@@ -544,6 +819,7 @@ module.exports = {
   handleMessage,
   detectHospitalFromGroup,
   resolveHospitalFromGroup,
+  extractHospitalKeywords,
   normalizeSubjectTerm,
   loadActiveHospitals,
   loadActiveAliases,

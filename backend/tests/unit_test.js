@@ -657,6 +657,79 @@ function testResolveHospitalFromGroup() {
   console.log('PASS testResolveHospitalFromGroup');
 }
 
+function testDetectHospitalShortKeywordsWithoutPekanbaru() {
+  const activeHospitalsRiau = [
+    { id: 1, nama_rs: 'RS AWAL BROS - PEKANBARU' },
+    { id: 2, nama_rs: 'RS SYAFIRA - PEKANBARU' },
+    { id: 3, nama_rs: 'RS EKA HOSPITAL - PEKANBARU' },
+    { id: 4, nama_rs: 'RS AWAL BROS HANGTUAH' },
+    { id: 5, nama_rs: 'RS BHAYANGKARA POLDA - RIAU' },
+    { id: 6, nama_rs: 'RS PEKANBARU MEDICAL CENTRE' },
+    { id: 7, nama_rs: 'RS AWAL BROS AHMAD YANI PEKANBARU' },
+    { id: 8, nama_rs: 'RSUD ARIFIN ACHMAD - PEKANBARU' },
+    { id: 9, nama_rs: 'RS PROF. Dr. TABRANI - PEKANBARU' },
+    { id: 10, nama_rs: 'RS UMUM HERMINA PEKANBARU' },
+    { id: 11, nama_rs: 'RS AWAL BROS PANAM - PEKANBARU' },
+    { id: 12, nama_rs: 'RS AULIA HOSPITAL - PEKANBARU' },
+    { id: 13, nama_rs: 'RS MURNI TEGUH ERIA' },
+    { id: 14, nama_rs: 'RS Prima Pekanbaru' }
+  ];
+
+  const cases = [
+    ['Grup Laka RS Syafira', 2],
+    ['JR x Syafira', 2],
+    ['JR - RS Prima', 14],
+    ['Grup Laka Prima', 14],
+    ['JR - RS Eka Hospital', 3],
+    ['Grup Laka RS Eka', 3],
+    ['JR - Eka Hospital', 3],
+    ['JR - RS Awal Bros Sudirman', 1],
+    ['Grup Laka AB Sudirman', 1],
+    ['JR - Awal Bros Pekanbaru', 1],
+    ['JR - RS Awal Bros', 1],
+    ['JR - RS Awal Bros Panam', 11],
+    ['Grup Laka AB Panam', 11],
+    ['JR - Awal Bros Ahmad Yani', 7],
+    ['Grup Laka RS AB A. Yani', 7],
+    ['JR - Awal Bros Hangtuah', 4],
+    ['Grup Laka AB Hang Tuah', 4],
+    ['JR - RS Bhayangkara', 5],
+    ['Grup Laka Bhayangkara', 5],
+    ['JR - RS PMC', 6],
+    ['Grup Laka Pekanbaru Medical Center', 6],
+    ['JR - RSUD Arifin Achmad', 8],
+    ['Grup Laka RS Arifin Ahmad', 8],
+    ['JR - RS Tabrani', 9],
+    ['Grup Laka Prof Tabrani', 9],
+    ['JR - RS Hermina', 10],
+    ['Grup Laka RSU Hermina', 10],
+    ['JR - RS Aulia', 12],
+    ['Grup Laka Aulia Soebrantas', 12],
+    ['JR - RS Murni Teguh', 13],
+    ['Grup Laka RS Eria', 13]
+  ];
+
+  for (const [subject, expectedId] of cases) {
+    const matched = resolveHospitalFromGroup(subject, '999@g.us', activeHospitalsRiau, [], []);
+    assert.ok(matched, `Harus mendeteksi RS untuk judul grup: "${subject}"`);
+    assert.strictEqual(
+      matched.id,
+      expectedId,
+      `Judul grup "${subject}" seharusnya cocok ke ID ${expectedId}, tetapi dapat ID ${matched.id} (${matched.nama_rs})`
+    );
+  }
+
+  // Kata umum/lokasi saja tanpa nama RS tidak boleh mencocokkan RS mana pun
+  assert.strictEqual(resolveHospitalFromGroup('Grup Koordinasi Laka Pekanbaru Riau', '999@g.us', activeHospitalsRiau, [], []), null);
+  assert.strictEqual(resolveHospitalFromGroup('Grup Rumah Sakit Umum Daerah', '999@g.us', activeHospitalsRiau, [], []), null);
+
+  // Dua nama singkat RS berbeda dalam satu judul grup harus tetap ditolak (ambigu)
+  assert.strictEqual(resolveHospitalFromGroup('Grup Laka Syafira & Hermina', '999@g.us', activeHospitalsRiau, [], []), null);
+  assert.strictEqual(resolveHospitalFromGroup('Grup AB Sudirman & AB Panam', '999@g.us', activeHospitalsRiau, [], []), null);
+
+  console.log('PASS testDetectHospitalShortKeywordsWithoutPekanbaru');
+}
+
 
 async function testSentMessageRetryCache() {
   const sampleMsg = {
@@ -720,6 +793,7 @@ const tests = [
   testDetectHospitalFromGroup,
   testDetectHospitalLongestFirst,
   testResolveHospitalFromGroup,
+  testDetectHospitalShortKeywordsWithoutPekanbaru,
   testSentMessageRetryCache,
   testMapKeterjaminanFromJenisLaka
 ];
