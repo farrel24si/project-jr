@@ -20,6 +20,8 @@ export default function FormKunjunganModal({ isOpen, onClose, victim, onVisitSav
   const [formData, setFormData] = useState({
     waktuKunjungan: nowString(),
     kondisiKorban: victim?.kondisiTerakhir || 'Rawat Inap',
+    tanggalMeninggal: victim?.tanggalMeninggal || '',
+    jamMeninggal: victim?.jamMeninggal || '',
     cekKomunikasiKeluarga: true,
     cekEdukasiSantunan: true,
     cekArahanLp: true,
@@ -46,10 +48,6 @@ export default function FormKunjunganModal({ isOpen, onClose, victim, onVisitSav
     }
   }, [isOpen]);
 
-  if (!victim) return null;
-
-  const isFirstVisit = !victim.kunjunganPertama && (victim.riwayatAktivitas || []).filter((a) => a.statusKunjungan !== 'Menunggu').length === 0;
-
   const previousVisitDate = victim?.tanggalKunjunganTerakhir || 
                             victim?.waktuPemantauanTerakhir || 
                             victim?.kunjunganPertama?.tanggalKunjungan || 
@@ -58,6 +56,10 @@ export default function FormKunjunganModal({ isOpen, onClose, victim, onVisitSav
   const intervalCheck = useMemo(() => {
     return checkVisitInterval(previousVisitDate, formData.waktuKunjungan);
   }, [previousVisitDate, formData.waktuKunjungan]);
+
+  if (!victim) return null;
+
+  const isFirstVisit = !victim.kunjunganPertama && (victim.riwayatAktivitas || []).filter((a) => a.statusKunjungan !== 'Menunggu').length === 0;
 
   const handleChange = (e) => {
     const { name, value, type, checked } = e.target;
@@ -77,12 +79,32 @@ export default function FormKunjunganModal({ isOpen, onClose, victim, onVisitSav
       return;
     }
 
+    if (formData.kondisiKorban === 'Meninggal Dunia') {
+      if (!formData.tanggalMeninggal) {
+        setValidationError('Tanggal meninggal dunia wajib diisi.');
+        return;
+      }
+      if (!formData.jamMeninggal) {
+        setValidationError('Jam meninggal dunia wajib diisi.');
+        return;
+      }
+      const deathTime = new Date(`${formData.tanggalMeninggal}T${formData.jamMeninggal}`);
+      if (deathTime.getTime() > Date.now()) {
+        setValidationError('Tanggal dan jam meninggal dunia tidak boleh berada di masa depan.');
+        return;
+      }
+    }
+
     if (!formData.hasilKunjungan.trim()) {
       setValidationError('Catatan kondisi & hasil kunjungan wajib diisi.');
       return;
     }
 
-    if (!gpsData || !gpsData.latitude || !gpsData.longitude) {
+    const hasValidGps = gpsData &&
+      Number.isFinite(Number(gpsData.latitude ?? gpsData.lat_petugas)) &&
+      Number.isFinite(Number(gpsData.longitude ?? gpsData.lng_petugas));
+
+    if (!hasValidGps) {
       setValidationError('Harap mengunci lokasi koordinat GPS / maps rumah sakit terlebih dahulu.');
       return;
     }
@@ -101,6 +123,11 @@ export default function FormKunjunganModal({ isOpen, onClose, victim, onVisitSav
         waktuPencatatanSistem: new Date().toISOString(),
         petugasNama: currentUser?.profile?.nama || 'Petugas Jasa Raharja',
         kondisiKorban: formData.kondisiKorban,
+        tanggalMeninggal: formData.kondisiKorban === 'Meninggal Dunia' ? formData.tanggalMeninggal : null,
+        jamMeninggal: formData.kondisiKorban === 'Meninggal Dunia' ? formData.jamMeninggal : null,
+        waktuMeninggal: formData.kondisiKorban === 'Meninggal Dunia' ? new Date(`${formData.tanggalMeninggal}T${formData.jamMeninggal}`).toISOString() : null,
+        dicatatOleh: currentUser?.profile?.nama || 'Petugas Jasa Raharja',
+        waktuPencatatanMD: formData.kondisiKorban === 'Meninggal Dunia' ? new Date().toISOString() : null,
         cek_komunikasi_keluarga: formData.cekKomunikasiKeluarga,
         cek_edukasi_santunan: formData.cekEdukasiSantunan,
         cek_arahan_lp: formData.cekArahanLp,
@@ -112,9 +139,15 @@ export default function FormKunjunganModal({ isOpen, onClose, victim, onVisitSav
         catatan: formData.catatan,
         tindakLanjut: formData.tindakLanjut || `Kunjungan selesai: ${formData.kondisiKorban}`,
         fotoUrl: photoData,
-        latitude: gpsData.latitude,
-        longitude: gpsData.longitude,
-        akurasiLokasi: gpsData.akurasiLokasi,
+        latitude: Number(gpsData.latitude ?? gpsData.lat_petugas),
+        longitude: Number(gpsData.longitude ?? gpsData.lng_petugas),
+        lat_petugas: Number(gpsData.lat_petugas ?? gpsData.latitude),
+        lng_petugas: Number(gpsData.lng_petugas ?? gpsData.longitude),
+        akurasiLokasi: Number.isFinite(Number(gpsData.akurasiLokasi ?? gpsData.akurasi_lokasi_meter)) ? Number(gpsData.akurasiLokasi ?? gpsData.akurasi_lokasi_meter) : null,
+        akurasi_lokasi_meter: Number.isFinite(Number(gpsData.akurasi_lokasi_meter ?? gpsData.akurasiLokasi)) ? Number(gpsData.akurasi_lokasi_meter ?? gpsData.akurasiLokasi) : null,
+        sumberKoordinat: gpsData.sumberKoordinat ?? gpsData.sumber_koordinat ?? (gpsData.isSimulated ? 'Koordinat Rumah Sakit' : 'GPS Perangkat'),
+        sumber_koordinat: gpsData.sumberKoordinat ?? gpsData.sumber_koordinat ?? (gpsData.isSimulated ? 'Koordinat Rumah Sakit' : 'GPS Perangkat'),
+        isSimulated: Boolean(gpsData.isSimulated),
         waktuFoto: gpsData.waktu || new Date().toISOString()
       };
 
@@ -187,13 +220,13 @@ export default function FormKunjunganModal({ isOpen, onClose, victim, onVisitSav
                   <div className="p-2.5 bg-rose-50 border border-rose-300 rounded-lg flex items-start gap-2 text-rose-900">
                     <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5 animate-pulse" />
                     <span className="text-[11px] leading-relaxed">
-                      <strong>Peringatan: Kunjungan Melewati Batas 3 Hari!</strong> Berjarak {intervalCheck.durationText} dari kunjungan sebelumnya. Batas maksimal SLA interval adalah 72 jam.
+                      <strong>Peringatan: Kunjungan Melewati Batas Waktu 3 Hari!</strong> Berjarak {intervalCheck.durationText} dari kunjungan sebelumnya. Batas waktu maksimal adalah 72 jam (3 hari).
                     </span>
                   </div>
                 ) : (
                   <div className="p-2 bg-emerald-50 border border-emerald-200 rounded-lg flex items-center gap-2 text-emerald-800 text-[11px]">
                     <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                    <span>Interval kunjungan sesuai jadwal SLA ({intervalCheck.durationText}).</span>
+                    <span>Kunjungan tepat waktu ({intervalCheck.durationText} dari kunjungan sebelumnya).</span>
                   </div>
                 )}
               </div>
@@ -218,6 +251,47 @@ export default function FormKunjunganModal({ isOpen, onClose, victim, onVisitSav
                 <option value="Selesai">Selesai / Sembuh Pulang</option>
               </select>
             </div>
+
+            {/* Input Khusus jika Kondisi Meninggal Dunia (MD) */}
+            {formData.kondisiKorban === 'Meninggal Dunia' && (
+              <div className="col-span-1 sm:col-span-2 p-3.5 rounded-xl bg-red-50 border border-red-200 space-y-3">
+                <span className="font-bold text-red-950 text-xs block">
+                  Pencatatan Korban Meninggal Dunia (MD)
+                </span>
+                <p className="text-[11px] text-red-800 leading-relaxed">
+                  Wajib mengisi tanggal dan jam kematian korban sesuai fakta medis. Waktu pencatatan sistem akan dicatat terpisah.
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 bg-white rounded-lg border border-red-200">
+                  <div>
+                    <label className="block font-semibold text-slate-800 mb-1 text-xs">
+                      Tanggal Meninggal Dunia <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="date"
+                      required
+                      name="tanggalMeninggal"
+                      max={new Date().toISOString().split('T')[0]}
+                      value={formData.tanggalMeninggal}
+                      onChange={handleChange}
+                      className="w-full text-xs rounded-md border border-slate-300 px-3 py-2 text-slate-800"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-800 mb-1 text-xs">
+                      Jam Meninggal Dunia <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="time"
+                      required
+                      name="jamMeninggal"
+                      value={formData.jamMeninggal}
+                      onChange={handleChange}
+                      className="w-full text-xs rounded-md border border-slate-300 px-3 py-2 text-slate-800"
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
 
             <div>
               <label className="block font-semibold text-slate-700 mb-1">
@@ -345,7 +419,13 @@ export default function FormKunjunganModal({ isOpen, onClose, victim, onVisitSav
             <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
               <GpsCapture
                 onLocationCaptured={(loc) => setGpsData(loc)}
+                initialLocation={gpsData}
                 hospitalName={victim.rumahSakit}
+                hospitalCoords={
+                  victim?.hospital_lat != null && victim?.hospital_lng != null
+                    ? { lat: Number(victim.hospital_lat), lng: Number(victim.hospital_lng), radius_meter: Number(victim.hospital_radius || 200) }
+                    : null
+                }
               />
             </div>
           </div>
@@ -355,14 +435,14 @@ export default function FormKunjunganModal({ isOpen, onClose, victim, onVisitSav
               type="button"
               onClick={onClose}
               disabled={isSubmitting}
-              className="px-4 py-2 rounded-md font-medium text-slate-700 bg-slate-100 hover:bg-slate-200"
+              className="px-4 py-2 rounded-md font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 cursor-pointer"
             >
               Batal
             </button>
             <button
               type="submit"
               disabled={isSubmitting}
-              className="inline-flex items-center gap-1.5 px-5 py-2 rounded-md font-bold bg-[#0A3981] hover:bg-blue-900 text-white shadow-xs"
+              className="inline-flex items-center gap-1.5 px-5 py-2 rounded-md font-bold bg-[#0A3981] hover:bg-blue-900 text-white shadow-xs cursor-pointer"
             >
               <Save className="w-3.5 h-3.5" />
               <span>{isSubmitting ? 'Menyimpan...' : 'Simpan Kunjungan'}</span>
@@ -371,12 +451,23 @@ export default function FormKunjunganModal({ isOpen, onClose, victim, onVisitSav
         </form>
       </Modal>
 
-      {/* Dedicated Camera Popup Modal */}
+      {/* Dedicated Camera Popup Modal with GPS Watermark */}
       <CameraModal
         isOpen={isCameraModalOpen}
         onClose={() => setIsCameraModalOpen(false)}
         currentPhoto={photoData}
         onPhotoConfirmed={(dataUrl) => setPhotoData(dataUrl)}
+        metadata={{
+          petugasNama: currentUser?.profile?.nama || 'Petugas Jasa Raharja',
+          rumahSakit: victim.rumahSakit,
+          korbanNama: victim.nama,
+          latitude: gpsData?.latitude ?? gpsData?.lat_petugas,
+          longitude: gpsData?.longitude ?? gpsData?.lng_petugas,
+          akurasiLokasi: gpsData?.akurasiLokasi ?? gpsData?.akurasi_lokasi_meter,
+          sumberKoordinat: gpsData?.sumberKoordinat ?? gpsData?.sumber_koordinat,
+          isSimulated: gpsData?.isSimulated,
+          waktu: formData.waktuKunjungan
+        }}
       />
     </>
   );

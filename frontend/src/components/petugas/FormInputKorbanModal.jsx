@@ -92,6 +92,40 @@ export default function FormInputKorbanModal({ isOpen, onClose, onVictimCreated 
     );
   }, [formData.rumahSakit]);
 
+  // Reset formulir & foto setiap kali modal dibuka baru
+  useEffect(() => {
+    if (isOpen) {
+      setFormData({
+        nama: '',
+        nik: '',
+        usia: '30',
+        jenisKelamin: 'Laki-laki',
+        telepon: '',
+        alamat: '',
+        rumahSakit: 'RS Syafira',
+        lokasiKejadian: '',
+        tanggalKecelakaan: nowString,
+        tanggalMasukRs: nowString,
+        sumberInformasi: 'IRSMS Korlantas Polri',
+        keteranganTambahan: '',
+        catatKunjunganSekaligus: true,
+        kondisiAwal: 'Rawat Inap',
+        hasilKunjunganAwal: '',
+        komunikasiKeluarga: '',
+        cekKomunikasiKeluarga: true,
+        cekEdukasiSantunan: true,
+        cekArahanLp: true,
+        penyampaianHak: 'Hak santunan biaya perawatan RS maksimal Rp20.000.000,- telah dijelaskan.',
+        tindakLanjutAwal: 'Pemantauan perkembangan medis dan konfirmasi surat jaminan RS'
+      });
+      setPhotoData(null);
+      setGpsData(null);
+      setDuplicateMatches([]);
+      setIgnoredDuplicateId(null);
+      setValidationError('');
+    }
+  }, [isOpen, nowString]);
+
   // Check duplicates in real-time
   useEffect(() => {
     if (!isOpen) {
@@ -168,7 +202,11 @@ export default function FormInputKorbanModal({ isOpen, onClose, onVictimCreated 
         setValidationError('Catatan hasil kunjungan pertama wajib diisi jika memilih catat kunjungan.');
         return;
       }
-      if (!gpsData || !gpsData.latitude || !gpsData.longitude) {
+      const hasValidGps = gpsData &&
+        Number.isFinite(Number(gpsData.latitude ?? gpsData.lat_petugas)) &&
+        Number.isFinite(Number(gpsData.longitude ?? gpsData.lng_petugas));
+
+      if (!hasValidGps) {
         setValidationError('Harap mengunci lokasi koordinat GPS / maps rumah sakit terlebih dahulu.');
         return;
       }
@@ -221,9 +259,15 @@ export default function FormInputKorbanModal({ isOpen, onClose, onVictimCreated 
           penyampaianHak: formData.penyampaianHak,
           tindakLanjut: formData.tindakLanjutAwal || 'Pemantauan perkembangan korban',
           fotoUrl: photoData,
-          latitude: gpsData?.latitude || null,
-          longitude: gpsData?.longitude || null,
-          akurasiLokasi: gpsData?.akurasiLokasi || null,
+          latitude: Number(gpsData.latitude ?? gpsData.lat_petugas),
+          longitude: Number(gpsData.longitude ?? gpsData.lng_petugas),
+          lat_petugas: Number(gpsData.lat_petugas ?? gpsData.latitude),
+          lng_petugas: Number(gpsData.lng_petugas ?? gpsData.longitude),
+          akurasiLokasi: Number.isFinite(Number(gpsData.akurasiLokasi ?? gpsData.akurasi_lokasi_meter)) ? Number(gpsData.akurasiLokasi ?? gpsData.akurasi_lokasi_meter) : null,
+          akurasi_lokasi_meter: Number.isFinite(Number(gpsData.akurasi_lokasi_meter ?? gpsData.akurasiLokasi)) ? Number(gpsData.akurasi_lokasi_meter ?? gpsData.akurasiLokasi) : null,
+          sumberKoordinat: gpsData.sumberKoordinat ?? gpsData.sumber_koordinat ?? (gpsData.isSimulated ? 'Koordinat Rumah Sakit' : 'GPS Perangkat'),
+          sumber_koordinat: gpsData.sumberKoordinat ?? gpsData.sumber_koordinat ?? (gpsData.isSimulated ? 'Koordinat Rumah Sakit' : 'GPS Perangkat'),
+          isSimulated: Boolean(gpsData.isSimulated),
           waktuFoto: gpsData?.waktu || new Date().toISOString(),
           petugasId: officerProfile.id,
           petugasNama: officerProfile.nama
@@ -233,6 +277,8 @@ export default function FormInputKorbanModal({ isOpen, onClose, onVictimCreated 
       const createdVictim = await storageService.addVictim(victimPayload, initialVisitPayload);
 
       setIsSubmitting(false);
+      setPhotoData(null);
+      setGpsData(null);
       if (onVictimCreated) {
         onVictimCreated(createdVictim);
       }
@@ -770,9 +816,11 @@ export default function FormInputKorbanModal({ isOpen, onClose, onVictimCreated 
                     petugasNama: currentUser?.profile?.nama || 'Petugas Jasa Raharja',
                     rumahSakit: formData.rumahSakit,
                     korbanNama: formData.nama,
-                    latitude: gpsData?.latitude,
-                    longitude: gpsData?.longitude,
-                    akurasiLokasi: gpsData?.akurasiLokasi,
+                    latitude: gpsData?.latitude ?? gpsData?.lat_petugas,
+                    longitude: gpsData?.longitude ?? gpsData?.lng_petugas,
+                    akurasiLokasi: gpsData?.akurasiLokasi ?? gpsData?.akurasi_lokasi_meter,
+                    sumberKoordinat: gpsData?.sumberKoordinat ?? gpsData?.sumber_koordinat,
+                    isSimulated: gpsData?.isSimulated,
                     waktu: formData.tanggalMasukRs || new Date().toISOString()
                   }}
                 />

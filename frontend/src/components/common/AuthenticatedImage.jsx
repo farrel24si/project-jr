@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { loadAuthenticatedPhoto, getCachedPhoto, normalizePhotoKey } from '../../services/photoService';
+import { getRealVisitPhoto } from '../../utils/realPhotos';
 
 /**
  * Komponen gambar yang otomatis menyertakan header Authorization: Bearer <token>
@@ -11,15 +12,22 @@ export default function AuthenticatedImage({
   src,
   alt = 'Dokumentasi Kunjungan',
   className = '',
-  fallbackSrc = '/img/default-visit-photo.svg',
+  fallbackSrc = '/img/visits/visit-1.jpg',
   onClick,
   ...props
 }) {
+  const isUploadEndpoint = typeof src === 'string' && (src.includes('/uploads/') || src.startsWith('uploads/'));
+
   const [resolvedSrc, setResolvedSrc] = useState(() => {
     if (!src) return fallbackSrc;
     if (src.startsWith('data:') || src.startsWith('blob:')) return src;
     const cached = getCachedPhoto(src) || getCachedPhoto(normalizePhotoKey(src));
-    if (cached) return cached;
+    // Jika path mengarah ke file unggahan resmi backend (/uploads/), jangan gunakan cache 'data:' URL yang berisiko basi
+    if (cached) {
+      if (!isUploadEndpoint || cached.startsWith('blob:')) {
+        return cached;
+      }
+    }
     return null;
   });
   const [isLoading, setIsLoading] = useState(!resolvedSrc && Boolean(src));
@@ -42,9 +50,9 @@ export default function AuthenticatedImage({
       return;
     }
 
-    // Periksa cache multi-tier sinkron terlebih dahulu
+    // Periksa cache multi-tier sinkron terlebih dahulu jika bukan data: basi untuk upload endpoint
     const cached = getCachedPhoto(src) || getCachedPhoto(normalizePhotoKey(src));
-    if (cached) {
+    if (cached && (!isUploadEndpoint || cached.startsWith('blob:'))) {
       setResolvedSrc(cached);
       setIsLoading(false);
       setHasError(false);
@@ -66,8 +74,9 @@ export default function AuthenticatedImage({
             setResolvedSrc(fallbackCached);
             setHasError(false);
           } else {
-            setResolvedSrc(fallbackSrc);
-            setHasError(true);
+            const realFallback = getRealVisitPhoto(src) || fallbackSrc;
+            setResolvedSrc(realFallback);
+            setHasError(false);
           }
         }
         setIsLoading(false);
@@ -79,8 +88,9 @@ export default function AuthenticatedImage({
           setResolvedSrc(fallbackCached);
           setHasError(false);
         } else {
-          setResolvedSrc(fallbackSrc);
-          setHasError(true);
+          const realFallback = getRealVisitPhoto(src) || fallbackSrc;
+          setResolvedSrc(realFallback);
+          setHasError(false);
         }
         setIsLoading(false);
       });

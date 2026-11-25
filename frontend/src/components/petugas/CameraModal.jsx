@@ -1,9 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
 import Modal from '../common/Modal';
 import { Camera, RefreshCw, Check, X, AlertCircle, Upload } from 'lucide-react';
-import { compressImage } from '../../services/photoUtils';
+import { compressImage, fileToSafeDataUrl, stampPhotoWatermark } from '../../services/photoUtils';
 
-export default function CameraModal({ isOpen, onClose, onPhotoConfirmed, currentPhoto = null }) {
+export default function CameraModal({ isOpen, onClose, onPhotoConfirmed, currentPhoto = null, metadata = {} }) {
   const [photoPreview, setPhotoPreview] = useState(currentPhoto);
   const [isStreaming, setIsStreaming] = useState(false);
   const [errorMsg, setErrorMsg] = useState(null);
@@ -17,6 +17,14 @@ export default function CameraModal({ isOpen, onClose, onPhotoConfirmed, current
     setIsLoadingCamera(true);
     setErrorMsg(null);
     try {
+      const isSecure = typeof window !== 'undefined'
+        ? (window.isSecureContext ?? (window.location.protocol === 'https:' || window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'))
+        : true;
+
+      if (!isSecure) {
+        throw new Error('NON_SECURE_CONTEXT');
+      }
+
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error('Kamera tidak didukung oleh browser ini.');
       }
@@ -40,7 +48,11 @@ export default function CameraModal({ isOpen, onClose, onPhotoConfirmed, current
       setIsStreaming(true);
     } catch (err) {
       console.warn('Camera error:', err);
-      setErrorMsg('Kamera tidak dapat diakses atau izin ditolak.');
+      if (err.message === 'NON_SECURE_CONTEXT') {
+        setErrorMsg('Kamera langsung diblokir di browser HP karena koneksi bukan HTTPS. Gunakan tombol "Pilih dari Galeri/File" (bisa buka kamera HP langsung) atau akses melalui koneksi HTTPS / Cloudflare Tunnel.');
+      } else {
+        setErrorMsg('Kamera tidak dapat diakses atau izin ditolak.');
+      }
       setIsStreaming(false);
     } finally {
       setIsLoadingCamera(false);
@@ -55,6 +67,43 @@ export default function CameraModal({ isOpen, onClose, onPhotoConfirmed, current
     setIsStreaming(false);
   };
 
+  const applyWatermarkOrCompress = async (rawUrl) => {
+    if (metadata && (metadata.rumahSakit || metadata.petugasNama || metadata.latitude != null)) {
+      try {
+        const latVal = metadata.latitude !== undefined && metadata.latitude !== null
+          ? Number(metadata.latitude)
+          : (metadata.lat_petugas !== undefined && metadata.lat_petugas !== null ? Number(metadata.lat_petugas) : null);
+        const lngVal = metadata.longitude !== undefined && metadata.longitude !== null
+          ? Number(metadata.longitude)
+          : (metadata.lng_petugas !== undefined && metadata.lng_petugas !== null ? Number(metadata.lng_petugas) : null);
+        const accVal = metadata.akurasiLokasi !== undefined && metadata.akurasiLokasi !== null
+          ? Number(metadata.akurasiLokasi)
+          : (metadata.akurasi_lokasi_meter !== undefined && metadata.akurasi_lokasi_meter !== null ? Number(metadata.akurasi_lokasi_meter) : null);
+
+        return await stampPhotoWatermark(
+          rawUrl,
+          {
+            petugasNama: metadata.petugasNama || 'Petugas Jasa Raharja',
+            waktu: metadata.waktu || new Date().toISOString(),
+            lokasi: metadata.rumahSakit || 'Rumah Sakit',
+            latitude: Number.isFinite(latVal) ? latVal : null,
+            longitude: Number.isFinite(lngVal) ? lngVal : null,
+            akurasiLokasi: Number.isFinite(accVal) ? accVal : null,
+            sumberKoordinat: metadata.sumberKoordinat || (metadata.isSimulated ? 'Koordinat Rumah Sakit' : (Number.isFinite(latVal) ? 'GPS Perangkat' : null)),
+            isSimulated: Boolean(metadata.isSimulated),
+            korbanNama: metadata.korbanNama || null
+          },
+          720,
+          540,
+          0.75
+        );
+      } catch (err) {
+        console.warn('Watermark failed, fallback to compressImage:', err);
+      }
+    }
+    return await compressImage(rawUrl, 640, 480, 0.7);
+  };
+
   const captureFrame = async () => {
     if (!videoRef.current) return;
     try {
@@ -66,9 +115,9 @@ export default function CameraModal({ isOpen, onClose, onPhotoConfirmed, current
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
       const rawUrl = canvas.toDataURL('image/jpeg', 0.85);
-      const compressed = await compressImage(rawUrl, 640, 480, 0.7);
+      const processed = await applyWatermarkOrCompress(rawUrl);
 
-      setPhotoPreview(compressed);
+      setPhotoPreview(processed);
       stopCamera();
     } catch (err) {
       console.error(err);
@@ -92,14 +141,17 @@ export default function CameraModal({ isOpen, onClose, onPhotoConfirmed, current
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = async (event) => {
-      const rawUrl = event.target.result;
-      const compressed = await compressImage(rawUrl, 640, 480, 0.7);
-      setPhotoPreview(compressed);
+    try {
+      const safeUrl = await fileToSafeDataUrl(file, 1024, 768, 0.8);
+      const processed = await applyWatermarkOrCompress(safeUrl);
+      setPhotoPreview(processed);
       stopCamera();
-    };
-    reader.readAsDataURL(file);
+    } catch (err) {
+      console.error(err);
+      setErrorMsg('Gagal memproses file foto.');
+    } finally {
+      if (e.target) e.target.value = '';
+    }
   };
 
   useEffect(() => {

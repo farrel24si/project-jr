@@ -18,12 +18,14 @@ import PetugasProfilePage from './pages/petugas/PetugasProfilePage';
 
 // Kabag Pages
 import KabagDashboard from './pages/kabag/KabagDashboard';
+import KabagVictimList from './pages/kabag/KabagVictimList';
 import KabagMonitoringList from './pages/kabag/KabagMonitoringList';
 import KabagOfficerPerformance from './pages/kabag/KabagOfficerPerformance';
 import KabagOfficerDetail from './pages/kabag/KabagOfficerDetail';
 import KabagOfficerDirectory from './pages/kabag/KabagOfficerDirectory';
 import KabagReportPage from './pages/kabag/KabagReportPage';
 import KabagProfilePage from './pages/kabag/KabagProfilePage';
+
 
 function ProtectedRoute({ children, requiredRole }) {
   const { isAuthenticated, currentUser } = useAuth();
@@ -156,6 +158,14 @@ export default function App() {
                 }
               />
               <Route
+                path="/kabag/korban"
+                element={
+                  <ProtectedRoute requiredRole="kabag">
+                    <KabagVictimList />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
                 path="/kabag/monitoring"
                 element={
                   <ProtectedRoute requiredRole="kabag">
@@ -189,11 +199,7 @@ export default function App() {
               />
               <Route
                 path="/kabag/laporan"
-                element={
-                  <ProtectedRoute requiredRole="kabag">
-                    <KabagReportPage />
-                  </ProtectedRoute>
-                }
+                element={<Navigate to="/kabag/kinerja?tab=laporan" replace />}
               />
               <Route
                 path="/kabag/profil"
@@ -213,3 +219,5 @@ export default function App() {
     </ErrorBoundary>
   );
 }
+
+

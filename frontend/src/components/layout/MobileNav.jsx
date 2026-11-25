@@ -1,7 +1,7 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
-import { LayoutDashboard, Users, CalendarCheck, History, FileText, BarChart3, User } from 'lucide-react';
+import { LayoutDashboard, Users, CalendarCheck, History, BarChart3, UserCheck, User } from 'lucide-react';
 
 export default function MobileNav() {
   const { isPetugas, isKabag } = useAuth();
@@ -18,7 +18,7 @@ export default function MobileNav() {
     { to: '/kabag', label: 'Dashboard', icon: LayoutDashboard, end: true },
     { to: '/kabag/monitoring', label: 'Korban', icon: Users },
     { to: '/kabag/kinerja', label: 'Kinerja', icon: BarChart3 },
-    { to: '/kabag/laporan', label: 'Laporan', icon: FileText },
+    { to: '/kabag/petugas', label: 'Petugas', icon: UserCheck },
     { to: '/kabag/profil', label: 'Profil', icon: User }
   ];
 

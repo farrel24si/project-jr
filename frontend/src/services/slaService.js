@@ -11,6 +11,8 @@
  *    - TEPAT_WAKTU: Masih memiliki sisa waktu > 24 jam.
  */
 
+import { isVictimFinished } from '../utils/monitoringStatus';
+
 export const SLA_FIRST_VISIT_HOURS = 72; // 3 hari
 export const SLA_MONITORING_INTERVAL_HOURS = 72; // 3 hari
 export const SLA_DEADLINE_WARNING_HOURS = 24; // 24 jam sisa waktu untuk warning
@@ -21,13 +23,13 @@ export const SLA_DEADLINE_WARNING_HOURS = 24; // 24 jam sisa waktu untuk warning
 export function formatDuration(diffMs) {
   const isNegative = diffMs < 0;
   const absMs = Math.abs(diffMs);
-  
+
   const totalHours = Math.floor(absMs / (1000 * 60 * 60));
   const days = Math.floor(totalHours / 24);
   const hours = totalHours % 24;
   const minutes = Math.floor((absMs % (1000 * 60 * 60)) / (1000 * 60));
 
-  let text = '';
+  let text;
   if (days > 0) {
     text = `${days} hari ${hours > 0 ? `${hours} jam` : ''}`.trim();
   } else if (totalHours > 0) {
@@ -69,9 +71,16 @@ export function calculateFirstVisitSla(tanggalInformasiDiterima, kunjunganPertam
   const deadlineTime = receivedTime + SLA_FIRST_VISIT_HOURS * 60 * 60 * 1000;
   const deadlineDate = new Date(deadlineTime);
 
+  const visitDateStr = kunjunganPertama && (
+    kunjunganPertama.tanggalKunjungan ||
+    kunjunganPertama.waktuAktualKunjungan ||
+    kunjunganPertama.tanggal ||
+    kunjunganPertama.waktuFoto
+  );
+
   // Jika sudah dikunjungi
-  if (kunjunganPertama && kunjunganPertama.tanggalKunjungan) {
-    const visitTime = new Date(kunjunganPertama.tanggalKunjungan).getTime();
+  if (kunjunganPertama && visitDateStr) {
+    const visitTime = new Date(visitDateStr).getTime();
     const wasOverdue = visitTime > deadlineTime;
     const diff = visitTime - deadlineTime;
     const duration = formatDuration(diff);
@@ -180,8 +189,8 @@ export function checkVisitInterval(previousDate, currentDate = new Date()) {
     diffDays: Math.floor(diffHours / 24),
     durationText: duration.text,
     warningMessage: isOverdue
-      ? `Peringatan: Jarak waktu kunjungan ini (${duration.text}) melewati batas maksimal SLA 3 hari (72 jam) dari kunjungan sebelumnya.`
-      : `Sesuai SLA: Kunjungan dilakukan dalam batas waktu 3 hari (${duration.text} sejak kunjungan sebelumnya).`
+      ? `Peringatan: Jarak waktu kunjungan ini (${duration.text}) melewati batas waktu maksimal 3 hari (72 jam) dari kunjungan sebelumnya.`
+      : `Tepat Waktu: Kunjungan dilakukan dalam batas waktu 3 hari (${duration.text} sejak kunjungan sebelumnya).`
   };
 }
 
@@ -206,9 +215,9 @@ export function calculateMonitoringSla(victim, referenceDate = new Date()) {
 
   // Jika korban sudah meninggal dunia atau pulang dan tidak perlu pantau
   if (
-    victim.kondisiTerakhir === 'Meninggal Dunia' || 
-    victim.kondisiTerakhir === 'Pulang' || 
-    victim.kondisiTerakhir === 'Sudah Pulang' || 
+    victim.kondisiTerakhir === 'Meninggal Dunia' ||
+    victim.kondisiTerakhir === 'Pulang' ||
+    victim.kondisiTerakhir === 'Sudah Pulang' ||
     victim.kondisiTerakhir === 'Selesai'
   ) {
     return {
@@ -242,7 +251,7 @@ export function calculateMonitoringSla(victim, referenceDate = new Date()) {
 
   const allPossibleDates = [...completedActivityDates, ...directDates];
 
-  let latestActivityDate = null;
+  let latestActivityDate;
   if (allPossibleDates.length > 0) {
     // Ambil tanggal dengan timestamp paling baru / mutakhir
     allPossibleDates.sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
@@ -398,8 +407,8 @@ export function getVictimOverallSla(victim, referenceDate = new Date()) {
     badgeColor: 'emerald',
     firstVisitSla,
     monitoringSla,
-    actionNeeded: victim.kondisiTerakhir === 'Meninggal Dunia' && !victim.santunanSelesai 
-      ? 'Tindak lanjut berkas santunan' 
+    actionNeeded: victim.kondisiTerakhir === 'Meninggal Dunia' && !victim.santunanSelesai
+      ? 'Tindak lanjut berkas santunan'
       : 'Monitoring rutin'
   };
 }
@@ -443,11 +452,10 @@ export function getVictimDeadline(victim, referenceDate = new Date()) {
 }
 
 /**
- * Tentukan prioritas pengurutan berdasarkan tenggat waktu sesuai ketentuan:
- * 1. Prioritas 1: Tanggal tenggat waktu sudah terlewati.
- * 2. Prioritas 2: Tanggal tenggat waktu jatuh pada hari ini.
- * 3. Prioritas 3: Tanggal tenggat waktu paling dekat dengan hari ini (tanggal berikutnya/besok).
- * 4. Prioritas 4: Tanggal tenggat waktu yang masih lebih jauh (diurutkan dari terdekat ke terjauh).
+ * Tentukan prioritas pengurutan berdasarkan tenggat waktu:
+ * 1. Prioritas 1: Tanggal tenggat waktu sudah terlewati (Lewat / Terlambat) -> Paling atas!
+ * 2. Prioritas 2: Tanggal tenggat waktu mendekati (sisa waktu <= 24 jam) -> Paling atas kedua!
+ * 3. Prioritas 3: Tanggal tenggat waktu masih normal (> 24 jam, diurutkan dari terdekat ke terjauh).
  * 5. Prioritas 5: Data tanpa tenggat waktu aktif (selesai/ditutup).
  */
 export function getDeadlinePriorityScore(deadline, referenceDate = new Date()) {
@@ -456,30 +464,24 @@ export function getDeadlinePriorityScore(deadline, referenceDate = new Date()) {
   if (isNaN(d.getTime())) return { tier: 5, time: Infinity };
 
   const ref = new Date(referenceDate);
-  const todayStart = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate(), 0, 0, 0, 0).getTime();
-  const todayEnd = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate(), 23, 59, 59, 999).getTime();
-  const tomorrowEnd = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate() + 1, 23, 59, 59, 999).getTime();
-
+  const nowMs = ref.getTime();
   const t = d.getTime();
 
-  if (t < todayStart) {
-    // 1. Tanggal tenggat waktu sudah terlewati
+  if (t < nowMs) {
+    // 1. Tanggal tenggat waktu sudah terlewati (Terlambat/Lewat) -> Paling atas
     return { tier: 1, time: t };
-  } else if (t <= todayEnd) {
-    // 2. Tanggal tenggat waktu jatuh pada hari ini
+  } else if (t <= nowMs + SLA_DEADLINE_WARNING_HOURS * 60 * 60 * 1000) {
+    // 2. Tanggal tenggat waktu mendekati tenggat (sisa <= 24 jam) -> Paling atas kedua
     return { tier: 2, time: t };
-  } else if (t <= tomorrowEnd) {
-    // 3. Tanggal tenggat waktu paling dekat dengan hari ini (tanggal berikutnya)
-    return { tier: 3, time: t };
   } else {
-    // 4. Tanggal tenggat waktu masih lebih jauh (diurutkan dari terdekat hingga terjauh)
-    return { tier: 4, time: t };
+    // 3. Tanggal tenggat waktu masih lebih jauh (diurutkan dari terdekat hingga terjauh)
+    return { tier: 3, time: t };
   }
 }
 
 /**
  * Comparator function untuk mengurutkan dua deadline berdasarkan prioritas:
- * - Tier 1 s/d Tier 4 berurutan.
+ * - Tier 1 (Terlambat) s/d Tier 3 (Tepat Waktu) berurutan.
  * - Korban dengan tenggat paling lama terlewati berada paling atas (timestamp terkecil).
  * - Jika tanggal sama, urutkan berdasarkan waktu paling awal (timestamp terkecil).
  */
@@ -491,4 +493,361 @@ export function compareByDeadlinePriority(aDeadline, bDeadline, referenceDate = 
     return pA.tier - pB.tier;
   }
   return pA.time - pB.time;
+}
+
+/**
+ * Evaluasi tingkat urgensi SLA korban:
+ * Tier 1: TERLAMBAT (Lewat tenggat waktu) -> PALING ATAS MUTLAK!
+ * Tier 2: MENDEKATI_TENGGAT (Sisa waktu <= 24 jam) -> Paling atas kedua!
+ * Tier 3: TEPAT_WAKTU / AKTIF (Masih memiliki waktu > 24 jam)
+ * Tier 5: SELESAI / PULANG / MENINGGAL (Kasus sudah ditutup)
+ */
+export function getVictimSlaUrgencyTier(victim, referenceDate = new Date()) {
+  if (!victim) return { tier: 5, remainingHours: Infinity, status: 'N/A', deadline: null, time: Infinity };
+
+  const isDone =
+    isVictimFinished(victim) ||
+    victim.kondisiTerakhir === 'Sudah Pulang' ||
+    victim.kondisiTerakhir === 'Pulang' ||
+    victim.kondisiTerakhir === 'Selesai' ||
+    victim.kondisiTerakhir === 'Meninggal Dunia' ||
+    victim.statusPemantauan === 'Selesai Dipantau' ||
+    victim.statusTindakLanjut === 'Sudah Selesai';
+
+  if (isDone) {
+    const closedTime = new Date(
+      victim.tanggalKeluarRs ||
+      victim.tanggalMeninggal ||
+      victim.tanggalKunjunganTerakhir ||
+      victim.tanggalInformasiDiterima ||
+      0
+    ).getTime();
+    return { tier: 5, remainingHours: Infinity, status: 'SELESAI', deadline: null, time: closedTime };
+  }
+
+  const hasFirstVisit = Boolean(
+    victim.kunjunganPertama ||
+    (Array.isArray(victim.riwayatKunjungan) && victim.riwayatKunjungan.length > 0) ||
+    (Array.isArray(victim.riwayatAktivitas) && victim.riwayatAktivitas.some((a) => a.kunjunganKe === 1 || (a.statusKunjungan && a.statusKunjungan !== 'Menunggu')))
+  );
+
+  const fSla = calculateFirstVisitSla(victim.tanggalInformasiDiterima, victim.kunjunganPertama, referenceDate);
+  const mSla = calculateMonitoringSla(victim, referenceDate);
+
+  // ── PRIORITAS 1: TERLAMBAT (LEWAT TENGGAT WAKTU) -> PALING ATAS ──
+  const isFirstVisitLate = !hasFirstVisit && (fSla.isOverdue || fSla.status === 'TERLAMBAT' || (fSla.diffHours != null && fSla.diffHours < 0));
+  const isMonitoringLate = hasFirstVisit && (mSla.isOverdue || mSla.status === 'TERLAMBAT');
+  const isFlaggedLate = Boolean(victim.isOverdue || victim.is_overdue || victim.statusSla === 'TERLAMBAT' || victim.slaStatus === 'TERLAMBAT');
+
+  if (isFirstVisitLate || isMonitoringLate || isFlaggedLate) {
+    const deadline = (!hasFirstVisit && fSla.deadline) || mSla.deadline || mSla.dueDate || (victim.batasWaktu ? new Date(victim.batasWaktu) : null);
+    const deadlineTime = deadline ? new Date(deadline).getTime() : 0;
+    const elapsed = Math.abs(
+      isFirstVisitLate
+        ? (fSla.diffHours || 1)
+        : (mSla.elapsedHours || 1)
+    );
+
+    return {
+      tier: 1, // TERLAMBAT = TIER 1 (PALING ATAS)
+      remainingHours: -elapsed,
+      status: 'TERLAMBAT',
+      deadline,
+      time: deadlineTime
+    };
+  }
+
+  // ── PRIORITAS 2: MENDEKATI TENGGAT (SISA WAKTU <= 24 JAM) ──
+  const isFirstVisitWarning = !hasFirstVisit && (fSla.isWarning || fSla.status === 'MENDEKATI_TENGGAT');
+  const isMonitoringWarning = hasFirstVisit && (mSla.isWarning || mSla.status === 'MENDEKATI_TENGGAT');
+  const isFlaggedWarning = victim.statusSla === 'MENDEKATI_TENGGAT' || victim.slaStatus === 'MENDEKATI_TENGGAT';
+
+  if (isFirstVisitWarning || isMonitoringWarning || isFlaggedWarning) {
+    const deadline = (!hasFirstVisit && fSla.deadline) || mSla.deadline || mSla.dueDate || (victim.batasWaktu ? new Date(victim.batasWaktu) : null);
+    const deadlineTime = deadline ? new Date(deadline).getTime() : Infinity;
+    const remaining = isFirstVisitWarning ? (fSla.diffHours || 1) : (mSla.hoursRemaining || 1);
+
+    return {
+      tier: 2, // MENDEKATI TENGGAT = TIER 2
+      remainingHours: remaining,
+      status: 'MENDEKATI_TENGGAT',
+      deadline,
+      time: deadlineTime
+    };
+  }
+
+  // ── PRIORITAS 3: TEPAT WAKTU (MASIH AMAN > 24 JAM) ──
+  const deadline = (!hasFirstVisit && fSla.deadline) || mSla.deadline || mSla.dueDate || (victim.batasWaktu ? new Date(victim.batasWaktu) : null);
+  const deadlineTime = deadline ? new Date(deadline).getTime() : Infinity;
+  const remaining = !hasFirstVisit ? (fSla.diffHours || 72) : (mSla.hoursRemaining || 72);
+
+  return {
+    tier: 3, // TEPAT WAKTU = TIER 3
+    remainingHours: remaining,
+    status: 'TEPAT_WAKTU',
+    deadline,
+    time: deadlineTime
+  };
+}
+
+/**
+ * Comparator pengurutan korban berdasarkan urgensi tenggat waktu:
+ * 1. Korban Terlambat (Lewat tenggat) -> PALING ATAS
+ * 2. Korban Mendekati Tenggat (Sisa <= 24 jam) -> LANGSUNG DI BAWAHNYA (PALING ATAS KEDUA)
+ * 3. Korban Aktif Tepat Waktu -> Diurutkan dari tenggat terdekat ke terjauh
+ * 4. Korban Selesai / Pulang -> Paling bawah
+ */
+export function compareVictimsBySlaPriority(victimA, victimB, referenceDate = new Date()) {
+  const pA = getVictimSlaUrgencyTier(victimA, referenceDate);
+  const pB = getVictimSlaUrgencyTier(victimB, referenceDate);
+
+  // 1. TERLAMBAT (Tier 1) SELALU PALING ATAS!
+  if (pA.tier !== pB.tier) {
+    return pA.tier - pB.tier;
+  }
+
+  // 2. Jika sama-sama Terlambat (Tier 1):
+  // Yang tenggatnya paling lama terlewati (keterlambatan paling besar) berada paling atas
+  if (pA.tier === 1) {
+    const timeA = pA.time != null && !isNaN(pA.time) ? pA.time : 0;
+    const timeB = pB.time != null && !isNaN(pB.time) ? pB.time : 0;
+    if (timeA !== timeB) {
+      return timeA - timeB; // timestamp lebih lama/kecil -> lebih terlambat -> lebih atas
+    }
+    return (pA.remainingHours || 0) - (pB.remainingHours || 0);
+  }
+
+  // 3. Jika sama-sama Mendekati Tenggat (Tier 2):
+  // Yang sisa waktunya paling sedikit (paling mendesak) berada paling atas
+  if (pA.tier === 2) {
+    const timeA = pA.time != null && !isNaN(pA.time) ? pA.time : Infinity;
+    const timeB = pB.time != null && !isNaN(pB.time) ? pB.time : Infinity;
+    if (timeA !== timeB) {
+      return timeA - timeB;
+    }
+    return (pA.remainingHours || 0) - (pB.remainingHours || 0);
+  }
+
+  // 4. Jika sama-sama Tepat Waktu (Tier 3):
+  // Diurutkan dari tenggat terdekat
+  if (pA.tier === 3) {
+    const timeA = pA.time != null && !isNaN(pA.time) ? pA.time : Infinity;
+    const timeB = pB.time != null && !isNaN(pB.time) ? pB.time : Infinity;
+    if (timeA !== timeB) {
+      return timeA - timeB;
+    }
+    return (pA.remainingHours || 0) - (pB.remainingHours || 0);
+  }
+
+  // 5. Tier 5 (Selesai): urutkan yang baru selesai di atas
+  const timeA = pA.time != null && !isNaN(pA.time) ? pA.time : 0;
+  const timeB = pB.time != null && !isNaN(pB.time) ? pB.time : 0;
+  return timeB - timeA;
+}
+
+/**
+ * ── RUMUS 1: PERSENTASE KEPATUHAN SLA BERDASARKAN TOTAL KUNJUNGAN (LEBIH ADIL) ──
+ * Nilai SLA (%) = (Jumlah Kunjungan Tepat Waktu / Total Semua Kunjungan) * 100%
+ * Digunakan sebagai penilaian utama evaluasi performa lapangan di Jasa Raharja.
+ * ATURAN JIKA TIDAK ADA KORBAN (NOL KUNJUNGAN):
+ * Jika tidak ada korban/kunjungan pada periode evaluasi, rumus pembagian tidak dapat digunakan (0/0),
+ * sehingga kepatuhan bernilai null (ditampilkan sebagai N/A).
+ */
+export function calculateSlaByTotalVisits(kunjunganTepat = 0, totalKunjungan = 0) {
+  if (!totalKunjungan || totalKunjungan <= 0) return null;
+  return Math.round((Math.max(0, kunjunganTepat) / totalKunjungan) * 100);
+}
+
+/**
+ * ── RUMUS 2: PERSENTASE KEPATUHAN SLA BERDASARKAN JUMLAH PASIEN (LEBIH KETAT / ZERO-DEFECT) ──
+ * Nilai SLA (%) = (Jumlah Pasien Tanpa Keterlambatan / Total Pasien yang Ditangani) * 100%
+ * Pasien dihitung sukses HANYA jika seluruh kunjungannya tepat waktu dari awal hingga pulang.
+ * Jika total pasien adalah 0, bernilai null (ditampilkan sebagai N/A).
+ */
+export function calculateSlaByTotalPatients(pasienTanpaKeterlambatan = 0, totalPasien = 0) {
+  if (!totalPasien || totalPasien <= 0) return null;
+  return Math.round((Math.max(0, pasienTanpaKeterlambatan) / totalPasien) * 100);
+}
+
+/**
+ * ── RUMUS SKOR AKHIR RAPOR PETUGAS ──
+ * Skor Akhir = (Nilai SLA Petugas / Target SLA Kantor) * Bobot Poin
+ * @param {number|null} nilaiSla - Nilai kepatuhan SLA petugas (persentase, misal 90%)
+ * @param {number} [targetSla=90] - Target SLA kantor (default 90% atau 95%)
+ * @param {number} [bobotPoin=30] - Bobot maksimal poin KPI (default 30 poin)
+ * @param {boolean} [capAtMax=true] - Batasi skor maksimal hingga nilai bobotPoin (Skor Penuh)
+ * @returns {number|null} Skor akhir dengan pembulatan 1 desimal, atau null jika N/A
+ */
+export function calculateOfficerFinalScore(nilaiSla = null, targetSla = 90, bobotPoin = 30, capAtMax = true) {
+  if (nilaiSla === null || nilaiSla === undefined) return null;
+  if (nilaiSla <= 0) return 0;
+  if (!targetSla || targetSla <= 0) return 0;
+  const rawScore = (nilaiSla / targetSla) * bobotPoin;
+  const rounded = Math.round(rawScore * 10) / 10;
+  return capAtMax ? Math.min(bobotPoin, rounded) : rounded;
+}
+
+/**
+ * ── EVALUASI KOMPREHENSIF KINERJA PETUGAS BERDASARKAN ATURAN 3 HARI ──
+ * Menghitung otomatis:
+ * - Kunjungan Tepat Waktu & Terlambat (Interval <= 3 hari / 72 jam)
+ * - Aturan Nol Kunjungan (Tidak Ada Korban) -> Status N/A (Tidak Berlaku / Belum Ada Kasus)
+ * - Rumus 1: Nilai SLA Kunjungan (%) -> null (N/A) jika 0 kunjungan
+ * - Rumus 2: Nilai SLA Pasien (%) -> null (N/A) jika 0 pasien
+ * - Rumus Skor Akhir Rapor (Bobot 30 Poin) -> null (N/A) jika 0 kunjungan
+ */
+export function evaluateOfficerKpi(victims = [], referenceDate = new Date(), targetSla = 90, bobotPoin = 30, targetOfficer = null) {
+  let totalKunjungan = 0;
+  let kunjunganTepat = 0;
+  let kunjunganTerlambat = 0;
+  const totalPasien = victims.length;
+  let pasienTanpaKeterlambatan = 0;
+
+  const seenVisits = new Set();
+
+  const officerIdStr = targetOfficer ? String(targetOfficer.id || targetOfficer.backendOfficerId || targetOfficer.backendId || '') : '';
+  const officerNameLow = targetOfficer ? (targetOfficer.nama || '').toLowerCase().trim() : '';
+  const officerPlots = targetOfficer && Array.isArray(targetOfficer.plottingRs)
+    ? targetOfficer.plottingRs.map((r) => (r || '').toLowerCase().trim())
+    : [];
+
+  const isVisitByOfficer = (visit, defaultHospital) => {
+    if (!targetOfficer) return true;
+    if (visit.petugasId && String(visit.petugasId) === officerIdStr) return true;
+    if (visit.petugasNama && visit.petugasNama.toLowerCase().trim() === officerNameLow) return true;
+    const vHosp = (visit.rumahSakit || defaultHospital || '').toLowerCase().trim();
+    if (vHosp && officerPlots.some((p) => p === vHosp || (vHosp.length >= 4 && (p.includes(vHosp) || vHosp.includes(p))))) {
+      return true;
+    }
+    return false;
+  };
+
+  let kunjunganLengkap = 0;
+
+  victims.forEach((v) => {
+    let patientHasLate = false;
+    const isDischarged = Boolean(
+      v.kondisiTerakhir === 'Sudah Pulang' ||
+      v.kondisiTerakhir === 'Pulang' ||
+      v.kondisiTerakhir === 'Selesai' ||
+      v.statusPemantauan === 'Selesai Dipantau' ||
+      v.status_kondisi === 'Selesai' ||
+      v.kondisiTerakhir === 'Meninggal Dunia'
+    );
+
+    // 1. Kunjungan Pertama (Awal Pemantauan)
+    const fSla = calculateFirstVisitSla(v.tanggalInformasiDiterima, v.kunjunganPertama, referenceDate);
+    if (v.kunjunganPertama && v.kunjunganPertama.statusKunjungan !== 'Menunggu') {
+      if (isVisitByOfficer(v.kunjunganPertama, v.rumahSakitAsal || v.rumahSakit)) {
+        const kId = v.kunjunganPertama.id || `INIT-${v.id}`;
+        if (!seenVisits.has(kId)) {
+          seenVisits.add(kId);
+          totalKunjungan++;
+          if (fSla.wasLate) {
+            kunjunganTerlambat++;
+            patientHasLate = true;
+          } else {
+            kunjunganTepat++;
+          }
+
+          // Cek kelengkapan dokumentasi & laporan
+          const hasPhoto = Boolean(v.kunjunganPertama.fotoUrl || v.kunjunganPertama.foto || v.kunjunganPertama.fotoKunjungan);
+          const hasNotes = Boolean(v.kunjunganPertama.hasilKunjungan || v.kunjunganPertama.catatan || v.kunjunganPertama.catatanTindakLanjut);
+          if (hasPhoto || hasNotes) {
+            kunjunganLengkap++;
+          }
+        }
+      }
+    }
+
+    // 2. Kunjungan Lanjutan Berkala (Aturan Maksimal 3 Hari / 72 Jam)
+    const acts = v.riwayatAktivitas || v.riwayatKunjungan || [];
+    const sortedActs = [...acts]
+      .filter((a) => a && a.statusKunjungan !== 'Menunggu' && a.id !== v.kunjunganPertama?.id)
+      .sort((a, b) => new Date(a.tanggal || a.tanggalKunjungan).getTime() - new Date(b.tanggal || b.tanggalKunjungan).getTime());
+
+    let prevVisitTime = v.kunjunganPertama?.tanggalKunjungan
+      ? new Date(v.kunjunganPertama.tanggalKunjungan).getTime()
+      : (v.tanggalInformasiDiterima ? new Date(v.tanggalInformasiDiterima).getTime() : null);
+
+    sortedActs.forEach((act) => {
+      if (!isVisitByOfficer(act, v.rumahSakit)) return;
+
+      const aId = act.id || `${v.id}-${act.nomorKunjungan || ''}-${act.tanggal || ''}`;
+      if (!seenVisits.has(aId)) {
+        seenVisits.add(aId);
+        totalKunjungan++;
+
+        const actTime = new Date(act.waktuAktualKunjungan || act.tanggal || act.tanggalKunjungan).getTime();
+        let isLate = act.wasLate || act.terlambat ||
+          (typeof act.statusKunjungan === 'string' && act.statusKunjungan.toLowerCase().includes('terlambat')) ||
+          (typeof act.status_kunjungan === 'string' && act.status_kunjungan.toLowerCase().includes('terlambat'));
+
+        // Periksa selisih interval dengan kunjungan sebelumnya (Maksimal 72 jam)
+        if (!isLate && prevVisitTime && actTime) {
+          const diffHours = (actTime - prevVisitTime) / (1000 * 60 * 60);
+          if (diffHours > SLA_MONITORING_INTERVAL_HOURS) {
+            isLate = true;
+          }
+        }
+
+        if (isLate) {
+          kunjunganTerlambat++;
+          patientHasLate = true;
+        } else {
+          kunjunganTepat++;
+        }
+
+        // Cek kelengkapan dokumentasi & laporan tindak lanjut
+        const hasPhoto = Boolean(act.fotoUrl || act.foto || act.fotoKunjungan || act.foto_url);
+        const hasNotes = Boolean(act.hasilKomunikasi || act.hasilPemantauan || act.hasilKunjungan || act.catatanTindakLanjut || act.catatan);
+        if (hasPhoto || hasNotes) {
+          kunjunganLengkap++;
+        }
+
+        if (actTime) prevVisitTime = actTime;
+      }
+    });
+
+    // 3. Evaluasi pemantauan berjalan: jika pasien belum pulang dan pemantauan aktif sudah lewat 3 hari
+    if (!isDischarged && v.kunjunganPertama) {
+      const mSla = calculateMonitoringSla(v, referenceDate);
+      if (mSla.isOverdue && mSla.status === 'TERLAMBAT') {
+        patientHasLate = true;
+      }
+    }
+
+    if (!patientHasLate) {
+      pasienTanpaKeterlambatan++;
+    }
+  });
+
+  const isZeroCase = totalKunjungan === 0;
+  // Jika tidak ada korban/kunjungan pada periode ini, nilai kepatuhan & skor akhir berstatus N/A (bukan 100%)
+  const slaKunjungan = isZeroCase ? null : calculateSlaByTotalVisits(kunjunganTepat, totalKunjungan);
+  const slaPasien = isZeroCase ? null : calculateSlaByTotalPatients(pasienTanpaKeterlambatan, totalPasien);
+  const kelengkapanLaporan = isZeroCase ? null : Math.round((kunjunganLengkap / totalKunjungan) * 100);
+  const skorAkhir = isZeroCase ? null : calculateOfficerFinalScore(slaKunjungan, targetSla, bobotPoin, true);
+
+  return {
+    isZeroCase,
+    totalKunjungan,
+    kunjunganTepat,
+    kunjunganTerlambat,
+    kunjunganLengkap,
+    kelengkapanLaporan, // % Kelengkapan dokumentasi foto & catatan
+    totalPasien,
+    bebanKerjaKorban: totalPasien, // Beban kerja (bukan target atau kuota)
+    pasienTanpaKeterlambatan,
+    pasienDenganKeterlambatan: totalPasien - pasienTanpaKeterlambatan,
+    slaKunjungan, // Rumus 1 (Total Kunjungan %) -> null jika 0 kunjungan (N/A)
+    slaPasien,    // Rumus 2 (Total Pasien %) -> null jika 0 pasien (N/A)
+    skorAkhir,    // Skor Akhir Rapor (Poin) -> null jika 0 kunjungan (N/A)
+    statusEvaluasi: isZeroCase ? 'N/A' : 'TEREVALUASI',
+    keteranganEvaluasi: isZeroCase
+      ? 'Tidak ada korban yang dirawat (N/A)'
+      : `${kunjunganTepat} dari ${totalKunjungan} kunjungan tepat waktu (Beban: ${totalPasien} korban)`,
+    targetSla,
+    bobotPoin
+  };
 }

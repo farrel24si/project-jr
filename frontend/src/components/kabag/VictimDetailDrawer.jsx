@@ -5,6 +5,8 @@ import RiwayatPerawatanTimeline, { resolveReferralHospitals } from '../common/Ri
 import ModalDetailKunjunganReadOnly from '../petugas/ModalDetailKunjunganReadOnly';
 import { calculateFirstVisitSla, calculateMonitoringSla } from '../../services/slaService';
 import { cleanPhoneNumber, cleanSumberInformasi } from '../../services/backendMapper';
+import { formatDateTimeIndo } from '../../utils/dateUtils';
+import { isVictimFinished } from '../../utils/monitoringStatus';
 import { 
   Building2, 
   MapPin, 
@@ -60,22 +62,22 @@ export default function VictimDetailDrawer({ isOpen, onClose, victim }) {
   const monitoringSla = calculateMonitoringSla(victim);
 
   const formatDateTime = (dateStr) => {
-    if (!dateStr) return '—';
-    try {
-      const d = new Date(dateStr);
-      return `${d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' })}, ${d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })} WIB`;
-    } catch {
-      return dateStr;
-    }
+    return formatDateTimeIndo(dateStr);
   };
 
   const { isReferred, rsAsal, rsTujuan, rsSaatIni } = resolveReferralHospitals(victim);
 
-  const isDischarged =
-    victim.kondisiTerakhir === 'Sudah Pulang' ||
-    victim.kondisiTerakhir === 'Pulang' ||
-    victim.kondisiTerakhir === 'Selesai' ||
-    victim.statusPemantauan === 'Selesai Dipantau';
+  const isDischarged = isVictimFinished(victim) && !Boolean(
+    victim.kondisiTerakhir === 'Meninggal Dunia' ||
+    victim.status_kondisi === 'Meninggal Dunia' ||
+    Boolean(victim.tanggalMeninggal)
+  );
+
+  const isDeceased = Boolean(
+    victim.kondisiTerakhir === 'Meninggal Dunia' ||
+    victim.status_kondisi === 'Meninggal Dunia' ||
+    victim.tanggalMeninggal
+  );
 
   const isReferredOut =
     (typeof victim.kondisiTerakhir === 'string' && victim.kondisiTerakhir.startsWith('Dirujuk')) ||
@@ -108,7 +110,7 @@ export default function VictimDetailDrawer({ isOpen, onClose, victim }) {
       return (
         <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-violet-50 text-violet-700 border border-violet-200">
           <span className="w-2 h-2 rounded-full bg-violet-500 animate-pulse"></span>
-          <span>Rujukan Masuk (dari {rsAsal})</span>
+          <span>Rujukan dari {rsAsal}</span>
         </span>
       );
     }
@@ -177,16 +179,81 @@ export default function VictimDetailDrawer({ isOpen, onClose, victim }) {
           </div>
         </div>
 
-        {/* Priority Warning if MD */}
-        {victim.kondisiTerakhir === 'Meninggal Dunia' && (
-          <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-red-950 flex items-center gap-2.5">
-            <AlertOctagon className="w-4 h-4 text-red-600 shrink-0" />
-            <div>
-              <span className="font-bold">Prioritas Khusus: Korban Meninggal Dunia.</span>
-              <span className="text-red-800 ml-1">
-                Tindak Lanjut Dokumen Santunan: <strong>{victim.tindakLanjut}</strong>
+        {/* CARD KHUSUS PENCATATAN KORBAN MD (MENINGGAL DUNIA) UNTUK AUDIT KABAG */}
+        {isDeceased && (
+          <div className="bg-gradient-to-r from-red-50/90 via-rose-50/60 to-red-50/90 border border-red-200/90 rounded-2xl p-5 shadow-2xs space-y-3.5">
+            <div className="flex items-center justify-between gap-3 border-b border-red-200/70 pb-3 flex-wrap">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-red-100 text-red-700 flex items-center justify-center shrink-0 border border-red-200">
+                  <AlertOctagon className="w-5 h-5 text-red-600" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-extrabold uppercase tracking-wider text-red-800 bg-red-200/80 px-2.5 py-0.5 rounded-full">
+                      Status Kondisi: MD (Meninggal Dunia)
+                    </span>
+                    <span className="text-[10px] font-bold text-slate-500 bg-white px-2 py-0.5 rounded-full border border-red-200">
+                      Permanen
+                    </span>
+                  </div>
+                  <h3 className="text-sm font-black text-red-950 mt-1">
+                    Informasi Korban Meninggal Dunia
+                  </h3>
+                </div>
+              </div>
+              <span className="text-xs font-bold text-red-700 bg-white border border-red-200 px-3 py-1 rounded-xl">
+                Pemantauan Klinis Berakhir
               </span>
             </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+              <div className="bg-white/80 p-3 rounded-xl border border-red-200/80">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-0.5">
+                  Status Kondisi
+                </span>
+                <span className="font-extrabold text-red-700">
+                  MD (Meninggal Dunia)
+                </span>
+              </div>
+
+              <div className="bg-white/80 p-3 rounded-xl border border-red-200/80">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-0.5">
+                  Tanggal Meninggal
+                </span>
+                <span className="font-extrabold text-slate-900">
+                  {victim.tanggalMeninggal ? new Date(victim.tanggalMeninggal).toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }) : '—'}
+                </span>
+              </div>
+
+              <div className="bg-white/80 p-3 rounded-xl border border-red-200/80">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-0.5">
+                  Jam Meninggal
+                </span>
+                <span className="font-extrabold text-slate-900">
+                  {victim.jamMeninggal ? `${String(victim.jamMeninggal).replace(/\s*WIB/i, '').trim()} WIB` : '—'}
+                </span>
+              </div>
+
+              <div className="bg-white/80 p-3 rounded-xl border border-red-200/80">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-0.5">
+                  Dicatat oleh
+                </span>
+                <span className="font-extrabold text-slate-900">
+                  {victim.dicatatOleh || victim.namaPetugas || 'Petugas Jasa Raharja'}
+                </span>
+              </div>
+            </div>
+
+            {victim.waktuPencatatanMD && (
+              <div className="pt-2 border-t border-red-200/50 flex flex-col sm:flex-row sm:items-center justify-between gap-1 text-[11px] text-slate-500">
+                <span>
+                  Waktu Pencatatan Sistem: <strong className="text-slate-700">{formatDateTime(victim.waktuPencatatanMD)}</strong> (Tercatat terpisah dari waktu kematian)
+                </span>
+                <span className="text-red-700 font-semibold">
+                  Santunan ahli waris diproses
+                </span>
+              </div>
+            )}
           </div>
         )}
 
@@ -202,9 +269,55 @@ export default function VictimDetailDrawer({ isOpen, onClose, victim }) {
             </h5>
             <div className="divide-y divide-slate-100 text-xs">
               <div className="py-2 flex items-center justify-between gap-3">
-                <span className="text-slate-500 font-medium">Rumah Sakit Dirawat</span>
+                <span className="text-slate-500 font-medium">Rumah Sakit Saat Ini</span>
                 <span className="font-semibold text-[#145DA0] text-right">{victim.rumahSakit || rsSaatIni || rsAsal}</span>
               </div>
+              {victim.hospital_radius && (
+                <div className="py-2 flex items-center justify-between gap-3">
+                  <span className="text-slate-500 font-medium">Radius Geofence RS</span>
+                  <span className="font-semibold text-slate-700 text-right">{victim.hospital_radius} meter</span>
+                </div>
+              )}
+              {victim.rumahSakitAsal && victim.rumahSakitAsal !== (victim.rumahSakit || rsSaatIni) && (
+                <div className="py-2 flex items-center justify-between gap-3">
+                  <span className="text-purple-600 font-medium">Rumah Sakit Asal</span>
+                  <span className="font-semibold text-purple-700 text-right">{victim.rumahSakitAsal}</span>
+                </div>
+              )}
+              {victim.rumahSakitTujuan && victim.rumahSakitTujuan !== (victim.rumahSakit || rsSaatIni) && (
+                <div className="py-2 flex items-center justify-between gap-3">
+                  <span className="text-purple-600 font-medium">Rumah Sakit Tujuan</span>
+                  <span className="font-semibold text-purple-700 text-right">{victim.rumahSakitTujuan}</span>
+                </div>
+              )}
+              <div className="py-2 flex items-center justify-between gap-3">
+                <span className="text-slate-500 font-medium">Jenis Laka</span>
+                <span className="font-bold text-slate-800 text-right">
+                  {victim.jenis_laka || victim.jenisLaka || 'Belum Diketahui'}
+                </span>
+              </div>
+              <div className="py-2 flex items-center justify-between gap-3">
+                <span className="text-slate-500 font-medium">Status Keterjaminan</span>
+                <span className={`font-bold text-right px-2 py-0.5 rounded text-[11px] ${
+                  (victim.status_keterjaminan === 'Terjamin JR' || victim.statusKeterjaminan === 'Terjamin JR')
+                    ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                    : 'bg-amber-50 text-amber-800 border border-amber-200'
+                }`}>
+                  {victim.status_keterjaminan || victim.statusKeterjaminan || 'Belum Dikonfirmasi'}
+                </span>
+              </div>
+              {(victim.no_gl || victim.noGl) && (
+                <div className="py-2 flex items-center justify-between gap-3">
+                  <span className="text-slate-500 font-medium">No. Surat Jaminan (GL)</span>
+                  <span className="font-mono font-bold text-slate-900 text-right">{victim.no_gl || victim.noGl}</span>
+                </div>
+              )}
+              {(victim.tgl_gl || victim.tglGl) && (
+                <div className="py-2 flex items-center justify-between gap-3">
+                  <span className="text-slate-500 font-medium">Tanggal GL</span>
+                  <span className="font-semibold text-slate-800 text-right">{victim.tgl_gl || victim.tglGl}</span>
+                </div>
+              )}
               <div className="py-2 flex items-center justify-between gap-3">
                 <span className="text-slate-500 font-medium">Tanggal Laka</span>
                 <span className="font-semibold text-slate-800 text-right">{formatDateTime(victim.tanggalKecelakaan)}</span>
@@ -239,6 +352,12 @@ export default function VictimDetailDrawer({ isOpen, onClose, victim }) {
                 <span className="text-slate-500 font-medium">Petugas Penanggung Jawab</span>
                 <span className="font-bold text-slate-900 text-right">{victim.namaPetugas || 'Petugas Jasa Raharja'}</span>
               </div>
+              {victim.petugasAsalNama && victim.petugasAsalNama !== victim.namaPetugas && (
+                <div className="py-2 flex items-center justify-between gap-3">
+                  <span className="text-slate-500 font-medium">Petugas RS Asal</span>
+                  <span className="font-semibold text-slate-700 text-right">{victim.petugasAsalNama}</span>
+                </div>
+              )}
               <div className="py-2 flex items-center justify-between gap-3">
                 <span className="text-slate-500 font-medium">Status Pemantauan</span>
                 <span className="font-semibold text-slate-800 text-right">{victim.statusPemantauan}</span>
@@ -255,12 +374,6 @@ export default function VictimDetailDrawer({ isOpen, onClose, victim }) {
                   {victim.santunanSelesai ? 'Selesai / Terpenuhi' : 'Sedang Berjalan'}
                 </span>
               </div>
-              {victim.tindakLanjut && (
-                <div className="py-2 flex flex-col sm:flex-row sm:items-start justify-between gap-1 sm:gap-3">
-                  <span className="text-slate-500 font-medium shrink-0">Rencana Tindak Lanjut</span>
-                  <span className="font-semibold text-slate-800 text-left sm:text-right leading-relaxed">{victim.tindakLanjut}</span>
-                </div>
-              )}
             </div>
           </div>
         </div>

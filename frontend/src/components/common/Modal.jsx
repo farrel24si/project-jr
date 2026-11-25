@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
 import { X } from 'lucide-react';
 
-export default function Modal({ isOpen, onClose, title, subtitle, children, maxWidth = 'max-w-2xl' }) {
+export default function Modal({ isOpen, onClose, title, subtitle, children, maxWidth = 'max-w-2xl', closeOnBackdrop = true }) {
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.key === 'Escape' && isOpen) {
@@ -25,7 +25,7 @@ export default function Modal({ isOpen, onClose, title, subtitle, children, maxW
       {/* Backdrop */}
       <div
         className="fixed inset-0 bg-slate-900/60 transition-opacity"
-        onClick={onClose}
+        onClick={closeOnBackdrop ? onClose : undefined}
         aria-hidden="true"
       />
 

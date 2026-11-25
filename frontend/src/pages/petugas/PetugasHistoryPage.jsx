@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { storageService } from '../../services/storageService';
 import ModalDetailKunjunganReadOnly from '../../components/petugas/ModalDetailKunjunganReadOnly';
+import { formatDateIndo, formatTimeIndo } from '../../utils/dateUtils';
 import {
   History,
   Search,
@@ -21,14 +22,7 @@ import {
 } from 'lucide-react';
 
 function formatDateShort(dateStr) {
-  if (!dateStr) return '—';
-  try {
-    const d = new Date(dateStr);
-    if (isNaN(d.getTime())) return dateStr;
-    return d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' });
-  } catch {
-    return dateStr;
-  }
+  return formatDateIndo(dateStr);
 }
 
 const PAGE_SIZE = 10;
@@ -285,7 +279,7 @@ export default function PetugasHistoryPage() {
       {/* ── 1. PAGE HEADER ── */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200/80 pb-4">
         <div>
-          <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
+          <h1 className="text-2xl font-black text-slate-900 tracking-tight">
             Riwayat Kunjungan
           </h1>
           <p className="text-xs text-slate-500 mt-1">
@@ -300,57 +294,57 @@ export default function PetugasHistoryPage() {
       </div>
 
       {/* ── 2. SUMMARY KPI STAT CARDS (SERAGAM DENGAN DASHBOARD & DAFTAR KORBAN) ── */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs space-y-1">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs hover:shadow-xs transition-shadow">
           <div className="flex items-center justify-between">
-            <span className="text-[11px] font-semibold text-slate-500">Total Kunjungan</span>
-            <div className="w-8 h-8 rounded-xl bg-blue-50 text-[#145DA0] flex items-center justify-center border border-blue-100">
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Total Kunjungan</span>
+            <div className="w-9 h-9 rounded-xl bg-blue-50 text-[#145DA0] flex items-center justify-center border border-blue-100 shrink-0">
               <ClipboardCheck className="w-4 h-4" />
             </div>
           </div>
-          <span className="text-2xl font-black text-slate-900 block mt-1">
+          <span className="text-3xl font-black font-mono tracking-tight text-slate-900 block mt-2">
             {historyMetrics.total}
           </span>
-          <span className="text-[11px] text-slate-400 block">Kunjungan terlaksana</span>
+          <span className="text-[11px] text-slate-400 block mt-0.5">Kunjungan terlaksana</span>
         </div>
 
-        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs space-y-1">
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs hover:shadow-xs transition-shadow">
           <div className="flex items-center justify-between">
-            <span className="text-[11px] font-semibold text-slate-500">Kunjungan Pertama</span>
-            <div className="w-8 h-8 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center border border-indigo-100">
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Kunjungan Pertama</span>
+            <div className="w-9 h-9 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center border border-indigo-100 shrink-0">
               <CheckCircle2 className="w-4 h-4" />
             </div>
           </div>
-          <span className="text-2xl font-black text-indigo-600 block mt-1">
+          <span className="text-3xl font-black font-mono tracking-tight text-indigo-600 block mt-2">
             {historyMetrics.firstVisits}
           </span>
-          <span className="text-[11px] text-slate-400 block">Kunjungan awal RS</span>
+          <span className="text-[11px] text-slate-400 block mt-0.5">Kunjungan awal RS</span>
         </div>
 
-        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs space-y-1">
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs hover:shadow-xs transition-shadow">
           <div className="flex items-center justify-between">
-            <span className="text-[11px] font-semibold text-slate-500">Pemantauan Berkala</span>
-            <div className="w-8 h-8 rounded-xl bg-sky-50 text-sky-600 flex items-center justify-center border border-sky-100">
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Pemantauan Berkala</span>
+            <div className="w-9 h-9 rounded-xl bg-sky-50 text-[#145DA0] flex items-center justify-center border border-sky-100 shrink-0">
               <Activity className="w-4 h-4" />
             </div>
           </div>
-          <span className="text-2xl font-black text-[#145DA0] block mt-1">
+          <span className="text-3xl font-black font-mono tracking-tight text-[#145DA0] block mt-2">
             {historyMetrics.monitoringVisits}
           </span>
-          <span className="text-[11px] text-slate-400 block">Kunjungan rutin lanjutan</span>
+          <span className="text-[11px] text-slate-400 block mt-0.5">Kunjungan rutin lanjutan</span>
         </div>
 
-        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs space-y-1">
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs hover:shadow-xs transition-shadow">
           <div className="flex items-center justify-between">
-            <span className="text-[11px] font-semibold text-slate-500">Pasien Selesai Pulang</span>
-            <div className="w-8 h-8 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center border border-emerald-100">
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Pasien Selesai Pulang</span>
+            <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center border border-emerald-100 shrink-0">
               <CheckCheck className="w-4 h-4" />
             </div>
           </div>
-          <span className="text-2xl font-black text-emerald-600 block mt-1">
+          <span className="text-3xl font-black font-mono tracking-tight text-emerald-600 block mt-2">
             {historyMetrics.finishedPatients}
           </span>
-          <span className="text-[11px] text-slate-400 block">Perawatan tuntas</span>
+          <span className="text-[11px] text-slate-400 block mt-0.5">Perawatan tuntas</span>
         </div>
       </div>
 
@@ -460,7 +454,7 @@ export default function PetugasHistoryPage() {
                       <td className="py-3.5 px-4 font-bold text-slate-900 whitespace-nowrap">
                         <div className="flex items-center gap-3">
                           <div className="w-8 h-8 rounded-full bg-blue-50 text-[#145DA0] font-bold text-xs flex items-center justify-center shrink-0 border border-blue-100">
-                            {initials}
+                            <User className="w-4 h-4 text-[#145DA0]" />
                           </div>
                           <div>
                             <Link
@@ -490,7 +484,7 @@ export default function PetugasHistoryPage() {
                           {formatDateShort(act.waktuAktualKunjungan || act.tanggal || act.rawDate)}
                         </span>
                         <span className="text-[10px] text-slate-400 font-medium block">
-                          {new Date(act.waktuAktualKunjungan || act.tanggal || act.rawDate).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })} WIB
+                          {formatTimeIndo(act.waktuAktualKunjungan || act.tanggal || act.rawDate)}
                         </span>
                       </td>
 
@@ -559,7 +553,7 @@ export default function PetugasHistoryPage() {
                   <div className="flex items-start justify-between gap-2.5">
                     <div className="flex items-center gap-2.5 min-w-0">
                       <div className="w-9 h-9 rounded-full bg-blue-50 text-[#145DA0] font-bold text-xs flex items-center justify-center shrink-0 border border-blue-100">
-                        {initials}
+                        <User className="w-4 h-4 text-[#145DA0]" />
                       </div>
                       <div className="min-w-0">
                         <div className="flex items-center gap-1.5">
@@ -590,7 +584,7 @@ export default function PetugasHistoryPage() {
                     <div className="flex items-center justify-between text-[10px] text-slate-500 pt-0.5">
                       <span className="flex items-center gap-1">
                         <Calendar className="w-3 h-3 text-slate-400" />
-                        <span>{formatDateShort(act.waktuAktualKunjungan || act.tanggal || act.rawDate)} {new Date(act.waktuAktualKunjungan || act.tanggal || act.rawDate).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })} WIB</span>
+                        <span>{formatDateShort(act.waktuAktualKunjungan || act.tanggal || act.rawDate)}, {formatTimeIndo(act.waktuAktualKunjungan || act.tanggal || act.rawDate)}</span>
                       </span>
                       <span
                         className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border ${

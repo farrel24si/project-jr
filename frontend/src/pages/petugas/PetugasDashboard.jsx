@@ -5,6 +5,12 @@ import { storageService } from '../../services/storageService';
 import FormInputKorbanModal from '../../components/petugas/FormInputKorbanModal';
 import FormPemantauanModal from '../../components/petugas/FormPemantauanModal';
 import Modal from '../../components/common/Modal';
+import MonitoringStatusBadge from '../../components/common/MonitoringStatusBadge';
+import SortableHeader from '../../components/common/SortableHeader';
+import { isVictimFinished, getMonitoringStatus } from '../../utils/monitoringStatus';
+import { evaluateOfficerKpi, compareVictimsBySlaPriority } from '../../services/slaService';
+import { formatDateIndo, formatTimeIndo, formatDateTimeIndo, parseDateSafe } from '../../utils/dateUtils';
+import { getReferralPerspectiveInfo } from '../../utils/referralUtils';
 import {
   ListChecks,
   Calendar,
@@ -20,29 +26,19 @@ import {
   RotateCcw,
   FileText,
   CalendarCheck,
-  ArrowRight
+  ArrowRight,
+  ShieldCheck,
+  CheckCircle2,
+  Users,
+  User
 } from 'lucide-react';
 
 function formatDateShort(dateStr) {
-  if (!dateStr) return '—';
-  try {
-    const d = new Date(dateStr);
-    if (isNaN(d.getTime())) return dateStr;
-    return d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' });
-  } catch {
-    return dateStr;
-  }
+  return formatDateIndo(dateStr);
 }
 
-function formatTime(dateStr) {
-  if (!dateStr) return '';
-  try {
-    const d = new Date(dateStr);
-    if (isNaN(d.getTime())) return '';
-    return `${d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }).replace(/:/g, '.')} WIB`;
-  } catch {
-    return '';
-  }
+function formatTime(dateStr, defaultTime = '') {
+  return formatTimeIndo(dateStr, defaultTime);
 }
 
 function getInitials(name) {
@@ -88,6 +84,17 @@ export default function PetugasDashboard() {
   const [isInputModalOpen, setIsInputModalOpen] = useState(false);
   const [isQuickAddModalOpen, setIsQuickAddModalOpen] = useState(false);
   const [monitoringVictim, setMonitoringVictim] = useState(null);
+  const [tableSortConfig, setTableSortConfig] = useState({ key: null, direction: 'asc' });
+
+  const handleTableSort = (key) => {
+    setTableSortConfig((prev) => {
+      if (prev.key === key) {
+        if (prev.direction === 'asc') return { key, direction: 'desc' };
+        return { key: null, direction: 'asc' };
+      }
+      return { key, direction: 'asc' };
+    });
+  };
 
   const loadData = () => {
     const activeOfficerIdent = officerId || currentUser?.profile?.id || currentUser?.profile?.backendOfficerId || currentUser?.profile?.nama;
@@ -96,7 +103,7 @@ export default function PetugasDashboard() {
   };
 
   useEffect(() => {
-    storageService.syncWithBackend(true).catch(() => {});
+    storageService.syncWithBackend(true).catch(() => { });
     loadData();
     window.addEventListener('jr_victims_updated', loadData);
     window.addEventListener('jr_officers_updated', loadData);
@@ -105,6 +112,23 @@ export default function PetugasDashboard() {
       window.removeEventListener('jr_officers_updated', loadData);
     };
   }, [officerId, officerName, currentUser?.profile?.plottingRs]);
+
+  // Otomatis kembalikan petugas ke modal formulir pemantauan jika browser HP sempat reload saat ambil foto kamera
+  useEffect(() => {
+    try {
+      const activeVicId = sessionStorage.getItem('jr_active_monitoring_victim_id');
+      if (activeVicId && victims.length > 0 && !monitoringVictim) {
+        const found = victims.find((v) => String(v.id) === String(activeVicId) || String(v.caseId) === String(activeVicId));
+        if (found) {
+          if (isVictimFinished(found)) {
+            sessionStorage.removeItem('jr_active_monitoring_victim_id');
+          } else {
+            setMonitoringVictim(found);
+          }
+        }
+      }
+    } catch (e) { }
+  }, [victims, monitoringVictim]);
 
   // Metrik agregasi
   const metrics = useMemo(() => {
@@ -143,58 +167,42 @@ export default function PetugasDashboard() {
         v.tanggalInformasiDiterima;
     }
 
-    const d = rawDate ? new Date(rawDate) : null;
-    const isValid = d && !isNaN(d.getTime());
+    const d = rawDate ? parseDateSafe(rawDate) : null;
+    const isValid = Boolean(d);
 
     return {
       dateObj: isValid ? d : null,
       rawDate,
       tglHari: isValid ? String(d.getDate()).padStart(2, '0') : '—',
       bulan: isValid ? d.toLocaleDateString('id-ID', { month: 'short' }).toUpperCase() : '—',
-      waktu: isValid ? `${d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }).replace(/:/g, '.')} WIB` : '09.30 WIB',
+      waktu: isValid ? formatTimeIndo(d) : '09.30 WIB',
       fullFormatted: isValid
-        ? `${d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' })}, ${d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }).replace(/:/g, '.')} WIB`
+        ? formatDateTimeIndo(d)
         : 'Belum ada kunjungan'
     };
   };
 
-  // Ekstraksi seluruh riwayat aktivitas nyata di sistem
+  // Ekstraksi seluruh riwayat aktivitas nyata di sistem (Tanpa duplikasi & bedakan korban vs kunjungan)
   const allActualActivities = useMemo(() => {
     const list = [];
+    const seenVisitIds = new Set();
 
     victims.forEach((v) => {
-      if (Array.isArray(v.riwayatAktivitas) && v.riwayatAktivitas.length > 0) {
-        v.riwayatAktivitas.forEach((act, actIdx) => {
-          const rawDate =
-            act.waktuAktualKunjungan || act.tanggalKunjungan || act.tanggal || act.waktuFoto;
-          if (rawDate) {
-            const d = new Date(rawDate);
-            if (!isNaN(d.getTime())) {
+      // 1. Kunjungan Pertama
+      if (v.kunjunganPertama && v.kunjunganPertama.statusKunjungan !== 'Menunggu') {
+        const rawDate =
+          v.kunjunganPertama.waktuAktualKunjungan ||
+          v.kunjunganPertama.tanggalKunjungan ||
+          v.kunjunganPertama.waktuFoto ||
+          v.tanggalKunjunganTerakhir;
+        if (rawDate) {
+          const d = new Date(rawDate);
+          if (!isNaN(d.getTime())) {
+            const kId = v.kunjunganPertama.id || `${v.id}-kp`;
+            if (!seenVisitIds.has(kId)) {
+              seenVisitIds.add(kId);
               list.push({
-                id: act.id || `${v.id}-act-${actIdx}`,
-                date: d,
-                victimId: v.id,
-                victimName: v.nama,
-                hospital: act.rumahSakit || v.rumahSakit,
-                jenis: act.jenisAktivitas || 'Kunjungan',
-                catatan: act.catatanTindakLanjut || act.hasilKunjungan || act.hasilPemantauan || 'Laporan kunjungan tersimpan',
-                kondisi: act.kondisiKorban || v.kondisiTerakhir
-              });
-            }
-          }
-        });
-      } else {
-        if (v.kunjunganPertama) {
-          const rawDate =
-            v.kunjunganPertama.waktuAktualKunjungan ||
-            v.kunjunganPertama.tanggalKunjungan ||
-            v.kunjunganPertama.waktuFoto ||
-            v.tanggalKunjunganTerakhir;
-          if (rawDate) {
-            const d = new Date(rawDate);
-            if (!isNaN(d.getTime())) {
-              list.push({
-                id: `${v.id}-kp`,
+                id: kId,
                 date: d,
                 victimId: v.id,
                 victimName: v.nama,
@@ -207,6 +215,33 @@ export default function PetugasDashboard() {
           }
         }
       }
+
+      // 2. Riwayat Aktivitas Kunjungan
+      const acts = Array.isArray(v.riwayatAktivitas) ? v.riwayatAktivitas : (v.riwayatKunjungan || []);
+      acts.forEach((act, actIdx) => {
+        if (!act || act.statusKunjungan === 'Menunggu' || act.jenisAktivitas === 'Kunjungan Pertama' || act.id === v.kunjunganPertama?.id) return;
+        const rawDate =
+          act.waktuAktualKunjungan || act.tanggalKunjungan || act.tanggal || act.waktuFoto;
+        if (rawDate) {
+          const d = new Date(rawDate);
+          if (!isNaN(d.getTime())) {
+            const aId = act.id || `${v.id}-act-${actIdx}-${act.tanggal || ''}`;
+            if (!seenVisitIds.has(aId)) {
+              seenVisitIds.add(aId);
+              list.push({
+                id: aId,
+                date: d,
+                victimId: v.id,
+                victimName: v.nama,
+                hospital: act.rumahSakit || v.rumahSakit,
+                jenis: act.jenisAktivitas || 'Kunjungan Lanjutan',
+                catatan: act.catatanTindakLanjut || act.hasilKunjungan || act.hasilPemantauan || 'Laporan kunjungan tersimpan',
+                kondisi: act.kondisiKorban || v.kondisiTerakhir
+              });
+            }
+          }
+        }
+      });
     });
 
     list.sort((a, b) => b.date.getTime() - a.date.getTime());
@@ -214,7 +249,7 @@ export default function PetugasDashboard() {
   }, [victims]);
 
   // ── 1. STATISTIK 4 KARTU ATAS ──
-  const totalKunjunganValue = Math.max(allActualActivities.length, metrics.totalSeluruhAktivitas || victims.length);
+  const totalKunjunganValue = allActualActivities.length;
 
   const kunjunganHariIniValue = useMemo(() => {
     const todayStr = now.toDateString();
@@ -237,6 +272,11 @@ export default function PetugasDashboard() {
     ).length;
     return Math.max(fromList, metrics.perluTindakLanjut || 0);
   }, [victims, metrics.perluTindakLanjut]);
+
+  // Evaluasi Kinerja Petugas: Fokus Ketepatan Waktu Kunjungan & Kepatuhan SLA Maksimal 3 Hari (Tanpa Target Kuota Korban)
+  const petugasKpi = useMemo(() => {
+    return evaluateOfficerKpi(victims, now, 90, 30, currentUser?.profile);
+  }, [victims, now, currentUser]);
 
   // ── 2. DATA GRAFIK BULANAN (CURVED SVG CHART) ──
   const chartPoints = useMemo(() => {
@@ -295,12 +335,12 @@ export default function PetugasDashboard() {
       maxVal <= 5
         ? 10
         : maxVal <= 10
-        ? 15
-        : maxVal <= 20
-        ? 20
-        : maxVal <= 30
-        ? 30
-        : Math.ceil((maxVal + 5) / 10) * 10;
+          ? 15
+          : maxVal <= 20
+            ? 20
+            : maxVal <= 30
+              ? 30
+              : Math.ceil((maxVal + 5) / 10) * 10;
 
     const leftX = 40;
     const rightX = 460;
@@ -374,13 +414,7 @@ export default function PetugasDashboard() {
 
     const candidates = activePatients.length > 0 ? activePatients : victims;
 
-    const sorted = [...candidates].sort((a, b) => {
-      const infoA = getVictimLastVisitInfo(a);
-      const infoB = getVictimLastVisitInfo(b);
-      const timeA = infoA.dateObj ? infoA.dateObj.getTime() : 0;
-      const timeB = infoB.dateObj ? infoB.dateObj.getTime() : 0;
-      return timeB - timeA;
-    });
+    const sorted = [...candidates].sort((a, b) => compareVictimsBySlaPriority(a, b, now));
 
     return sorted.slice(0, 3).map((p) => {
       const visitInfo = getVictimLastVisitInfo(p);
@@ -394,7 +428,7 @@ export default function PetugasDashboard() {
         status: p.kondisiTerakhir || 'Masih Dirawat'
       };
     });
-  }, [victims]);
+  }, [victims, now]);
 
   // ── 4. AKTIVITAS TERBARU (PEMBARUAN DARI 7 HARI TERAKHIR) ──
   const recentActivitiesList = useMemo(() => {
@@ -435,61 +469,90 @@ export default function PetugasDashboard() {
     return [];
   }, [allActualActivities, victims]);
 
-  // ── 5. TABEL: KUNJUNGAN TERBARU ──
+  // ── 5. TABEL: STATUS KASUS KORBAN (INTERAKTIF SORTING DENGAN PRIORITAS SLA DEFAULT) ──
   const tableData = useMemo(() => {
-    return [...victims].sort((a, b) => {
-      const ta = new Date(a.tanggalKunjunganTerakhir || a.tanggalMasukRs || a.tanggalInformasiDiterima || 0).getTime();
-      const tb = new Date(b.tanggalKunjunganTerakhir || b.tanggalMasukRs || b.tanggalInformasiDiterima || 0).getTime();
-      return tb - ta;
-    }).slice(0, 6);
-  }, [victims]);
-
-  const renderStatusBadge = (victim) => {
-    const isDischarged =
-      victim.kondisiTerakhir === 'Sudah Pulang' ||
-      victim.kondisiTerakhir === 'Pulang' ||
-      victim.kondisiTerakhir === 'Selesai' ||
-      victim.statusPemantauan === 'Selesai Dipantau';
-
-    if (isDischarged) {
-      return (
-        <span className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1 rounded-full text-[11px] sm:text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-          <span>Selesai</span>
-        </span>
-      );
+    const list = [...victims];
+    if (!tableSortConfig.key) {
+      return list.sort((a, b) => compareVictimsBySlaPriority(a, b, now)).slice(0, 8);
     }
 
-    return (
-      <span className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1 rounded-full text-[11px] sm:text-xs font-semibold bg-amber-50 text-amber-700 border border-amber-200">
-        <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
-        <span>Menunggu Tindak Lanjut</span>
-      </span>
-    );
+    return list.sort((a, b) => {
+      let valA, valB;
+      switch (tableSortConfig.key) {
+        case 'index':
+          valA = Number(a.id) || 0;
+          valB = Number(b.id) || 0;
+          break;
+        case 'noRegister':
+          valA = String(a.nomorTiket || a.nomorLaporan || a.noRegister || a.caseId || a.id).toLowerCase();
+          valB = String(b.nomorTiket || b.nomorLaporan || b.noRegister || b.caseId || b.id).toLowerCase();
+          break;
+        case 'tglRegister':
+          valA = new Date(a.tanggalMasukRs || a.tanggalInformasiDiterima || 0).getTime();
+          valB = new Date(b.tanggalMasukRs || b.tanggalInformasiDiterima || 0).getTime();
+          break;
+        case 'rumahSakit':
+        case 'asal':
+          valA = String(a.rumahSakit || a.rumahSakitTujuan || a.rumahSakitAsal || '').toLowerCase();
+          valB = String(b.rumahSakit || b.rumahSakitTujuan || b.rumahSakitAsal || '').toLowerCase();
+          break;
+        case 'tglLaka':
+          valA = new Date(a.tanggalKecelakaan || a.tgl_laka || a.tanggalInformasiDiterima || 0).getTime();
+          valB = new Date(b.tanggalKecelakaan || b.tgl_laka || b.tanggalInformasiDiterima || 0).getTime();
+          break;
+        case 'namaKorban':
+          valA = String(a.nama || '').toLowerCase();
+          valB = String(b.nama || '').toLowerCase();
+          break;
+        case 'tlTerakhir': {
+          const lastA = getVictimLastVisitInfo(a);
+          const lastB = getVictimLastVisitInfo(b);
+          valA = new Date(lastA.rawDate || 0).getTime();
+          valB = new Date(lastB.rawDate || 0).getTime();
+          break;
+        }
+        case 'status':
+          valA = String(getMonitoringStatus(a));
+          valB = String(getMonitoringStatus(b));
+          break;
+        default:
+          return 0;
+      }
+
+      if (valA < valB) return tableSortConfig.direction === 'asc' ? -1 : 1;
+      if (valA > valB) return tableSortConfig.direction === 'asc' ? 1 : -1;
+      return 0;
+    }).slice(0, 8);
+  }, [victims, now, tableSortConfig]);
+
+  const renderStatusBadge = (victim) => {
+    return <MonitoringStatusBadge victim={victim} size="sm" />;
   };
 
   return (
     <div className="space-y-5 sm:space-y-6 max-w-full overflow-hidden">
-      {/* ── 1. HEADER UTAMA DASHBOARD (RESPONSIVE) ── */}
-      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
-        <div className="min-w-0">
-          <span className="text-[11px] sm:text-xs font-bold text-sky-600 tracking-wider uppercase block">
-            {formattedHeaderDate}
-          </span>
-          <h1 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight mt-0.5">
+      {/* ── 1. HEADER UTAMA DASHBOARD ── */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200/80 pb-4">
+        <div>
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-[10px] font-bold text-sky-700 bg-sky-50 border border-sky-200/80 px-2 py-0.5 rounded-full uppercase tracking-wider">
+              {formattedHeaderDate}
+            </span>
+          </div>
+          <h1 className="text-2xl font-black text-slate-900 tracking-tight">
             Dashboard Petugas
           </h1>
-          <p className="text-xs sm:text-sm text-slate-500 mt-1 max-w-2xl leading-relaxed">
-            Selamat datang kembali, <strong className="text-slate-800">{officerName}</strong>. Pantau aktivitas dan kelola kunjungan korban laka yang Anda tangani.
+          <p className="text-xs text-slate-500 mt-1">
+            Selamat datang, <strong className="text-slate-800 font-semibold">{officerName}</strong>. Pantau beban kasus, kepatuhan batas waktu SLA 3 hari (72 jam), dan agenda pemantauan RS.
           </p>
         </div>
 
-        {/* Tombol + Tambah Kunjungan (Full-width di HP, Auto di Desktop) */}
+        {/* Tombol + Tambah Kunjungan */}
         <div className="w-full sm:w-auto shrink-0">
           <button
             type="button"
             onClick={() => setIsQuickAddModalOpen(true)}
-            className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-[#145DA0] hover:bg-[#0f497e] text-white shadow-sm shadow-blue-900/15 transition-all cursor-pointer active:scale-95"
+            className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold bg-[#145DA0] hover:bg-[#0f497e] text-white shadow-2xs transition-all cursor-pointer active:scale-95"
           >
             <Plus className="w-4 h-4" />
             <span>Tambah Kunjungan</span>
@@ -497,76 +560,82 @@ export default function PetugasDashboard() {
         </div>
       </div>
 
-      {/* ── 2. BARIS 4 STAT CARDS (RESPONSIVE GRID) ── */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 sm:gap-4 lg:gap-5">
-        {/* Card 1: Total Kunjungan */}
-        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs flex items-center gap-3.5 sm:gap-4">
-          <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-xl bg-blue-50 text-[#145DA0] flex items-center justify-center shrink-0">
-            <ListChecks className="w-5 h-5 sm:w-6 sm:h-6" />
-          </div>
-          <div className="min-w-0">
-            <span className="text-xs text-slate-500 font-medium block truncate">Total Kunjungan</span>
-            <span className="text-2xl sm:text-3xl font-black text-slate-900 leading-none mt-1 block">
-              {totalKunjunganValue}
+      {/* ── 2. SUMMARY KPI STAT CARDS (SERAGAM DENGAN DASHBOARD KABAG & DAFTAR KORBAN) ── */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5 sm:gap-4">
+        {/* Card 1: Beban Kasus Korban */}
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs hover:shadow-xs transition-shadow">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+              Beban Kasus Korban
             </span>
-            <span className="text-[11px] sm:text-xs text-slate-400 font-medium mt-1 sm:mt-1.5 block truncate">
-              +{Math.max(1, totalKunjunganValue)} dari bulan lalu
-            </span>
+            <div className="w-9 h-9 rounded-xl bg-blue-50 text-[#145DA0] border border-blue-100 flex items-center justify-center shrink-0">
+              <Users className="w-4 h-4" />
+            </div>
           </div>
+          <span className="text-2xl sm:text-3xl font-black font-mono tracking-tight text-slate-900 block mt-2">
+            {victims.length}
+          </span>
+          <span className="text-[11px] text-slate-400 block mt-0.5 truncate">
+            Beban kerja kasus aktif
+          </span>
         </div>
 
         {/* Card 2: Kunjungan Hari Ini */}
-        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs flex items-center gap-3.5 sm:gap-4">
-          <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-xl bg-cyan-50 text-cyan-600 flex items-center justify-center shrink-0">
-            <Calendar className="w-5 h-5 sm:w-6 sm:h-6" />
-          </div>
-          <div className="min-w-0">
-            <span className="text-xs text-slate-500 font-medium block truncate">Kunjungan Hari Ini</span>
-            <span className="text-2xl sm:text-3xl font-black text-slate-900 leading-none mt-1 block">
-              {kunjunganHariIniValue}
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs hover:shadow-xs transition-shadow">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+              Kunjungan Hari Ini
             </span>
-            <span className="text-[11px] sm:text-xs text-slate-400 font-medium mt-1 sm:mt-1.5 block truncate">
-              {kunjunganHariIniValue > 0 ? `${kunjunganHariIniValue} kunjungan selesai` : '0 kunjungan selesai'}
-            </span>
+            <div className="w-9 h-9 rounded-xl bg-sky-50 text-[#145DA0] border border-sky-100 flex items-center justify-center shrink-0">
+              <Calendar className="w-4 h-4" />
+            </div>
           </div>
+          <span className="text-2xl sm:text-3xl font-black font-mono tracking-tight text-slate-900 block mt-2">
+            {kunjunganHariIniValue}
+          </span>
+          <span className="text-[11px] text-slate-400 block mt-0.5 truncate">
+            {kunjunganHariIniValue > 0 ? `${kunjunganHariIniValue} kunjungan selesai` : '0 kunjungan selesai'}
+          </span>
         </div>
 
-        {/* Card 3: Kunjungan Bulan Ini */}
-        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs flex items-center gap-3.5 sm:gap-4">
-          <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-xl bg-purple-50 text-purple-600 flex items-center justify-center shrink-0">
-            <BarChart3 className="w-5 h-5 sm:w-6 sm:h-6" />
-          </div>
-          <div className="flex-1 min-w-0">
-            <span className="text-xs text-slate-500 font-medium block truncate">Kunjungan Bulan Ini</span>
-            <span className="text-2xl sm:text-3xl font-black text-slate-900 leading-none mt-1 block">
-              {kunjunganBulanIniValue}
+        {/* Card 3: Kepatuhan SLA Kunjungan */}
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs hover:shadow-xs transition-shadow">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+              Kepatuhan SLA (3 Hari)
             </span>
-            <div className="w-full bg-slate-100 rounded-full h-1 mt-2 mb-1 overflow-hidden">
-              <div
-                className="bg-[#145DA0] h-1 rounded-full transition-all duration-500"
-                style={{ width: `${Math.min(100, Math.round((kunjunganBulanIniValue / 30) * 100))}%` }}
-              />
+            <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-600 border border-emerald-100 flex items-center justify-center shrink-0">
+              <ShieldCheck className="w-4 h-4" />
             </div>
-            <span className="text-[11px] sm:text-xs text-slate-400 font-medium block truncate">
-              Target bulan: 30
-            </span>
           </div>
+          <span className={`text-2xl sm:text-3xl font-black font-mono tracking-tight block mt-2 ${
+            petugasKpi.slaKunjungan !== null && petugasKpi.slaKunjungan < 80 ? 'text-rose-600' : 'text-emerald-600'
+          }`}>
+            {petugasKpi.slaKunjungan !== null ? `${petugasKpi.slaKunjungan}%` : '100%'}
+          </span>
+          <span className="text-[11px] text-slate-400 block mt-0.5 truncate">
+            Ketepatan waktu maks. 72 jam
+          </span>
         </div>
 
         {/* Card 4: Perlu Tindak Lanjut */}
-        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs flex items-center gap-3.5 sm:gap-4">
-          <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center shrink-0">
-            <Clock className="w-5 h-5 sm:w-6 sm:h-6" />
-          </div>
-          <div className="min-w-0">
-            <span className="text-xs text-slate-500 font-medium block truncate">Perlu Tindak Lanjut</span>
-            <span className="text-2xl sm:text-3xl font-black text-slate-900 leading-none mt-1 block">
-              {perluTindakLanjutValue}
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs hover:shadow-xs transition-shadow">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+              Perlu Tindak Lanjut
             </span>
-            <span className="text-[11px] sm:text-xs text-slate-400 font-medium mt-1 sm:mt-1.5 block truncate">
-              Perlu perhatian Anda
-            </span>
+            <div className="w-9 h-9 rounded-xl bg-amber-50 text-amber-600 border border-amber-100 flex items-center justify-center shrink-0">
+              <Clock className="w-4 h-4" />
+            </div>
           </div>
+          <span className={`text-2xl sm:text-3xl font-black font-mono tracking-tight block mt-2 ${
+            perluTindakLanjutValue > 0 ? 'text-amber-600' : 'text-slate-900'
+          }`}>
+            {perluTindakLanjutValue}
+          </span>
+          <span className="text-[11px] text-slate-400 block mt-0.5 truncate">
+            Jadwal pemantauan tiba
+          </span>
         </div>
       </div>
 
@@ -889,7 +958,7 @@ export default function PetugasDashboard() {
                   <div className="flex items-start justify-between gap-2.5">
                     <div className="flex items-center gap-2.5 min-w-0">
                       <div className="w-9 h-9 rounded-full bg-blue-50 text-[#145DA0] font-bold text-xs flex items-center justify-center shrink-0 border border-blue-100">
-                        {initials}
+                        <User className="w-4 h-4 text-[#145DA0]" />
                       </div>
                       <div className="min-w-0">
                         <Link
@@ -948,14 +1017,16 @@ export default function PetugasDashboard() {
                       <span>Lihat Detail</span>
                     </Link>
 
-                    <button
-                      type="button"
-                      onClick={() => setMonitoringVictim(v)}
-                      className="flex-1 py-2 px-3 rounded-xl border border-amber-200 bg-amber-50/70 text-amber-700 hover:bg-amber-100 text-xs font-bold flex items-center justify-center gap-1.5 shadow-2xs transition-colors cursor-pointer"
-                    >
-                      <Edit3 className="w-3.5 h-3.5" />
-                      <span>Catat Kunjungan</span>
-                    </button>
+                    {!isVictimFinished(v) && (
+                      <button
+                        type="button"
+                        onClick={() => setMonitoringVictim(v)}
+                        className="flex-1 py-2 px-3 rounded-xl border border-amber-200 bg-amber-50/70 text-amber-700 hover:bg-amber-100 text-xs font-bold flex items-center justify-center gap-1.5 shadow-2xs transition-colors cursor-pointer"
+                      >
+                        <Edit3 className="w-3.5 h-3.5" />
+                        <span>Catat Kunjungan</span>
+                      </button>
+                    )}
                   </div>
                 </div>
               );
@@ -966,21 +1037,70 @@ export default function PetugasDashboard() {
         {/* ── TAMPILAN DESKTOP: FULL TABLE (LAYAR TABLET & DESKTOP >= 768px) ── */}
         <div className="hidden md:block overflow-x-auto">
           <table className="w-full text-left border-collapse text-xs">
-            <thead>
-              <tr className="bg-slate-50/70 border-b border-slate-200/80 text-slate-400 font-bold uppercase tracking-wider text-[10px]">
-                <th className="py-3.5 px-4 w-12 text-center">NO.</th>
-                <th className="py-3.5 px-4">KORBAN / ID BERKAS</th>
-                <th className="py-3.5 px-4">RUMAH SAKIT</th>
-                <th className="py-3.5 px-4">TANGGAL KECELAKAAN</th>
-                <th className="py-3.5 px-4">TANGGAL KUNJUNGAN</th>
-                <th className="py-3.5 px-4 text-center">STATUS</th>
-                <th className="py-3.5 px-4 text-center w-24">AKSI</th>
+            <thead className="bg-slate-50/90 border-b border-slate-200/90">
+              <tr>
+                <SortableHeader
+                  label="#"
+                  sortKey="index"
+                  currentSortKey={tableSortConfig.key}
+                  currentSortDirection={tableSortConfig.direction}
+                  onSort={handleTableSort}
+                  align="center"
+                  className="w-12 text-center"
+                />
+                <SortableHeader
+                  label="Nama Korban"
+                  sortKey="namaKorban"
+                  currentSortKey={tableSortConfig.key}
+                  currentSortDirection={tableSortConfig.direction}
+                  onSort={handleTableSort}
+                />
+                <SortableHeader
+                  label="Rumah Sakit"
+                  sortKey="rumahSakit"
+                  currentSortKey={tableSortConfig.key}
+                  currentSortDirection={tableSortConfig.direction}
+                  onSort={handleTableSort}
+                />
+                <SortableHeader
+                  label="Tgl Kecelakaan"
+                  sortKey="tglLaka"
+                  currentSortKey={tableSortConfig.key}
+                  currentSortDirection={tableSortConfig.direction}
+                  onSort={handleTableSort}
+                />
+                <SortableHeader
+                  label="TGL Masuk RS"
+                  sortKey="tglRegister"
+                  currentSortKey={tableSortConfig.key}
+                  currentSortDirection={tableSortConfig.direction}
+                  onSort={handleTableSort}
+                />
+                <SortableHeader
+                  label="TL Terakhir"
+                  sortKey="tlTerakhir"
+                  currentSortKey={tableSortConfig.key}
+                  currentSortDirection={tableSortConfig.direction}
+                  onSort={handleTableSort}
+                />
+                <SortableHeader
+                  label="Status"
+                  sortKey="status"
+                  currentSortKey={tableSortConfig.key}
+                  currentSortDirection={tableSortConfig.direction}
+                  onSort={handleTableSort}
+                  align="center"
+                  className="text-center"
+                />
+                <th className="py-3 px-4 font-bold text-slate-700 uppercase tracking-wider text-[11px] text-center w-24">
+                  Aksi
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {tableData.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-12 text-center text-slate-400">
+                  <td colSpan={8} className="py-12 text-center text-slate-400">
                     Belum ada aktivitas kunjungan terbaru yang dicatat.
                   </td>
                 </tr>
@@ -989,19 +1109,21 @@ export default function PetugasDashboard() {
                   const initials = getInitials(v.nama);
                   const nomorUrut = String(idx + 1).padStart(2, '0');
                   const lastVisitInfo = getVictimLastVisitInfo(v);
+                  const isFinished = isVictimFinished(v);
+                  const refInfo = getReferralPerspectiveInfo(v, null, currentUser);
 
                   return (
                     <tr key={v.id} className="hover:bg-slate-50/70 transition-colors">
-                      {/* NO. */}
-                      <td className="py-3.5 px-4 font-mono text-slate-400 text-center text-xs">
+                      {/* # (NO.) */}
+                      <td className="py-3.5 px-3.5 font-mono text-slate-400 text-center font-medium text-xs">
                         {nomorUrut}
                       </td>
 
-                      {/* KORBAN / ID BERKAS */}
-                      <td className="py-3.5 px-4 whitespace-nowrap">
-                        <div className="flex items-center gap-3">
+                      {/* Nama Korban */}
+                      <td className="py-3.5 px-3.5 font-bold text-slate-900 whitespace-nowrap text-xs">
+                        <div className="flex items-center gap-2.5">
                           <div className="w-8 h-8 rounded-full bg-blue-50 text-[#145DA0] font-bold text-xs flex items-center justify-center shrink-0 border border-blue-100">
-                            {initials}
+                            <User className="w-4 h-4 text-[#145DA0]" />
                           </div>
                           <div>
                             <Link
@@ -1011,47 +1133,53 @@ export default function PetugasDashboard() {
                               {v.nama}
                             </Link>
                             <span className="text-[10px] text-slate-400 font-mono block mt-0.5">
-                              {v.nomorTiket || v.nomorLaporan || `JR/PKU/${currentYear}/00${800 + idx * 11}`}
+                              {v.nik ? `NIK: ${v.nik}` : `ID: ${v.id}`}
                             </span>
                           </div>
                         </div>
                       </td>
 
-                      {/* RUMAH SAKIT */}
-                      <td className="py-3.5 px-4 whitespace-nowrap">
-                        <div className="flex items-center gap-1.5 text-xs font-medium text-slate-700">
+                      {/* Rumah Sakit (Sesuai Sudut Pandang Faskes Penangan) */}
+                      <td className="py-3.5 px-3.5 text-slate-800 font-medium whitespace-nowrap text-xs">
+                        <div className="flex items-center gap-1.5 font-semibold text-slate-900">
                           <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                          <span>{v.rumahSakit || '—'}</span>
+                          <span>{refInfo.displayHospital}</span>
                         </div>
+                        {refInfo.isReferred && refInfo.badgeLabel && (
+                          <span className={`text-[10px] ${refInfo.badgeColorClass} px-1.5 py-0.5 rounded border font-semibold inline-block mt-0.5 ml-5 shadow-2xs`}>
+                            {refInfo.badgeLabel}
+                          </span>
+                        )}
                       </td>
 
-                      {/* TANGGAL KECELAKAAN */}
-                      <td className="py-3.5 px-4 whitespace-nowrap">
+                      {/* Tgl Kecelakaan */}
+                      <td className="py-3.5 px-3.5 text-slate-700 whitespace-nowrap font-medium text-xs">
                         <span className="text-slate-800 font-medium block">
-                          {formatDateShort(v.tanggalKecelakaan || v.tanggalInformasiDiterima)}
-                        </span>
-                        <span className="text-[10px] text-slate-400 block mt-0.5">
-                          {formatTime(v.tanggalKecelakaan || v.tanggalInformasiDiterima) || '09.30 WIB'}
+                          {formatDateIndo(v.tanggalKecelakaan || v.tgl_laka || v.tanggalInformasiDiterima)}
                         </span>
                       </td>
 
-                      {/* TANGGAL KUNJUNGAN */}
-                      <td className="py-3.5 px-4 whitespace-nowrap">
+                      {/* TGL Masuk RS */}
+                      <td className="py-3.5 px-3.5 text-slate-700 whitespace-nowrap font-medium text-xs">
                         <span className="text-slate-800 font-medium block">
-                          {formatDateShort(lastVisitInfo.rawDate)}
-                        </span>
-                        <span className="text-[10px] text-slate-400 block mt-0.5">
-                          {lastVisitInfo.waktu}
+                          {formatDateShort(v.tanggalMasukRs || v.tanggalInformasiDiterima)}
                         </span>
                       </td>
 
-                      {/* STATUS */}
-                      <td className="py-3.5 px-4 text-center whitespace-nowrap">
+                      {/* TL Terakhir (Tanggal & Keterangan Kunjungan) */}
+                      <td className="py-3.5 px-3.5 text-slate-800 whitespace-nowrap text-xs">
+                        <span className="text-slate-800 font-medium block">
+                          {formatDateIndo(lastVisitInfo.rawDate)}
+                        </span>
+                      </td>
+
+                      {/* Status */}
+                      <td className="py-3.5 px-3.5 text-center whitespace-nowrap">
                         {renderStatusBadge(v)}
                       </td>
 
-                      {/* AKSI: HANYA LIHAT DETAIL & EDIT/FORM (TOMBOL HAPUS DI DALAM DETAIL SESUAI INSTRUKSI) */}
-                      <td className="py-3.5 px-4 text-center whitespace-nowrap">
+                      {/* Aksi: Jika korban Pulang/Selesai, tidak bisa catat pemantauan lagi */}
+                      <td className="py-3.5 px-3.5 text-center whitespace-nowrap">
                         <div className="flex items-center justify-center gap-1.5">
                           {/* Tombol Lihat Detail */}
                           <Link
@@ -1063,14 +1191,20 @@ export default function PetugasDashboard() {
                           </Link>
 
                           {/* Tombol Catat / Form Pemantauan */}
-                          <button
-                            type="button"
-                            onClick={() => setMonitoringVictim(v)}
-                            className="w-7 h-7 rounded-lg border border-amber-200 bg-amber-50 text-amber-600 hover:bg-amber-100 flex items-center justify-center transition-colors shadow-2xs cursor-pointer"
-                            title="Catat Kunjungan / Pemantauan"
-                          >
-                            <Edit3 className="w-3.5 h-3.5" />
-                          </button>
+                          {!isFinished ? (
+                            <button
+                              type="button"
+                              onClick={() => setMonitoringVictim(v)}
+                              className="w-7 h-7 rounded-lg border border-amber-200 bg-amber-50 text-amber-600 hover:bg-amber-100 flex items-center justify-center transition-colors shadow-2xs cursor-pointer"
+                              title="Catat Kunjungan / Pemantauan"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
+                          ) : (
+                            <span className="inline-flex items-center p-1 rounded text-emerald-700 bg-emerald-50 border border-emerald-200" title="Selesai">
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                            </span>
+                          )}
                         </div>
                       </td>
                     </tr>

@@ -128,6 +128,12 @@ export function AuthProvider({ children }) {
         if (me && me.role) {
           // Token valid, sinkronkan profil user terbaru dari server
           setCurrentUser((prev) => {
+            const localOfficer = me.officer_id
+              ? storageService.getOfficers().find((o) => String(o.backendOfficerId || o.id) === String(me.officer_id))
+              : null;
+            const resolvedEmail = me.email || (localOfficer?.email && localOfficer.email !== '—' ? localOfficer.email : null) || prev?.profile?.email;
+            const resolvedPhone = me.telepon || (localOfficer?.telepon && localOfficer.telepon !== '—' ? localOfficer.telepon : null) || prev?.profile?.telepon;
+
             const updated = {
               role: me.role,
               token,
@@ -139,8 +145,8 @@ export function AuthProvider({ children }) {
                 username: me.username,
                 jabatan: me.jabatan || prev?.profile?.jabatan,
                 wilayah: me.wilayah || prev?.profile?.wilayah,
-                email: me.email || prev?.profile?.email,
-                telepon: me.telepon || prev?.profile?.telepon || (me.role === 'kabag' ? '0811-7654-3210' : '0812-3456-7890'),
+                email: resolvedEmail,
+                telepon: resolvedPhone || (me.role === 'kabag' ? '0811-7654-3210' : '0812-3456-7890'),
                 avatar: prev?.profile?.avatar || (me.nama ? me.nama.slice(0, 2).toUpperCase() : 'JR')
               }
             };
@@ -170,7 +176,7 @@ export function AuthProvider({ children }) {
                  o.backendOfficerId === currentUser.profile?.backendOfficerId ||
                  (o.nama && currentUser.profile?.nama && o.nama.trim().toLowerCase() === currentUser.profile.nama.trim().toLowerCase())
         );
-        if (myOfficer && Array.isArray(myOfficer.plottingRs)) {
+        if (myOfficer) {
           setCurrentUser((prev) => {
             if (!prev) return prev;
             const updated = {
@@ -178,10 +184,12 @@ export function AuthProvider({ children }) {
               profile: {
                 ...prev.profile,
                 nama: myOfficer.nama || prev.profile?.nama,
-                nip: myOfficer.nip || prev.profile?.nip,
+                nip: (myOfficer.nip && myOfficer.nip !== '—') ? myOfficer.nip : prev.profile?.nip,
                 jabatan: myOfficer.jabatan || prev.profile?.jabatan,
                 wilayah: myOfficer.wilayah || prev.profile?.wilayah,
-                plottingRs: myOfficer.plottingRs
+                email: (myOfficer.email && myOfficer.email !== '—') ? myOfficer.email : prev.profile?.email,
+                telepon: (myOfficer.telepon && myOfficer.telepon !== '—') ? myOfficer.telepon : prev.profile?.telepon,
+                plottingRs: Array.isArray(myOfficer.plottingRs) ? myOfficer.plottingRs : prev.profile?.plottingRs
               }
             };
             storageService.setCurrentUser(updated);
@@ -219,15 +227,49 @@ export function AuthProvider({ children }) {
       };
     }
 
-    // 1. Coba login ke Backend Express + MySQL terlebih dahulu
-    let backendNetworkError = false;
-    let authErrorMessage = '';
-    const candidates = [emailLower];
+    const allOfficers = storageService.getOfficers();
     const userPrefix = emailLower.split('@')[0];
-    if (userPrefix && !candidates.includes(userPrefix)) {
-      candidates.push(userPrefix);
+    const retiredList = typeof localStorage !== 'undefined'
+      ? JSON.parse(localStorage.getItem('jr_retired_officer_emails') || '[]')
+      : [];
+
+    // 1. Validasi: Jangan izinkan masuk menggunakan email lama yang telah diganti
+    const isOldReplacedEmail =
+      retiredList.map((e) => e.toLowerCase().trim()).includes(emailLower) ||
+      allOfficers.some((o) => Array.isArray(o.previousEmails) && o.previousEmails.map((e) => e.toLowerCase().trim()).includes(emailLower)) ||
+      allOfficers.some((o) => {
+        const uName = (o.username || '').toLowerCase().trim();
+        const curEmail = (o.email || '').toLowerCase().trim();
+        return uName && userPrefix === uName && curEmail && curEmail !== '—' && curEmail !== emailLower;
+      });
+
+    if (isOldReplacedEmail) {
+      return {
+        success: false,
+        message: 'Email kedinasan ini sudah tidak aktif karena telah diperbarui. Silakan masuk menggunakan email kedinasan terbaru Anda.'
+      };
     }
 
+    // 2. Cari petugas yang saat ini memegang email aktif ini (ID petugas sebagai Primary Key)
+    const matchedOfficer = allOfficers.find((o) => {
+      const oEmail = (o.email || '').toLowerCase().trim();
+      return oEmail && oEmail !== '—' && oEmail === emailLower;
+    });
+
+    let candidates = [];
+    if (matchedOfficer) {
+      const targetUsername = matchedOfficer.username ||
+        (matchedOfficer.backendOfficerId === 1 ? 'petugas' : (matchedOfficer.backendOfficerId ? `petugas${matchedOfficer.backendOfficerId}` : 'petugas'));
+      candidates = [targetUsername, emailLower];
+    } else if (emailLower.includes('kabag') || emailLower.includes('admin') || userPrefix === 'kabag') {
+      candidates = ['kabag', emailLower, userPrefix];
+    } else {
+      candidates = [emailLower, userPrefix];
+    }
+
+    // 3. Coba login ke Backend Express + MySQL terlebih dahulu
+    let backendNetworkError = false;
+    let authErrorMessage = '';
     let backendRes = null;
     for (const ident of candidates) {
       try {
@@ -292,21 +334,34 @@ export function AuthProvider({ children }) {
         }
       }
 
+      // Gunakan ID petugas sebagai Primary Key tunggal agar seluruh relasi korban & histori tetap terjaga
+      const finalOfficer = matchedOfficer || storageService.getOfficers().find(
+        (o) => (o.email && o.email.toLowerCase().trim() === emailLower) ||
+               (u.officerId && (String(o.backendOfficerId) === String(u.officerId) || String(o.id) === `PET-${String(u.officerId).padStart(2, '0')}`))
+      );
+
+      const finalId = finalOfficer?.id || (u.officerId ? `PET-${String(u.officerId).padStart(2, '0')}` : (u.role === 'kabag' ? 'KABAG-01' : 'PET-01'));
+      const finalBackendOfficerId = finalOfficer?.backendOfficerId || finalOfficer?.backendId || u.officerId || null;
+      const finalNama = finalOfficer?.nama || u.nama || u.username;
+      const finalPlottingRs = (finalOfficer && Array.isArray(finalOfficer.plottingRs) && finalOfficer.plottingRs.length > 0)
+        ? finalOfficer.plottingRs
+        : officerPlottingRs;
+
       const newUser = {
         role: u.role,
         token: backendRes.token,
         profile: {
-          id: u.officerId ? `PET-${String(u.officerId).padStart(2, '0')}` : 'KABAG-01',
+          id: finalId,
           backendUserId: u.userId,
-          backendOfficerId: u.officerId,  
-          nama: u.nama || u.username,
+          backendOfficerId: finalBackendOfficerId,
+          nama: finalNama,
           username: u.username,
-          jabatan: u.role === 'kabag' ? 'Kepala Bagian Operasional' : 'Petugas Lapangan',
+          jabatan: finalOfficer?.jabatan || (u.role === 'kabag' ? 'Kepala Bagian Operasional' : 'Mobile Service Officer'),
           cabang: 'Cabang Utama Riau',
-          wilayah: 'Pekanbaru',
+          wilayah: finalOfficer?.wilayah || 'Pekanbaru',
           email: emailLower,
-          avatar,
-          plottingRs: officerPlottingRs
+          avatar: finalOfficer?.avatar || avatar,
+          plottingRs: finalPlottingRs
         }
       };
 

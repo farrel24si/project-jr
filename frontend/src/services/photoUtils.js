@@ -4,6 +4,98 @@
  * directly onto the photo canvas before compression.
  */
 
+/**
+ * Safely converts an uploaded or camera image File to a downscaled JPEG Data URL
+ * using createImageBitmap or URL.createObjectURL to avoid huge memory allocations
+ * and prevent browser tab crashes on mobile devices (Android / iOS).
+ */
+export async function fileToSafeDataUrl(file, maxWidth = 1024, maxHeight = 768, quality = 0.8) {
+  if (!file) return null;
+
+  // 1. Try createImageBitmap with resize (fastest, memory safe)
+  if (typeof window !== 'undefined' && typeof window.createImageBitmap === 'function') {
+    try {
+      const bitmap = await window.createImageBitmap(file, {
+        resizeWidth: maxWidth,
+        resizeQuality: 'medium'
+      });
+      const canvas = document.createElement('canvas');
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(bitmap, 0, 0);
+        if (typeof bitmap.close === 'function') bitmap.close();
+        return canvas.toDataURL('image/jpeg', quality);
+      }
+    } catch (e) {
+      // Fallback if browser doesn't support options or throws
+    }
+  }
+
+  // 2. Fallback: URL.createObjectURL (doesn't load huge string into JS memory)
+  if (typeof window !== 'undefined' && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+    try {
+      const objectUrl = URL.createObjectURL(file);
+      const dataUrl = await new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+          try {
+            URL.revokeObjectURL(objectUrl);
+            let width = img.width;
+            let height = img.height;
+            if (width > height) {
+              if (width > maxWidth) {
+                height = Math.round((height * maxWidth) / width);
+                width = maxWidth;
+              }
+            } else {
+              if (height > maxHeight) {
+                width = Math.round((width * maxHeight) / height);
+                height = maxHeight;
+              }
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) {
+              return resolve(null);
+            }
+            ctx.drawImage(img, 0, 0, width, height);
+            resolve(canvas.toDataURL('image/jpeg', quality));
+          } catch (err) {
+            reject(err);
+          }
+        };
+        img.onerror = () => {
+          URL.revokeObjectURL(objectUrl);
+          reject(new Error('Gagal memuat gambar dari file'));
+        };
+        img.src = objectUrl;
+      });
+      if (dataUrl) return dataUrl;
+    } catch (e) {
+      // Fallback to FileReader
+    }
+  }
+
+  // 3. Fallback: FileReader
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      try {
+        const compressed = await compressImage(e.target.result, maxWidth, maxHeight, quality);
+        resolve(compressed);
+      } catch (err) {
+        resolve(e.target.result);
+      }
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
 export function compressImage(imageDataUrl, maxWidth = 640, maxHeight = 480, quality = 0.6) {
   return new Promise((resolve) => {
     if (!imageDataUrl || typeof imageDataUrl !== 'string') {
@@ -55,6 +147,8 @@ export function stampPhotoWatermark(
     latitude = null,
     longitude = null,
     akurasiLokasi = null,
+    sumberKoordinat = null,
+    isSimulated = false,
     korbanNama = null
   } = {},
   maxWidth = 720,
@@ -202,9 +296,19 @@ export function stampPhotoWatermark(
         const gpsTextWidth = ctx.measureText('Titik GPS: ').width;
         ctx.font = `bold ${fontSize}px monospace`;
         ctx.fillStyle = '#4ADE80';
-        const gpsString = (latitude !== null && longitude !== null)
-          ? `${Number(latitude).toFixed(6)}, ${Number(longitude).toFixed(6)}${akurasiLokasi ? ` (Akurasi: ±${akurasiLokasi}m)` : ''}`
-          : 'GPS Sedang Dikalibrasi';
+        const hasCoords = Number.isFinite(Number(latitude)) && Number.isFinite(Number(longitude));
+        let gpsString = 'GPS Sedang Dikalibrasi';
+        if (hasCoords) {
+          const latStr = Number(latitude).toFixed(6);
+          const lngStr = Number(longitude).toFixed(6);
+          const isFallback = Boolean(isSimulated) || sumberKoordinat === 'Koordinat Rumah Sakit';
+          if (isFallback) {
+            gpsString = `${latStr}, ${lngStr} [Titik Acuan RS]`;
+          } else {
+            const accStr = Number.isFinite(Number(akurasiLokasi)) ? ` (Akurasi: ±${Math.round(akurasiLokasi)}m)` : '';
+            gpsString = `${latStr}, ${lngStr}${accStr} [GPS Perangkat]`;
+          }
+        }
         ctx.fillText(gpsString, paddingLeft + gpsTextWidth, currentY);
 
         resolve(canvas.toDataURL('image/jpeg', quality));

@@ -4,33 +4,61 @@ import {
   RefreshCw,
   AlertCircle,
   Check,
-  Image as ImageIcon,
   ShieldCheck,
   MapPin,
   Calendar,
   User,
-  ExternalLink
+  Trash2,
+  Plus,
+  Eye,
+  Video,
+  X
 } from 'lucide-react';
-import { stampPhotoWatermark, compressImage } from '../../services/photoUtils';
+import { stampPhotoWatermark, compressImage, fileToSafeDataUrl } from '../../services/photoUtils';
 
 export default function CameraCapture({
   onPhotoCaptured,
+  onPhotosChanged,
   initialPhoto = null,
+  initialPhotos = [],
   metadata = {}
 }) {
-  const [photoDataUrl, setPhotoDataUrl] = useState(initialPhoto);
+  // Inisialisasi daftar foto dari initialPhotos atau initialPhoto
+  const [photos, setPhotos] = useState(() => {
+    if (Array.isArray(initialPhotos) && initialPhotos.length > 0) {
+      return initialPhotos.filter(Boolean);
+    }
+    if (initialPhoto) {
+      return [initialPhoto];
+    }
+    return [];
+  });
+
   const [isStreaming, setIsStreaming] = useState(false);
   const [errorMessage, setErrorMessage] = useState(null);
   const [isInitializing, setIsInitializing] = useState(false);
-  const [isProcessingWatermark, setIsProcessingWatermark] = useState(false);
-  const [capturedTimestamp, setCapturedTimestamp] = useState(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [processingStatus, setProcessingStatus] = useState('');
   const [realtimeNow, setRealtimeNow] = useState(new Date());
+  const [selectedZoomPhoto, setSelectedZoomPhoto] = useState(null);
+  const [replacingIndex, setReplacingIndex] = useState(null);
 
   const videoRef = useRef(null);
   const streamRef = useRef(null);
-  const fileInputRef = useRef(null);
+  const cameraInputRef = useRef(null);
 
-  // Update jam realtime setiap detik untuk preview kamera
+  // Sinkronisasi saat initialPhoto/initialPhotos berubah dari luar (misal restore session atau reset form)
+  useEffect(() => {
+    if (Array.isArray(initialPhotos) && initialPhotos.length > 0) {
+      setPhotos(initialPhotos.filter(Boolean));
+    } else if (initialPhoto) {
+      setPhotos([initialPhoto]);
+    } else {
+      setPhotos([]);
+    }
+  }, [initialPhoto, initialPhotos]);
+
+  // Update jam realtime setiap detik untuk live stream
   useEffect(() => {
     const timer = setInterval(() => {
       setRealtimeNow(new Date());
@@ -38,12 +66,30 @@ export default function CameraCapture({
     return () => clearInterval(timer);
   }, []);
 
+  const triggerNotify = (newPhotos) => {
+    setPhotos(newPhotos);
+    if (onPhotosChanged) {
+      onPhotosChanged(newPhotos);
+    }
+    if (onPhotoCaptured) {
+      onPhotoCaptured(newPhotos[0] || null);
+    }
+  };
+
   const startCamera = async () => {
     setIsInitializing(true);
     setErrorMessage(null);
     try {
+      const isSecure = typeof window !== 'undefined'
+        ? (window.isSecureContext ?? (window.location.protocol === 'https:' || window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'))
+        : true;
+
+      if (!isSecure) {
+        throw new Error('NON_SECURE_CONTEXT');
+      }
+
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error('Browser tidak mendukung akses kamera langsung. Gunakan opsi unggah file.');
+        throw new Error('Browser tidak mendukung akses kamera langsung. Gunakan tombol "Buka Kamera HP".');
       }
 
       stopCamera();
@@ -59,7 +105,7 @@ export default function CameraCapture({
           audio: false
         });
       } catch (err) {
-        // Fallback untuk webcam laptop / PC atau perangkat tanpa kamera environment
+        // Fallback jika kamera belakang tidak ditemukan atau error
         stream = await navigator.mediaDevices.getUserMedia({
           video: true,
           audio: false
@@ -69,21 +115,18 @@ export default function CameraCapture({
       streamRef.current = stream;
       setIsStreaming(true);
     } catch (err) {
-      console.warn('Camera access error:', err);
-      let msg = 'Izin kamera ditolak atau perangkat kamera tidak terdeteksi.';
-      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        msg = 'Izin akses kamera ditolak oleh browser. Mohon izinkan akses kamera di pengaturan browser atau gunakan unggah foto.';
-      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-        msg = 'Kamera tidak ditemukan pada perangkat Anda.';
+      console.warn('Camera access error, fallback to device camera input:', err);
+      if (cameraInputRef.current) {
+        cameraInputRef.current.click();
+      } else {
+        setErrorMessage('Izin kamera ditolak atau kamera tidak terdeteksi pada perangkat Anda.');
       }
-      setErrorMessage(msg);
       setIsStreaming(false);
     } finally {
       setIsInitializing(false);
     }
   };
 
-  // Pastikan stream terhubung dan video langsung play saat elemen video dirender di DOM
   useEffect(() => {
     if (isStreaming && videoRef.current && streamRef.current) {
       if (videoRef.current.srcObject !== streamRef.current) {
@@ -103,40 +146,66 @@ export default function CameraCapture({
     setIsStreaming(false);
   };
 
-  const processAndApplyWatermark = async (rawUrl) => {
-    setIsProcessingWatermark(true);
+  const processAndApplyWatermark = async (rawUrl, targetIndex = null) => {
+    setIsProcessing(true);
+    setProcessingStatus('Membubuhkan Watermark Resmi & Kompresi...');
     try {
       const nowRealtimeIso = new Date().toISOString();
-      setCapturedTimestamp(nowRealtimeIso);
+      const latVal = metadata.latitude !== undefined && metadata.latitude !== null
+        ? Number(metadata.latitude)
+        : (metadata.lat_petugas !== undefined && metadata.lat_petugas !== null ? Number(metadata.lat_petugas) : null);
+      const lngVal = metadata.longitude !== undefined && metadata.longitude !== null
+        ? Number(metadata.longitude)
+        : (metadata.lng_petugas !== undefined && metadata.lng_petugas !== null ? Number(metadata.lng_petugas) : null);
+      const accVal = metadata.akurasiLokasi !== undefined && metadata.akurasiLokasi !== null
+        ? Number(metadata.akurasiLokasi)
+        : (metadata.akurasi_lokasi_meter !== undefined && metadata.akurasi_lokasi_meter !== null ? Number(metadata.akurasi_lokasi_meter) : null);
 
       const watermarkData = {
         petugasNama: metadata.petugasNama || 'Petugas Lapangan Jasa Raharja',
-        waktu: nowRealtimeIso, // Menggunakan waktu realtime saat pengambilan foto
+        waktu: nowRealtimeIso,
         lokasi: metadata.rumahSakit || 'Rumah Sakit',
-        latitude: metadata.latitude || null,
-        longitude: metadata.longitude || null,
-        akurasiLokasi: metadata.akurasiLokasi || null,
-        korbanNama: metadata.korbanNama || null
+        latitude: Number.isFinite(latVal) ? latVal : null,
+        longitude: Number.isFinite(lngVal) ? lngVal : null,
+        akurasiLokasi: Number.isFinite(accVal) ? accVal : null,
+        sumberKoordinat: metadata.sumberKoordinat || metadata.sumber_koordinat || (metadata.isSimulated ? 'Koordinat Rumah Sakit' : (Number.isFinite(latVal) ? 'GPS Perangkat' : null)),
+        isSimulated: Boolean(metadata.isSimulated),
+        korbanNama: metadata.korbanNama && typeof metadata.korbanNama === 'string' ? metadata.korbanNama.trim() : (metadata.korbanNama || null)
       };
 
       const watermarked = await stampPhotoWatermark(rawUrl, watermarkData, 720, 540, 0.75);
-      setPhotoDataUrl(watermarked);
-      if (onPhotoCaptured) {
-        onPhotoCaptured(watermarked);
+
+      let updatedPhotos;
+      if (targetIndex !== null && targetIndex >= 0 && targetIndex < photos.length) {
+        // Ganti foto pada indeks tertentu
+        updatedPhotos = [...photos];
+        updatedPhotos[targetIndex] = watermarked;
+      } else {
+        // Tambahkan foto baru ke daftar
+        updatedPhotos = [...photos, watermarked];
       }
+
+      triggerNotify(updatedPhotos);
+      setReplacingIndex(null);
     } catch (err) {
       console.error('Error applying watermark:', err);
       const fallback = await compressImage(rawUrl, 640, 480, 0.7);
-      setPhotoDataUrl(fallback);
-      if (onPhotoCaptured) {
-        onPhotoCaptured(fallback);
+      let updatedPhotos;
+      if (targetIndex !== null && targetIndex >= 0 && targetIndex < photos.length) {
+        updatedPhotos = [...photos];
+        updatedPhotos[targetIndex] = fallback;
+      } else {
+        updatedPhotos = [...photos, fallback];
       }
+      triggerNotify(updatedPhotos);
+      setReplacingIndex(null);
     } finally {
-      setIsProcessingWatermark(false);
+      setIsProcessing(false);
+      setProcessingStatus('');
     }
   };
 
-  const takePhoto = async () => {
+  const takePhotoFromLiveStream = async () => {
     if (!videoRef.current) return;
     try {
       const video = videoRef.current;
@@ -148,33 +217,69 @@ export default function CameraCapture({
 
       const rawUrl = canvas.toDataURL('image/jpeg', 0.85);
       stopCamera();
-      await processAndApplyWatermark(rawUrl);
+      await processAndApplyWatermark(rawUrl, replacingIndex);
     } catch (err) {
-      console.error('Error capturing photo:', err);
-      setErrorMessage('Gagal memproses hasil foto. Coba lagi.');
+      console.error('Error capturing photo from live stream:', err);
+      setErrorMessage('Gagal memproses hasil foto kamera. Coba lagi.');
     }
   };
 
-  const retakePhoto = () => {
-    setPhotoDataUrl(null);
-    setCapturedTimestamp(null);
-    if (onPhotoCaptured) {
-      onPhotoCaptured(null);
+  const handleFileInputChange = async (e, targetIndex = null) => {
+    const file = e.target.files?.[0];
+    if (!file) {
+      setReplacingIndex(null);
+      return;
     }
+
+    setIsProcessing(true);
+    setProcessingStatus('Membaca & Mengoptimalkan Foto...');
+    setErrorMessage(null);
+
+    try {
+      // Mengubah file foto kamera HP menjadi data URL resolusi aman (mencegah tab crash / OOM di browser HP)
+      const safeDataUrl = await fileToSafeDataUrl(file, 1024, 768, 0.8);
+      stopCamera();
+      await processAndApplyWatermark(safeDataUrl, targetIndex);
+    } catch (err) {
+      console.error('Gagal memproses foto dari file input:', err);
+      setErrorMessage('Gagal memproses file foto. Pastikan format foto didukung (JPG, PNG).');
+    } finally {
+      setIsProcessing(false);
+      setProcessingStatus('');
+      // Reset input agar dapat memilih foto yang sama atau mengambil ulang
+      if (e.target) {
+        e.target.value = '';
+      }
+    }
+  };
+
+  const handleDeletePhoto = (indexToDelete, e) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    const updated = photos.filter((_, idx) => idx !== indexToDelete);
+    triggerNotify(updated);
+  };
+
+  const handleStartReplacePhoto = (indexToReplace, e) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    setReplacingIndex(indexToReplace);
     startCamera();
   };
 
-  const handleFileUpload = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = async (event) => {
-      const rawUrl = event.target.result;
-      stopCamera();
-      await processAndApplyWatermark(rawUrl);
-    };
-    reader.readAsDataURL(file);
+  const handleOpenHpCamera = (e) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    setReplacingIndex(null);
+    if (cameraInputRef.current) {
+      cameraInputRef.current.click();
+    }
   };
 
   useEffect(() => {
@@ -183,14 +288,7 @@ export default function CameraCapture({
     };
   }, []);
 
-  const d = capturedTimestamp ? new Date(capturedTimestamp) : (metadata.waktu ? new Date(metadata.waktu) : new Date());
-  const formattedTime = d.toLocaleDateString('id-ID', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric'
-  }) + ', ' + d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).replace(/:/g, '.') + ' WIB';
-
-  // Format jam realtime berjalan
+  // Format jam realtime untuk live viewfinder
   const formattedRealtimeClock = realtimeNow.toLocaleDateString('id-ID', {
     day: '2-digit',
     month: 'short',
@@ -198,67 +296,44 @@ export default function CameraCapture({
   }) + ', ' + realtimeNow.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).replace(/:/g, '.') + ' WIB';
 
   return (
-    <div className="space-y-2.5">
-      <div className="flex items-center justify-between">
+    <div className="space-y-3">
+      {/* Hidden File Input: Camera */}
+      <input
+        type="file"
+        ref={cameraInputRef}
+        accept="image/*"
+        capture="environment"
+        className="hidden"
+        onClick={(e) => {
+          e.target.value = null;
+        }}
+        onChange={(e) => handleFileInputChange(e, replacingIndex)}
+      />
+
+      <div className="flex items-center justify-between flex-wrap gap-2">
         <label className="block text-xs font-bold text-slate-800 flex items-center gap-1.5">
           <Camera className="w-3.5 h-3.5 text-[#145DA0]" />
           <span>Foto Dokumentasi &amp; Watermark Lapangan</span>
           <span className="text-red-500">*Wajib</span>
         </label>
-        {photoDataUrl && (
-          <span className="inline-flex items-center gap-1 text-[11px] text-emerald-700 font-bold bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
-            <Check className="w-3 h-3 text-emerald-600" /> Foto Terstempel
+        {photos.length > 0 && (
+          <span className="inline-flex items-center gap-1 text-[11px] text-emerald-700 font-bold bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
+            <Check className="w-3 h-3 text-emerald-600" />
+            <span>{photos.length} Foto Terlampir &amp; Terstempel</span>
           </span>
         )}
       </div>
 
-      {/* Captured Preview */}
-      {photoDataUrl ? (
-        <div className="relative rounded-xl overflow-hidden border border-slate-300 bg-slate-900 shadow-sm flex flex-col items-center">
-          <img
-            src={photoDataUrl}
-            alt="Bukti Kunjungan Terstempel"
-            className="w-full max-h-72 object-contain bg-black"
-          />
-
-          {/* Watermark Verification Badge Info Bar */}
-          <div className="w-full p-3 bg-slate-900 border-t border-slate-800 text-xs space-y-1.5">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-bold text-emerald-400 flex items-center gap-1">
-                <ShieldCheck className="w-3.5 h-3.5" />
-                <span>Watermark Resmi PT Jasa Raharja Tersemat</span>
-              </span>
-              <button
-                type="button"
-                onClick={retakePhoto}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-semibold bg-white hover:bg-slate-100 text-slate-800 shadow-2xs transition-colors cursor-pointer"
-              >
-                <RefreshCw className="w-3 h-3" />
-                <span>Ambil Ulang</span>
-              </button>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 text-[10px] text-slate-300 pt-1 border-t border-slate-800/80">
-              <span className="flex items-center gap-1 truncate">
-                <User className="w-3 h-3 text-slate-400 shrink-0" />
-                <span>Petugas: {metadata.petugasNama || 'Petugas Lapangan'}</span>
-              </span>
-              <span className="flex items-center gap-1 truncate">
-                <Calendar className="w-3 h-3 text-slate-400 shrink-0" />
-                <span>Waktu Realtime: <strong className="text-white font-mono">{formattedTime}</strong></span>
-              </span>
-              <span className="flex items-center gap-1 truncate">
-                <MapPin className="w-3 h-3 text-slate-400 shrink-0" />
-                <span>Lokasi: {metadata.rumahSakit || 'Rumah Sakit'}</span>
-              </span>
-              <span className="flex items-center gap-1 font-mono text-emerald-400 truncate">
-                <span>GPS: {metadata.latitude ? `${metadata.latitude}, ${metadata.longitude}` : 'Tersemat di Foto'}</span>
-              </span>
-            </div>
-          </div>
+      {/* Loading Indicator saat Memproses Watermark */}
+      {isProcessing && (
+        <div className="p-4 rounded-xl bg-blue-50 border border-blue-200 flex items-center justify-center gap-3 text-xs text-blue-900 font-semibold shadow-2xs animate-pulse">
+          <RefreshCw className="w-4 h-4 animate-spin text-[#145DA0]" />
+          <span>{processingStatus || 'Memproses foto & membubuhkan watermark...'}</span>
         </div>
-      ) : isStreaming ? (
-        /* Live Video Stream Viewfinder */
+      )}
+
+      {/* Mode 1: Live Video Stream Viewfinder */}
+      {isStreaming ? (
         <div className="relative rounded-xl overflow-hidden border border-slate-300 bg-black shadow-sm">
           <video
             ref={(el) => {
@@ -279,7 +354,7 @@ export default function CameraCapture({
             className="w-full max-h-80 object-contain bg-black"
           />
 
-          {/* Logo Jasa Raharja di Kiri Atas Viewfinder (Transparan Murni Tanpa Background Putih) */}
+          {/* Logo Jasa Raharja di Kiri Atas Viewfinder */}
           <div className="absolute top-3 left-3 z-20 select-none pointer-events-none drop-shadow-md">
             <img
               src="/img/logo-jasa-raharja.png"
@@ -316,21 +391,12 @@ export default function CameraCapture({
           <div className="p-3 bg-slate-900 flex items-center justify-center gap-3">
             <button
               type="button"
-              onClick={takePhoto}
-              disabled={isProcessingWatermark}
+              onClick={takePhotoFromLiveStream}
+              disabled={isProcessing}
               className="inline-flex items-center gap-2 px-5 py-2.5 rounded-full font-bold text-xs bg-red-600 hover:bg-red-700 disabled:bg-slate-600 text-white shadow-md transition-transform active:scale-95 cursor-pointer"
             >
-              {isProcessingWatermark ? (
-                <>
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                  <span>Membubuhkan Watermark...</span>
-                </>
-              ) : (
-                <>
-                  <Camera className="w-4 h-4" />
-                  <span>Ambil Foto &amp; Stempel Watermark</span>
-                </>
-              )}
+              <Camera className="w-4 h-4" />
+              <span>Ambil Foto &amp; Stempel Watermark</span>
             </button>
             <button
               type="button"
@@ -341,83 +407,189 @@ export default function CameraCapture({
             </button>
           </div>
         </div>
+      ) : photos.length > 0 ? (
+        /* Mode 2: Daftar Foto yang Sudah Diambil */
+        <div className="space-y-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {photos.map((photoUrl, idx) => (
+              <div
+                key={idx}
+                className="relative rounded-xl overflow-hidden border border-slate-300 bg-slate-900 shadow-sm flex flex-col justify-between"
+              >
+                {/* Image Container with Zoom Click */}
+                <div
+                  className="relative group cursor-pointer bg-black flex items-center justify-center min-h-[160px] max-h-56 overflow-hidden"
+                  onClick={() => setSelectedZoomPhoto(photoUrl)}
+                >
+                  <img
+                    src={photoUrl}
+                    alt={`Foto Dokumentasi ${idx + 1}`}
+                    className="w-full h-48 object-contain bg-black group-hover:scale-102 transition-transform duration-200"
+                  />
+                  <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 flex items-center justify-center transition-colors">
+                    <span className="bg-black/75 text-white text-[10px] font-bold px-2.5 py-1 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1.5 shadow-md">
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>Klik untuk Memperbesar</span>
+                    </span>
+                  </div>
+                  {/* Badge Nomor Foto */}
+                  <div className="absolute top-2 left-2 bg-slate-950/80 backdrop-blur-xs text-white text-[10px] font-bold px-2 py-0.5 rounded-md border border-white/20">
+                    Foto #{idx + 1}
+                  </div>
+                </div>
+
+                {/* Card Action & Info Bar */}
+                <div className="p-2.5 bg-slate-900 border-t border-slate-800 text-[11px] text-slate-300 space-y-2">
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[10px] font-bold text-emerald-400 flex items-center gap-1">
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                      <span>Watermark Resmi JR</span>
+                    </span>
+
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={(e) => handleStartReplacePhoto(idx, e)}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer"
+                        title="Ganti foto ini dengan foto baru"
+                      >
+                        <RefreshCw className="w-3 h-3" />
+                        <span>Ganti</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={(e) => handleDeletePhoto(idx, e)}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-semibold bg-rose-950/80 hover:bg-rose-900 text-rose-300 border border-rose-800 transition-colors cursor-pointer"
+                        title="Hapus foto ini"
+                      >
+                        <Trash2 className="w-3 h-3 text-rose-400" />
+                        <span>Hapus</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Tombol Tambah Foto Berikutnya */}
+          <div className="p-3 bg-slate-50 border border-dashed border-slate-300 rounded-xl flex flex-wrap items-center justify-between gap-2.5">
+            <div className="text-[11px] text-slate-600">
+              <span className="font-semibold text-slate-800">Perlu dokumentasi tambahan?</span>
+              <p className="text-[10px] text-slate-500">Anda dapat mengambil foto tambahan tanpa menghapus foto sebelumnya.</p>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={startCamera}
+                disabled={isProcessing || isInitializing}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-[#145DA0] hover:bg-[#0f497e] text-white shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
+              >
+                <Camera className="w-3.5 h-3.5" />
+                <span>+ Buka Kamera</span>
+              </button>
+            </div>
+          </div>
+        </div>
       ) : (
-        /* Idle State */
-        <div className="border-2 border-dashed border-slate-300 rounded-xl p-5 text-center bg-slate-50/70 flex flex-col items-center justify-center gap-2.5">
+        /* Mode 3: Idle State (Belum ada foto yang diambil) */
+        <div className="border-2 border-dashed border-slate-300 rounded-xl p-5 text-center bg-slate-50/70 flex flex-col items-center justify-center gap-3">
           <div className="w-12 h-12 rounded-xl bg-blue-50 text-[#145DA0] flex items-center justify-center border border-blue-100 shadow-2xs">
             <Camera className="w-6 h-6" />
           </div>
+
           <div>
             <p className="text-xs font-bold text-slate-800">
-              Dokumentasi Foto Langsung di Rumah Sakit
+              Dokumentasi Foto Kunjungan Rumah Sakit
             </p>
-            <p className="text-[11px] text-slate-500 max-w-sm mt-0.5">
-              Foto akan otomatis distempel dengan identitas Petugas, Waktu, Lokasi RS, dan Titik Koordinat GPS.
+            <p className="text-[11px] text-slate-500 max-w-sm mt-0.5 leading-relaxed">
+              Foto akan otomatis distempel dengan identitas Petugas, Waktu Aktual WIB, Lokasi RS, dan Titik Koordinat GPS.
             </p>
           </div>
 
+          {/* Action Button: Buka Kamera Langsung */}
           <div className="flex flex-wrap items-center justify-center gap-2 mt-1">
             <button
               type="button"
               onClick={startCamera}
-              disabled={isInitializing}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold bg-[#145DA0] hover:bg-[#0f497e] text-white shadow-xs transition-colors cursor-pointer"
+              disabled={isInitializing || isProcessing}
+              className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl text-xs font-bold bg-[#145DA0] hover:bg-[#0f497e] text-white shadow-sm transition-all active:scale-95 cursor-pointer disabled:opacity-50"
             >
-              {isInitializing ? (
-                <>
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                  <span>Membuka Kamera...</span>
-                </>
-              ) : (
-                <>
-                  <Camera className="w-3.5 h-3.5" />
-                  <span>Buka Kamera Sekarang</span>
-                </>
-              )}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 shadow-2xs transition-colors cursor-pointer"
-            >
-              <ImageIcon className="w-3.5 h-3.5 text-slate-500" />
-              <span>Pilih Berkas Foto</span>
+              <Camera className="w-4 h-4" />
+              <span>Buka Kamera</span>
             </button>
           </div>
-
-          <input
-            type="file"
-            ref={fileInputRef}
-            onChange={handleFileUpload}
-            accept="image/*"
-            capture="environment"
-            className="hidden"
-          />
         </div>
       )}
 
-      {/* Error Message */}
+      {/* Error Message Box */}
       {errorMessage && (
-        <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-start gap-2">
+        <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-start gap-2 shadow-2xs">
           <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
           <div className="flex-1">
             <p className="font-bold">Perhatian Akses Kamera</p>
-            <p className="text-[11px] text-amber-800 mt-0.5">{errorMessage}</p>
+            <p className="text-[11px] text-amber-800 mt-0.5 leading-relaxed">{errorMessage}</p>
             <div className="mt-2 flex items-center gap-2">
               <button
                 type="button"
-                onClick={startCamera}
-                className="px-2.5 py-1 rounded bg-amber-200 hover:bg-amber-300 font-bold text-amber-950 text-[11px] cursor-pointer"
+                onClick={handleOpenHpCamera}
+                className="px-3 py-1 rounded-lg bg-[#145DA0] font-bold text-white text-[11px] cursor-pointer"
               >
-                Coba Buka Kamera Lagi
+                Gunakan Kamera HP
               </button>
               <button
                 type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="px-2.5 py-1 rounded bg-white border border-amber-300 font-semibold text-amber-950 text-[11px] cursor-pointer"
+                onClick={handleOpenGallery}
+                className="px-2.5 py-1 rounded-lg bg-white border border-amber-300 font-semibold text-amber-950 text-[11px] cursor-pointer"
               >
-                Pilih Berkas Foto
+                Pilih dari Galeri
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Zoom Preview Foto */}
+      {selectedZoomPhoto && (
+        <div
+          className="fixed inset-0 z-50 bg-black/85 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setSelectedZoomPhoto(null)}
+        >
+          <div
+            className="relative max-w-2xl w-full bg-slate-900 rounded-2xl overflow-hidden shadow-2xl border border-slate-700"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-3 bg-slate-950 border-b border-slate-800 flex items-center justify-between text-xs text-white">
+              <span className="font-bold text-blue-300 flex items-center gap-1.5">
+                <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                <span>Pratinjau Foto Watermark Resmi Jasa Raharja</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setSelectedZoomPhoto(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-2 bg-black flex items-center justify-center">
+              <img
+                src={selectedZoomPhoto}
+                alt="Pratinjau Foto Dokumentasi"
+                className="w-full max-h-[75vh] object-contain"
+              />
+            </div>
+
+            <div className="p-3 bg-slate-950 flex items-center justify-end">
+              <button
+                type="button"
+                onClick={() => setSelectedZoomPhoto(null)}
+                className="px-4 py-1.5 bg-white text-slate-900 font-bold rounded-xl text-xs hover:bg-slate-200 cursor-pointer"
+              >
+                Tutup Pratinjau
               </button>
             </div>
           </div>

@@ -9,7 +9,8 @@ import {
   EyeOff,
   AlertCircle,
   Clock,
-  ShieldCheck
+  ShieldCheck,
+  X
 } from 'lucide-react';
 
 export default function LoginPage() {
@@ -22,6 +23,13 @@ export default function LoginPage() {
   const [rememberMe, setRememberMe] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isCapsLockOn, setIsCapsLockOn] = useState(false);
+
+  const checkCapsLock = (e) => {
+    if (e && typeof e.getModifierState === 'function') {
+      setIsCapsLockOn(e.getModifierState('CapsLock'));
+    }
+  };
 
   // Jika sudah terautentikasi, alihkan otomatis ke dashboard sesuai role
   useEffect(() => {
@@ -43,8 +51,13 @@ export default function LoginPage() {
       return;
     }
 
+    if (/[A-Z]/.test(trimmedIdentifier)) {
+      setErrorMessage('Email tidak boleh menggunakan huruf besar (Caps Lock). Harap gunakan huruf kecil.');
+      return;
+    }
+
     const emailLower = trimmedIdentifier.toLowerCase();
-    const companyDomainRegex = /^[a-zA-Z0-9._%+-]+@jasaraharja\.co\.id$/;
+    const companyDomainRegex = /^[a-z0-9._%+-]+@jasaraharja\.co\.id$/;
     if (!companyDomainRegex.test(emailLower)) {
       setErrorMessage('Email harus menggunakan domain resmi perusahaan (@jasaraharja.co.id).');
       return;
@@ -67,7 +80,55 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col md:flex-row">
+    <div className="min-h-screen flex flex-col md:flex-row relative">
+
+      {/* ── FLOATING NOTIFICATION TOAST (Zero Layout Shift / Anti-Perpindahan) ── */}
+      {(authNotice || errorMessage) && (
+        <div
+          role="alert"
+          aria-live="assertive"
+          className="fixed top-4 left-4 right-4 sm:left-auto sm:right-6 sm:top-6 sm:w-96 z-50 animate-in fade-in slide-in-from-top-3 duration-200"
+        >
+          <div
+            className={`p-4 rounded-2xl shadow-xl border flex items-start gap-3 backdrop-blur-md transition-all ${
+              authNotice
+                ? 'bg-amber-50/95 border-amber-200 text-amber-900 shadow-amber-900/10'
+                : 'bg-rose-50/95 border-rose-200 text-rose-900 shadow-rose-900/10'
+            }`}
+          >
+            {authNotice ? (
+              <div className="w-8 h-8 rounded-xl bg-amber-100 flex items-center justify-center shrink-0 text-amber-700">
+                <Clock className="w-4 h-4" />
+              </div>
+            ) : (
+              <div className="w-8 h-8 rounded-xl bg-rose-100 flex items-center justify-center shrink-0 text-rose-700">
+                <AlertCircle className="w-4 h-4" />
+              </div>
+            )}
+
+            <div className="flex-1 min-w-0 pt-0.5">
+              <p className="font-bold text-xs">
+                {authNotice ? 'Informasi Sesi' : 'Gagal Masuk'}
+              </p>
+              <p className="text-[11px] sm:text-xs text-slate-700 mt-0.5 leading-relaxed">
+                {authNotice || errorMessage}
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                if (authNotice) clearAuthNotice();
+                if (errorMessage) setErrorMessage('');
+              }}
+              className="p-1 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-black/5 transition-colors cursor-pointer shrink-0"
+              title="Tutup pemberitahuan"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* ── LEFT PANEL ── */}
       <div className="relative flex-1 bg-[#145DA0] flex flex-col justify-between overflow-hidden px-6 py-8 sm:px-8 sm:py-10 md:px-12 md:py-14 min-h-[200px] md:min-h-screen">
@@ -132,50 +193,47 @@ export default function LoginPage() {
             </p>
           </div>
 
-          {/* Peringatan Sesi Kedaluwarsa / Timeout */}
-          {authNotice && (
-            <div className="mb-4 p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-start gap-2.5 shadow-2xs">
-              <Clock className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-              <div>
-                <p className="font-bold">Informasi Sesi</p>
-                <p className="text-[11px] mt-0.5 leading-relaxed">{authNotice}</p>
-              </div>
-            </div>
-          )}
-
-          {/* Error Alert */}
-          {errorMessage && (
-            <div className="mb-4 p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2.5 shadow-2xs">
-              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-              <div>
-                <p className="font-bold">Gagal Masuk</p>
-                <p className="text-[11px] mt-0.5 leading-relaxed">{errorMessage}</p>
-              </div>
-            </div>
-          )}
-
           {/* Form */}
           <form onSubmit={handleSignIn} className="space-y-4">
 
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                Email Perusahaan
-              </label>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-xs font-semibold text-slate-700">
+                  Email Perusahaan
+                </label>
+                {isCapsLockOn && (
+                  <span className="text-[10px] text-amber-700 font-semibold bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200/80 flex items-center gap-1">
+                    <AlertCircle className="w-3 h-3 text-amber-600 shrink-0" />
+                    Caps Lock Aktif (Otomatis Huruf Kecil)
+                  </span>
+                )}
+              </div>
               <div className="relative">
-                <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                <Mail className={`absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 transition-colors ${
+                  errorMessage && (errorMessage.toLowerCase().includes('email') || !identifier)
+                    ? 'text-rose-500'
+                    : 'text-slate-400'
+                }`} />
                 <input
                   type="email"
                   required
                   autoFocus
                   autoComplete="email"
                   value={identifier}
+                  onKeyDown={checkCapsLock}
+                  onKeyUp={checkCapsLock}
                   onChange={(e) => {
-                    setIdentifier(e.target.value);
-                    setErrorMessage('');
-                    clearAuthNotice();
+                    // Paksa otomatis huruf kecil dan hapus spasi (mencegah capslock / huruf kapital)
+                    const sanitized = e.target.value.toLowerCase().replace(/\s+/g, '');
+                    setIdentifier(sanitized);
+                    if (errorMessage) setErrorMessage('');
                   }}
-                  placeholder="contoh: petugas@jasaraharja.co.id"
-                  className="w-full pl-10 pr-4 py-2.5 rounded-lg border border-slate-200 bg-slate-50 text-slate-800 text-sm focus:outline-none focus:ring-2 focus:ring-[#145DA0]/30 focus:border-[#145DA0] focus:bg-white transition-all"
+                  placeholder="contoh: nama@gmail.com"
+                  className={`w-full pl-10 pr-4 py-2.5 rounded-lg border text-sm lowercase focus:outline-none transition-all ${
+                    errorMessage && (errorMessage.toLowerCase().includes('email') || !identifier)
+                      ? 'border-rose-400 bg-rose-50/20 text-slate-800 focus:ring-2 focus:ring-rose-200 focus:border-rose-500'
+                      : 'border-slate-200 bg-slate-50 text-slate-800 focus:ring-2 focus:ring-[#145DA0]/30 focus:border-[#145DA0] focus:bg-white'
+                  }`}
                 />
               </div>
             </div>
@@ -186,21 +244,36 @@ export default function LoginPage() {
                 <label className="block text-xs font-semibold text-slate-700">
                   Kata Sandi
                 </label>
+                {isCapsLockOn && (
+                  <span className="text-[10px] text-amber-700 font-semibold bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200/80 flex items-center gap-1">
+                    <AlertCircle className="w-3 h-3 text-amber-600 shrink-0" />
+                    Caps Lock Aktif
+                  </span>
+                )}
               </div>
               <div className="relative">
-                <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                <Lock className={`absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 transition-colors ${
+                  errorMessage && (errorMessage.toLowerCase().includes('sandi') || errorMessage.toLowerCase().includes('sesuai') || !password)
+                    ? 'text-rose-500'
+                    : 'text-slate-400'
+                }`} />
                 <input
                   type={showPassword ? 'text' : 'password'}
                   required
                   autoComplete="current-password"
                   value={password}
+                  onKeyDown={checkCapsLock}
+                  onKeyUp={checkCapsLock}
                   onChange={(e) => {
                     setPassword(e.target.value);
-                    setErrorMessage('');
-                    clearAuthNotice();
+                    if (errorMessage) setErrorMessage('');
                   }}
                   placeholder="••••••••"
-                  className="w-full pl-10 pr-12 py-2.5 rounded-lg border border-slate-200 bg-slate-50 text-slate-800 text-sm focus:outline-none focus:ring-2 focus:ring-[#145DA0]/30 focus:border-[#145DA0] focus:bg-white transition-all"
+                  className={`w-full pl-10 pr-12 py-2.5 rounded-lg border text-sm focus:outline-none transition-all ${
+                    errorMessage && (errorMessage.toLowerCase().includes('sandi') || errorMessage.toLowerCase().includes('sesuai') || !password)
+                      ? 'border-rose-400 bg-rose-50/20 text-slate-800 focus:ring-2 focus:ring-rose-200 focus:border-rose-500'
+                      : 'border-slate-200 bg-slate-50 text-slate-800 focus:ring-2 focus:ring-[#145DA0]/30 focus:border-[#145DA0] focus:bg-white'
+                  }`}
                 />
                 <button
                   type="button"

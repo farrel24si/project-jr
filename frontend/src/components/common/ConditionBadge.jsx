@@ -98,11 +98,13 @@ export default function ConditionBadge({ kondisi, statusKonfirmasi, size = 'sm' 
   const currentCondition = kondisi || 'Belum Dapat Dikonfirmasi';
   let config = conditionConfig[currentCondition];
 
-  if (!config && typeof currentCondition === 'string' && currentCondition.startsWith('Dirujuk')) {
+  if (!config && typeof currentCondition === 'string' && (currentCondition.startsWith('Dirujuk') || currentCondition.startsWith('Rujukan dari'))) {
     config = {
-      className: 'bg-violet-50 text-violet-800 border-violet-200',
+      className: currentCondition.startsWith('Dirujuk')
+        ? 'bg-purple-50 text-purple-800 border-purple-200'
+        : 'bg-violet-50 text-violet-800 border-violet-200',
       icon: ArrowUpRight,
-      dot: 'bg-violet-500',
+      dot: currentCondition.startsWith('Dirujuk') ? 'bg-purple-500' : 'bg-violet-500',
       label: currentCondition
     };
   }

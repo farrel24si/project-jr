@@ -13,6 +13,7 @@
 
 import { parseCatatanKondisi, parseDateToTimestamp } from './backendMapper.js';
 import { getCachedPhoto } from './photoService.js';
+import { formatDateTimeIndo } from '../utils/dateUtils.js';
 
 function toTimestamp(dateStr) {
   return parseDateToTimestamp(dateStr);
@@ -35,22 +36,7 @@ export function formatCareDate(dateStr) {
 
 export function formatCareDateTime(dateStr) {
   if (!dateStr) return '—';
-  try {
-    const d = new Date(dateStr);
-    if (isNaN(d.getTime())) return dateStr;
-    const datePart = d.toLocaleDateString('id-ID', {
-      day: 'numeric',
-      month: 'short',
-      year: 'numeric'
-    });
-    const timePart = d.toLocaleTimeString('id-ID', {
-      hour: '2-digit',
-      minute: '2-digit'
-    }).replace(/:/g, '.') + ' WIB';
-    return `${datePart}, ${timePart}`;
-  } catch {
-    return dateStr;
-  }
+  return formatDateTimeIndo(dateStr);
 }
 
 /**
@@ -60,23 +46,46 @@ export function formatCareDateTime(dateStr) {
 export function groupCareEpisodes(victim) {
   if (!victim) return [];
 
-  // Jika korban sudah memiliki careEpisodes terstruktur dan terisolasi, gunakan langsung
-  if (Array.isArray(victim.careEpisodes) && victim.careEpisodes.length >= 2) {
-    return victim.careEpisodes;
-  }
-
   const originHospital = victim.rumahSakitAsal || victim.rumah_sakit_asal || victim.riwayatPerawatan?.[0]?.rumahSakit || victim.rumahSakit || 'Rumah Sakit Awal';
   const currentHospital = victim.rumahSakit || victim.rumah_sakit || originHospital;
 
-  const isDifferentHospital = originHospital && currentHospital &&
+  const hasExplicitReferral = Boolean(
+    (Array.isArray(victim.riwayatRujukan) && victim.riwayatRujukan.length > 0) ||
+    (Array.isArray(victim.referrals) && victim.referrals.length > 0) ||
+    victim.statusPerawatan === 'Rujukan' ||
+    victim.statusPerawatan === 'Rujukan Diterima' ||
+    Boolean(victim.isRujukanMasuk) ||
+    (typeof victim.kondisiTerakhir === 'string' && (victim.kondisiTerakhir.startsWith('Dirujuk') || victim.kondisiTerakhir.startsWith('Rujukan'))) ||
+    (typeof victim.status_kondisi === 'string' && (victim.status_kondisi.startsWith('Dirujuk') || victim.status_kondisi.startsWith('Rujukan'))) ||
+    (typeof victim.statusPemantauan === 'string' && (victim.statusPemantauan.startsWith('Dirujuk') || victim.statusPemantauan.startsWith('Rujukan')))
+  );
+
+  // Jika korban sudah memiliki careEpisodes terstruktur dan terisolasi
+  if (Array.isArray(victim.careEpisodes) && victim.careEpisodes.length >= 2) {
+    if (!hasExplicitReferral) {
+      // Jika TIDAK ADA rujukan resmi, pastikan tidak menampilkan multi-RS
+      const matchingEp = victim.careEpisodes.find(
+        (ep) => (ep.rumahSakit || '').toLowerCase().trim() === currentHospital.toLowerCase().trim()
+      );
+      if (matchingEp) {
+        return [matchingEp];
+      }
+    } else {
+      return victim.careEpisodes;
+    }
+  }
+
+  const isDifferentHospital = hasExplicitReferral && originHospital && currentHospital &&
     originHospital.toLowerCase().trim() !== currentHospital.toLowerCase().trim();
 
   const isDischargedPast = Boolean(
-    victim.rawatLanjutanDariPulang ||
-    victim.tanggalPulangSebelumnya ||
-    victim.isRawatLanjutan ||
-    victim.statusPerawatan === 'Rawat Lanjutan' ||
-    (Array.isArray(victim.riwayatPerawatan) && victim.riwayatPerawatan.some((c) => c.jenisPerawatan === 'Pulang' || c.status === 'Pulang'))
+    hasExplicitReferral && (
+      victim.rawatLanjutanDariPulang ||
+      victim.tanggalPulangSebelumnya ||
+      victim.isRawatLanjutan ||
+      victim.statusPerawatan === 'Rawat Lanjutan' ||
+      (Array.isArray(victim.riwayatPerawatan) && victim.riwayatPerawatan.some((c) => c.jenisPerawatan === 'Pulang' || c.status === 'Pulang'))
+    )
   );
 
   const initialDate = victim.tanggalMasukAwal || victim.tanggalMasukRs || victim.tanggalInformasiDiterima || victim.tanggalKecelakaan || new Date().toISOString();

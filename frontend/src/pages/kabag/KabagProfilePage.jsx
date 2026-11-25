@@ -1,13 +1,11 @@
-import React, { useState, useRef } from 'react';
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import ModalConfirmChangePhone from '../../components/common/ModalConfirmChangePhone';
 import {
   User,
   ShieldCheck,
-  Lock,
   Key,
-  Camera,
   CheckCircle2,
   AlertCircle,
   Building2,
@@ -16,18 +14,15 @@ import {
   Phone,
   Eye,
   EyeOff,
-  RotateCcw,
-  Sparkles,
   Save,
   Check,
   Award,
   Edit2,
-  X
+  ArrowLeft
 } from 'lucide-react';
 
 export default function KabagProfilePage() {
-  const { currentUser, updateProfilePhoto, updatePassword, updatePhoneNumber } = useAuth();
-  const fileInputRef = useRef(null);
+  const { currentUser, updatePassword, updatePhoneNumber } = useAuth();
 
   const profile = currentUser?.profile || {};
   const kabagName = profile.nama || 'Kepala Bagian Operasional';
@@ -37,10 +32,6 @@ export default function KabagProfilePage() {
   const kabagEmail = profile.email || 'kabag@jasaraharja.co.id';
   const kabagPhone = profile.telepon || '0812-7001-9988';
   const username = profile.username || 'kabag';
-
-  // State untuk Foto Profil
-  const [photoPreview, setPhotoPreview] = useState(profile.avatar || null);
-  const [photoSuccessToast, setPhotoSuccessToast] = useState('');
 
   // State untuk Nomor HP & Modal Konfirmasi
   const [isEditingPhone, setIsEditingPhone] = useState(false);
@@ -114,48 +105,6 @@ export default function KabagProfilePage() {
     }
   };
 
-  // Inisial jika tidak ada custom foto
-  const getInitials = (nama) => {
-    if (!nama) return 'KB';
-    const parts = nama.trim().split(/\s+/);
-    if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
-    return nama.slice(0, 2).toUpperCase();
-  };
-  const initials = getInitials(kabagName);
-
-  const isCustomPhoto = photoPreview && (photoPreview.startsWith('data:image') || photoPreview.startsWith('http'));
-
-  // Handler Unggah Foto
-  const handleFileChange = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (file.size > 2 * 1024 * 1024) {
-      alert('Ukuran foto terlalu besar. Maksimal 2MB.');
-      return;
-    }
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const dataUrl = event.target?.result;
-      if (dataUrl) {
-        setPhotoPreview(dataUrl);
-        updateProfilePhoto(dataUrl);
-        setPhotoSuccessToast('Foto profil berhasil diperbarui!');
-        setTimeout(() => setPhotoSuccessToast(''), 3500);
-      }
-    };
-    reader.readAsDataURL(file);
-  };
-
-  // Handler Reset ke Inisial Nama
-  const handleResetToInitials = () => {
-    setPhotoPreview(initials);
-    updateProfilePhoto(initials);
-    setPhotoSuccessToast('Foto profil dikembalikan ke inisial.');
-    setTimeout(() => setPhotoSuccessToast(''), 3500);
-  };
-
   // Handler Simpan Kata Sandi
   const handleSavePassword = async (e) => {
     e.preventDefault();
@@ -192,206 +141,165 @@ export default function KabagProfilePage() {
   };
 
   return (
-    <div className="space-y-6 pb-12 animate-fade-in">
+    <div className="space-y-6 pb-12 animate-fade-in max-w-5xl mx-auto">
       {/* ── BREADCRUMB & HEADER ── */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
           <div className="flex items-center gap-2 text-xs text-slate-500 mb-1">
             <Link to="/kabag" className="hover:text-[#0A3981] transition-colors">
-              Kepala Bagian Operasional
+              Kepala Bagian
             </Link>
             <span>/</span>
-            <span className="text-slate-800 font-semibold">Akun & Profil Saya</span>
+            <span className="text-slate-800 font-semibold">Profil Saya</span>
           </div>
           <h1 className="text-2xl font-black text-slate-900 tracking-tight">
-            Profil & Pengaturan Akun
+            Profil &amp; Akun Saya
           </h1>
-          <p className="text-xs text-slate-500 mt-1">
-            Kelola foto profil Anda dan perbarui kata sandi untuk akses masuk aplikasi
+          <p className="text-xs text-slate-500 mt-0.5">
+            Informasi pejabat kedinasan dan pengaturan keamanan akses akun
           </p>
         </div>
 
         <Link
           to="/kabag"
-          className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 transition-colors shadow-2xs self-start sm:self-auto"
+          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 transition-colors shadow-2xs self-start sm:self-auto"
         >
-          <span>&larr; Kembali ke Dashboard</span>
+          <ArrowLeft className="w-3.5 h-3.5" />
+          <span>Kembali ke Dashboard</span>
         </Link>
       </div>
 
-      {/* ── TOAST NOTIFIKASI FOTO SUKSES ── */}
-      {photoSuccessToast && (
-        <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center gap-2.5 text-xs text-emerald-800 shadow-sm animate-scale-up">
-          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-          <span className="font-semibold">{photoSuccessToast}</span>
-        </div>
-      )}
+      {/* ── KARTU IDENTITAS PROFIL (SIMPEL & ELEGAN, TANPA FOTO/AVATAR) ── */}
+      <div className="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 shadow-xs">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <h2 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
+                {kabagName}
+              </h2>
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-50 text-[#0A3981] border border-blue-200">
+                <Award className="w-3.5 h-3.5 text-[#0A3981]" />
+                <span>Otoritas Pimpinan Wilayah</span>
+              </span>
+            </div>
 
-      {/* ── GRID UTAMA: KOLOM KIRI (FOTO & IDENTITAS) + KOLOM KANAN (DETAIL & UBAH SANDI) ── */}
+            <div className="text-xs text-slate-500 flex flex-wrap items-center gap-2 pt-0.5">
+              <span className="font-semibold text-slate-700 bg-slate-100 px-2.5 py-0.5 rounded border border-slate-200">
+                {kabagJabatan}
+              </span>
+              <span className="text-slate-300">•</span>
+              <span className="font-medium text-slate-600 flex items-center gap-1">
+                <Building2 className="w-3.5 h-3.5 text-blue-600" />
+                <span>{kabagCabang}</span>
+              </span>
+              <span className="text-slate-300">•</span>
+              <span className="font-medium text-slate-600 flex items-center gap-1">
+                <MapPin className="w-3.5 h-3.5 text-emerald-600" />
+                <span>{kabagWilayah}</span>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── GRID 2 KOLOM: INFORMASI KEPEGAWAIAN & FORM UBAH KATA SANDI ── */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
-        {/* ── KOLOM KIRI: KARTU FOTO PROFIL & IDENTITAS ── */}
-        <div className="space-y-6">
-          <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm flex flex-col items-center text-center">
-            {/* Foto Avatar Lingkaran */}
-            <div className="relative mb-4 group">
-              <div className="w-28 h-28 rounded-full bg-gradient-to-tr from-[#0A3981] to-[#145DA0] text-white flex items-center justify-center font-black text-3xl shadow-md border-4 border-white ring-4 ring-blue-50 overflow-hidden">
-                {isCustomPhoto ? (
-                  <img
-                    src={photoPreview}
-                    alt={kabagName}
-                    className="w-full h-full object-cover"
-                  />
-                ) : (
-                  <span>{initials}</span>
-                )}
-              </div>
-
-              {/* Tombol Kamera Trigger Upload */}
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="absolute bottom-0 right-0 w-9 h-9 rounded-full bg-[#0A3981] text-white flex items-center justify-center shadow-lg hover:bg-blue-900 transition-all border-2 border-white cursor-pointer hover:scale-105"
-                title="Ganti Foto Profil"
-              >
-                <Camera className="w-4 h-4" />
-              </button>
-
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                onChange={handleFileChange}
-                className="hidden"
-              />
-            </div>
-
-            <h3 className="text-base font-bold text-slate-900 leading-tight">
-              {kabagName}
-            </h3>
-            <p className="text-xs text-slate-500 font-medium mt-0.5">
-              {kabagJabatan}
-            </p>
-
-            <div className="mt-3 inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-blue-50 text-[#0A3981] border border-blue-200">
-              <Award className="w-3.5 h-3.5 text-[#0A3981]" />
-              <span>Otoritas Pimpinan Wilayah</span>
-            </div>
-
-            {/* Tombol Aksi Foto */}
-            <div className="w-full mt-6 pt-5 border-t border-slate-100 flex flex-col gap-2">
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="w-full py-2.5 px-4 rounded-xl text-xs font-bold bg-[#0A3981] hover:bg-blue-900 text-white flex items-center justify-center gap-2 transition-colors shadow-2xs cursor-pointer"
-              >
-                <Camera className="w-3.5 h-3.5" />
-                <span>Pilih Foto Baru</span>
-              </button>
-
-              {isCustomPhoto && (
-                <button
-                  type="button"
-                  onClick={handleResetToInitials}
-                  className="w-full py-2 px-4 rounded-xl text-xs font-semibold text-slate-600 hover:text-slate-800 hover:bg-slate-100 border border-slate-200 transition-colors cursor-pointer"
-                >
-                  Gunakan Inisial Nama
-                </button>
-              )}
-
-              <p className="text-[10px] text-slate-400 mt-1">
-                Format didukung: JPG, PNG, atau WebP (maks. 2MB).
-              </p>
-            </div>
-          </div>
-
-          {/* Ringkasan Akun */}
-          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm space-y-3">
-            <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2">
-              <User className="w-4 h-4 text-[#0A3981]" />
-              <span>Akses Masuk Sistem</span>
-            </h4>
-
-            <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-2 text-xs">
-              <div className="flex justify-between items-center">
-                <span className="text-slate-500">Username:</span>
-                <span className="font-mono font-bold text-slate-800 bg-white px-2 py-0.5 rounded border border-slate-200">
-                  {username}
-                </span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-slate-500">Peran Sistem:</span>
-                <span className="font-bold text-[#0A3981]">Kepala Bagian (Kabag)</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-slate-500">Unit Cabang:</span>
-                <span className="font-medium text-slate-700">{kabagCabang}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* ── KOLOM KANAN: DETAIL INFORMASI KEPEGAWAIAN & FORM UBAH KATA SANDI ── */}
+        {/* ── KOLOM 1: INFORMASI KEPEGAWAIAN & AKSES SISTEM (2 KOLOM LEBAR) ── */}
         <div className="lg:col-span-2 space-y-6">
-
-          {/* 1. KARTU INFORMASI KEPEGAWAIAN */}
-          <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-5">
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 shadow-xs space-y-5">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div className="flex items-center gap-2.5">
                 <ShieldCheck className="w-5 h-5 text-[#0A3981]" />
                 <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wider">
-                  1. Informasi Pejabat & Kedinasan
+                  Informasi Pejabat &amp; Akses Sistem
                 </h3>
               </div>
-              <span className="text-[11px] font-semibold text-slate-500">
+              <span className="text-[11px] font-semibold text-blue-700 bg-blue-50 px-2.5 py-0.5 rounded-full border border-blue-200">
                 Terverifikasi Kedinasan
               </span>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+              {/* Username Akses */}
               <div>
-                <label className="block text-xs font-bold text-slate-500 mb-1">
+                <label className="block text-slate-400 font-semibold mb-1 text-[11px] uppercase tracking-wider">
+                  Username Sistem
+                </label>
+                <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 font-mono font-bold text-slate-800">
+                  {username}
+                </div>
+              </div>
+
+              {/* Peran Akun */}
+              <div>
+                <label className="block text-slate-400 font-semibold mb-1 text-[11px] uppercase tracking-wider">
+                  Peran Sistem
+                </label>
+                <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 font-bold text-[#0A3981] flex items-center gap-1.5">
+                  <User className="w-3.5 h-3.5 text-[#0A3981]" />
+                  <span>Kepala Bagian (Kabag)</span>
+                </div>
+              </div>
+
+              {/* Nama Pejabat */}
+              <div>
+                <label className="block text-slate-400 font-semibold mb-1 text-[11px] uppercase tracking-wider">
                   Nama Pejabat
                 </label>
-                <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 text-xs font-bold text-slate-800">
+                <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 font-bold text-slate-900">
                   {kabagName}
                 </div>
               </div>
 
+              {/* Jabatan Kedinasan */}
               <div>
-                <label className="block text-xs font-bold text-slate-500 mb-1">
+                <label className="block text-slate-400 font-semibold mb-1 text-[11px] uppercase tracking-wider">
                   Jabatan Kedinasan
                 </label>
-                <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 text-xs font-semibold text-slate-800">
+                <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 font-semibold text-slate-800">
                   {kabagJabatan}
                 </div>
               </div>
 
+              {/* Unit Kerja */}
               <div>
-                <label className="block text-xs font-bold text-slate-500 mb-1">
-                  Unit Kerja
+                <label className="block text-slate-400 font-semibold mb-1 text-[11px] uppercase tracking-wider">
+                  Unit Kerja Cabang
                 </label>
-                <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 text-xs font-semibold text-slate-800 flex items-center gap-1.5">
+                <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 font-semibold text-slate-800 flex items-center gap-1.5">
                   <Building2 className="w-3.5 h-3.5 text-blue-600 shrink-0" />
                   <span>{kabagCabang}</span>
                 </div>
               </div>
 
+              {/* Wilayah Pengawasan */}
               <div>
-                <label className="block text-xs font-bold text-slate-500 mb-1">
+                <label className="block text-slate-400 font-semibold mb-1 text-[11px] uppercase tracking-wider">
                   Wilayah Pengawasan
                 </label>
-                <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 text-xs font-semibold text-slate-800 flex items-center gap-1.5">
+                <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 font-semibold text-slate-800 flex items-center gap-1.5">
                   <MapPin className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                   <span>{kabagWilayah}</span>
                 </div>
               </div>
 
-              {/* ── NOMOR HP / WHATSAPP KEDINASAN ── */}
-              <div className="md:col-span-2">
+              {/* Email Kedinasan */}
+              <div className="sm:col-span-2">
+                <label className="block text-slate-400 font-semibold mb-1 text-[11px] uppercase tracking-wider flex items-center gap-1.5">
+                  <Mail className="w-3 h-3 text-slate-400" />
+                  <span>Email Kedinasan</span>
+                </label>
+                <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 font-medium text-slate-800">
+                  {kabagEmail}
+                </div>
+              </div>
+
+              {/* Nomor HP / WhatsApp */}
+              <div className="sm:col-span-2 pt-1">
                 <div className="flex items-center justify-between mb-1">
-                  <label className="block text-xs font-bold text-slate-500 flex items-center gap-1.5">
-                    <Phone className="w-3.5 h-3.5 text-slate-400" />
+                  <label className="block text-slate-500 font-bold flex items-center gap-1.5 text-xs">
+                    <Phone className="w-3.5 h-3.5 text-[#0A3981]" />
                     <span>Nomor HP / WhatsApp Kedinasan</span>
                   </label>
                   {!isEditingPhone && (
@@ -407,7 +315,7 @@ export default function KabagProfilePage() {
                 </div>
 
                 {isEditingPhone ? (
-                  <form onSubmit={handleSubmitPhone} className="space-y-2">
+                  <form onSubmit={handleSubmitPhone} className="space-y-2 mt-1">
                     <div className="flex items-center gap-2">
                       <input
                         type="text"
@@ -418,7 +326,7 @@ export default function KabagProfilePage() {
                         }}
                         placeholder="Contoh: 0812-7001-9988"
                         autoFocus
-                        className="flex-1 px-3 py-2 text-xs rounded-xl border border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono font-semibold"
+                        className="flex-1 px-3 py-2 text-xs rounded-xl border border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono font-semibold bg-white"
                       />
                       <button
                         type="button"
@@ -450,7 +358,7 @@ export default function KabagProfilePage() {
                   <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 text-xs font-mono font-bold text-slate-800 flex items-center justify-between">
                     <span>{kabagPhone}</span>
                     <span className="text-[10px] text-emerald-700 font-sans font-semibold bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-                      Terdaftar Aktif
+                      Tujuan Notifikasi Aktif
                     </span>
                   </div>
                 )}
@@ -462,137 +370,116 @@ export default function KabagProfilePage() {
                   </div>
                 )}
               </div>
-
-              {/* ── EMAIL KEDINASAN ── */}
-              <div className="md:col-span-2">
-                <label className="block text-xs font-bold text-slate-500 mb-1 flex items-center gap-1.5">
-                  <Mail className="w-3.5 h-3.5 text-slate-400" />
-                  <span>Email Kedinasan Jasa Raharja</span>
-                  <span className="text-[10px] text-slate-400 font-normal">(Informasi Akun Tetap)</span>
-                </label>
-                <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 text-xs font-semibold text-slate-800">
-                  {kabagEmail}
-                </div>
-              </div>
             </div>
           </div>
+        </div>
 
-          {/* 2. KARTU UBAH KATA SANDI (PASSWORD) */}
-          <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-5">
+        {/* ── KOLOM 2: UBAH KATA SANDI / KEAMANAN AKUN (1 KOLOM) ── */}
+        <div className="space-y-6">
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 shadow-xs space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div className="flex items-center gap-2.5">
                 <Key className="w-5 h-5 text-amber-600" />
                 <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wider">
-                  2. Perbarui Kata Sandi (Password)
+                  Keamanan Kata Sandi
                 </h3>
               </div>
-              <span className="text-[11px] font-semibold text-slate-500">
-                Keamanan Akses Akun
-              </span>
             </div>
 
-            <p className="text-xs text-slate-600 leading-relaxed">
-              Anda dapat mengubah kata sandi akses akun Kepala Bagian Anda sewaktu-waktu. Pastikan kata sandi baru mudah Anda ingat namun sulit ditebak orang lain.
+            <p className="text-xs text-slate-500 leading-relaxed">
+              Perbarui kata sandi akun pimpinan wilayah secara berkala untuk menjaga keamanan akses sistem.
             </p>
 
             {passwordSuccess && (
-              <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-xl flex items-start gap-2 text-xs text-emerald-800 animate-scale-up">
+              <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl flex items-start gap-2 text-xs text-emerald-800 animate-scale-up">
                 <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
                 <span className="font-semibold leading-relaxed">{passwordSuccess}</span>
               </div>
             )}
 
             {passwordError && (
-              <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl flex items-start gap-2 text-xs text-rose-800 animate-scale-up">
+              <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl flex items-start gap-2 text-xs text-rose-800 animate-scale-up">
                 <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
                 <span className="font-semibold leading-relaxed">{passwordError}</span>
               </div>
             )}
 
-            <form onSubmit={handleSavePassword} className="space-y-4">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Kolom Sandi Baru */}
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1.5">
-                    Kata Sandi Baru <span className="text-red-500">*</span>
-                  </label>
-                  <div className="relative">
-                    <input
-                      type={showNewPassword ? 'text' : 'password'}
-                      required
-                      placeholder="Masukkan sandi baru (min 6 char)..."
-                      value={newPassword}
-                      onChange={(e) => setNewPassword(e.target.value)}
-                      className="w-full px-3.5 py-2.5 pr-10 text-xs rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowNewPassword(!showNewPassword)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
-                      title={showNewPassword ? 'Sembunyikan' : 'Tampilkan'}
-                    >
-                      {showNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
-                  <p className="text-[10px] text-slate-500 mt-1">
-                    Minimal 6 karakter kombinasi huruf atau angka.
+            <form onSubmit={handleSavePassword} className="space-y-3.5">
+              {/* Kolom Sandi Baru */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Kata Sandi Baru <span className="text-red-500">*</span>
+                </label>
+                <div className="relative">
+                  <input
+                    type={showNewPassword ? 'text' : 'password'}
+                    required
+                    placeholder="Minimal 6 karakter..."
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    className="w-full px-3 py-2 pr-9 text-xs rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono bg-white"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewPassword(!showNewPassword)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                    title={showNewPassword ? 'Sembunyikan' : 'Tampilkan'}
+                  >
+                    {showNewPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+              </div>
+
+              {/* Kolom Konfirmasi Sandi */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Konfirmasi Kata Sandi Baru <span className="text-red-500">*</span>
+                </label>
+                <div className="relative">
+                  <input
+                    type={showConfirmPassword ? 'text' : 'password'}
+                    required
+                    placeholder="Ulangi kata sandi baru..."
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    className={`w-full px-3 py-2 pr-9 text-xs rounded-xl border focus:outline-none focus:ring-2 font-mono bg-white ${
+                      confirmPassword && confirmPassword !== newPassword
+                        ? 'border-rose-300 focus:ring-rose-400 text-rose-800'
+                        : 'border-slate-300 focus:ring-blue-500'
+                    }`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                    title={showConfirmPassword ? 'Sembunyikan' : 'Tampilkan'}
+                  >
+                    {showConfirmPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+                {confirmPassword && confirmPassword === newPassword && (
+                  <p className="text-[10px] text-emerald-600 mt-1 flex items-center gap-1 font-semibold">
+                    <Check className="w-3 h-3" />
+                    <span>Kata sandi cocok</span>
                   </p>
-                </div>
-
-                {/* Kolom Konfirmasi Sandi */}
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1.5">
-                    Konfirmasi Kata Sandi Baru <span className="text-red-500">*</span>
-                  </label>
-                  <div className="relative">
-                    <input
-                      type={showConfirmPassword ? 'text' : 'password'}
-                      required
-                      placeholder="Ulangi kata sandi baru..."
-                      value={confirmPassword}
-                      onChange={(e) => setConfirmPassword(e.target.value)}
-                      className={`w-full px-3.5 py-2.5 pr-10 text-xs rounded-xl border focus:outline-none focus:ring-2 font-mono ${
-                        confirmPassword && confirmPassword !== newPassword
-                          ? 'border-rose-300 focus:ring-rose-400 text-rose-800'
-                          : 'border-slate-300 focus:ring-blue-500 focus:border-blue-500'
-                      }`}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowConfirmPassword(!showConfirmPassword)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
-                      title={showConfirmPassword ? 'Sembunyikan' : 'Tampilkan'}
-                    >
-                      {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
-                  {confirmPassword && confirmPassword === newPassword && (
-                    <p className="text-[10px] text-emerald-600 mt-1 flex items-center gap-1 font-semibold">
-                      <Check className="w-3 h-3" />
-                      <span>Kata sandi cocok</span>
-                    </p>
-                  )}
-                  {confirmPassword && confirmPassword !== newPassword && (
-                    <p className="text-[10px] text-rose-500 mt-1">
-                      Kata sandi belum sama
-                    </p>
-                  )}
-                </div>
+                )}
+                {confirmPassword && confirmPassword !== newPassword && (
+                  <p className="text-[10px] text-rose-500 mt-1">
+                    Kata sandi belum sama
+                  </p>
+                )}
               </div>
 
-              <div className="pt-3 border-t border-slate-100 flex items-center justify-end">
-                <button
-                  type="submit"
-                  disabled={isSubmittingPassword || !newPassword || !confirmPassword || newPassword !== confirmPassword}
-                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-xs font-bold bg-[#0A3981] hover:bg-blue-900 text-white shadow-sm transition-all active:scale-[0.98] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <Save className="w-4 h-4" />
-                  <span>{isSubmittingPassword ? 'Menyimpan Sandi...' : 'Simpan Kata Sandi Baru'}</span>
-                </button>
-              </div>
+              <button
+                type="submit"
+                disabled={isSubmittingPassword || !newPassword || !confirmPassword || newPassword !== confirmPassword}
+                className="w-full mt-2 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold bg-[#0A3981] hover:bg-blue-900 text-white shadow-xs transition-all active:scale-[0.98] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Save className="w-3.5 h-3.5" />
+                <span>{isSubmittingPassword ? 'Menyimpan...' : 'Simpan Kata Sandi'}</span>
+              </button>
             </form>
           </div>
-
         </div>
 
       </div>
@@ -609,4 +496,3 @@ export default function KabagProfilePage() {
     </div>
   );
 }
-

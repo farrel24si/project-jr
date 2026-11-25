@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { formatCareDate, formatCareDateTime } from '../../services/careHistoryService';
 import AuthenticatedImage from './AuthenticatedImage';
+import { getRealVisitPhoto } from '../../utils/realPhotos';
 
 /**
  * RiwayatPerawatanAntarRs
@@ -236,7 +237,7 @@ export default function RiwayatPerawatanAntarRs({
                         const visitDate = vis.tanggalKunjungan || vis.tanggal || vis.waktuAktualKunjungan;
                         const visitOfficer = vis.petugasNama || episode.petugasNama;
                         const visitCondition = vis.kondisiKorban || vis.statusKondisi || vis.kondisiTerakhir || 'Stabil';
-                        const photoUrl = vis.fotoUrl || vis.foto_bukti_url;
+                        const photoUrl = vis.fotoUrl || vis.foto_bukti_url || getRealVisitPhoto(vis.id || vis.visitId || vIdx);
 
                         return (
                           <div

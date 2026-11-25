@@ -1,31 +1,32 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
-import { 
-  Users, 
-  UserCheck, 
-  Building2, 
-  Search, 
-  Download, 
-  MapPin, 
-  ChevronRight, 
+import {
+  Users,
+  User,
+  UserCheck,
+  Building2,
+  Search,
+  Download,
+  MapPin,
+  ChevronRight,
   RotateCcw,
-  Phone, 
-  Mail, 
-  HeartHandshake, 
-  LayoutGrid, 
-  Table as TableIcon, 
-  X, 
-  Eye, 
-  Activity, 
-  ShieldCheck, 
-  AlertCircle, 
+  Phone,
+  Mail,
+  HeartHandshake,
+  LayoutGrid,
+  Table as TableIcon,
+  X,
+  Eye,
+  Activity,
+  ShieldCheck,
+  AlertCircle,
   AlertTriangle,
-  Clock, 
-  ArrowUpRight, 
-  Filter, 
-  CheckCircle2, 
-  ExternalLink, 
-  Plus, 
+  Clock,
+  ArrowUpRight,
+  Filter,
+  CheckCircle2,
+  ExternalLink,
+  Plus,
   Check,
   Trash2,
   Edit3,
@@ -35,13 +36,17 @@ import {
   Key,
   Copy,
   EyeOff,
-  Lock
+  Lock,
+  Loader2
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { storageService } from '../../services/storageService';
 import { calculateFirstVisitSla, calculateMonitoringSla } from '../../services/slaService';
 import { INITIAL_HOSPITALS } from '../../services/initialDataset';
 import VictimDetailDrawer from '../../components/kabag/VictimDetailDrawer';
+import HospitalSearchSelect from '../../components/kabag/HospitalSearchSelect';
+import { isVictimFinished } from '../../utils/monitoringStatus';
+import { getReferralPerspectiveInfo } from '../../utils/referralUtils';
 
 /**
  * Helper to determine if a victim is actively under responsibility
@@ -49,13 +54,7 @@ import VictimDetailDrawer from '../../components/kabag/VictimDetailDrawer';
  */
 function isVictimActive(victim) {
   if (!victim) return false;
-  if (victim.statusPemantauan === 'Selesai Dipantau') return false;
-  
-  const kondisi = (victim.kondisiTerakhir || '').trim().toLowerCase();
-  if (kondisi === 'sudah pulang' || kondisi === 'pulang' || kondisi === 'selesai') return false;
-  if (kondisi === 'meninggal dunia' && victim.statusKonfirmasiKondisi === 'Terkonfirmasi') return false;
-  
-  return true;
+  return !isVictimFinished(victim);
 }
 
 export default function KabagOfficerDirectory() {
@@ -66,6 +65,10 @@ export default function KabagOfficerDirectory() {
   const filterValidOfficers = (list) => {
     const DUMMY_FILTER = ['citra dewi', 'budi santoso', 'eko prasetyo', 'doni setiawan', 'maya anggraini', 'hendra pratama', 'siti nurhaliza', 'dimas anggara', 'ahmad fauzi', 'adi putra'];
     return (list || []).filter((o) => {
+      // Petugas resmi sistem yang memiliki ID (PET-*) atau backendOfficerId selalu valid dan tidak boleh difilter
+      if (o.id && (String(o.id).startsWith('PET-') || o.backendOfficerId || o.backendId)) {
+        return true;
+      }
       const lower = (o.nama || '').toLowerCase();
       return !DUMMY_FILTER.some((d) => lower.includes(d));
     });
@@ -74,15 +77,149 @@ export default function KabagOfficerDirectory() {
   const [officers, setOfficers] = useState(() => filterValidOfficers(storageService.getOfficers()));
   const [victims, setVictims] = useState(() => storageService.getVictims());
   const [availableHospitals, setAvailableHospitals] = useState(() => INITIAL_HOSPITALS || []);
+  const [masterHospitals, setMasterHospitals] = useState(() => {
+    return (INITIAL_HOSPITALS || []).map((hName, idx) => ({
+      id: idx + 1,
+      nama_rs: hName,
+      alamat: 'Provinsi Riau',
+      latitude: 0.5071,
+      longitude: 101.4478,
+      radius_meter: 200
+    }));
+  });
+  const [isLoadingData, setIsLoadingData] = useState(false);
+
+  // Detail Modal & Hospital Popover states
+  const [detailOfficerModal, setDetailOfficerModal] = useState(null);
+  const [detailModalTab, setDetailModalTab] = useState('hospitals'); // 'hospitals' | 'victims' | 'history'
+  const [showAllHospitalsOfficer, setShowAllHospitalsOfficer] = useState(null);
+
+  // Single Hospital Assignment Modal (POV Data Rumah Sakit)
+  const [singleAssignHospital, setSingleAssignHospital] = useState(null);
+  const [singleAssignOfficerId, setSingleAssignOfficerId] = useState('NONE');
+  const [isSavingSingleAssign, setIsSavingSingleAssign] = useState(false);
+
+  // Filter & Search untuk Data Rumah Sakit
+  const [hospitalSearch, setHospitalSearch] = useState('');
+  const [hospitalStatusFilter, setHospitalStatusFilter] = useState('ALL'); // 'ALL' | 'ASSIGNED' | 'UNASSIGNED'
+
+  // Live backend data loading function
+  const loadFreshBackendData = async () => {
+    setIsLoadingData(true);
+    try {
+      // 1. Ambil seluruh RS master dari MySQL & gabungkan dengan daftar resmi 69 faskes
+      const masterHs = await api.getHospitals(true).catch(() => []);
+      const canonicalMap = new Map();
+
+      // Inisialisasi ke-69 RS resmi sesuai urutan canonical (1 s/d 69)
+      (INITIAL_HOSPITALS || []).forEach((hName, idx) => {
+        const key = hName.toLowerCase().replace(/[\s\-_.]+/g, '');
+        canonicalMap.set(key, {
+          id: idx + 1,
+          nama_rs: hName,
+          alamat: 'Provinsi Riau',
+          latitude: 0.5071,
+          longitude: 101.4478,
+          radius_meter: 200
+        });
+      });
+
+      // Sinkronkan ID dan alamat dari backend MySQL jika sudah ada di database
+      if (Array.isArray(masterHs) && masterHs.length > 0) {
+        masterHs.forEach((bh) => {
+          if (!bh.nama_rs) return;
+          const key = bh.nama_rs.toLowerCase().replace(/[\s\-_.]+/g, '');
+          if (canonicalMap.has(key)) {
+            const existing = canonicalMap.get(key);
+            canonicalMap.set(key, {
+              ...existing,
+              id: bh.id || existing.id,
+              alamat: (bh.alamat && bh.alamat !== 'Provinsi Riau') ? bh.alamat : existing.alamat,
+              latitude: bh.latitude || existing.latitude,
+              longitude: bh.longitude || existing.longitude,
+              radius_meter: bh.radius_meter || existing.radius_meter
+            });
+          }
+        });
+      }
+
+      const mergedList = Array.from(canonicalMap.values());
+      setMasterHospitals(mergedList);
+      setAvailableHospitals(mergedList.map((h) => h.nama_rs));
+
+      // 2. Ambil seluruh petugas dari MySQL beserta plotting RS aktif
+      const backendOfficers = await api.getOfficers(true).catch(() => []);
+      if (Array.isArray(backendOfficers) && backendOfficers.length > 0) {
+        const enrichedOfficers = await Promise.all(
+          backendOfficers.map(async (bo) => {
+            let hospitals = [];
+            try {
+              hospitals = await api.getOfficerHospitals(bo.id);
+            } catch (_) { }
+
+            const plottingRs = (hospitals || []).map((h) => {
+              const raw = h.nama_rs || '';
+              const key = raw.toLowerCase().replace(/[\s\-_.]+/g, '');
+              const matched = (INITIAL_HOSPITALS || []).find((cn) => cn.toLowerCase().replace(/[\s\-_.]+/g, '') === key);
+              return matched || raw;
+            });
+            const nameParts = (bo.nama || 'Petugas').trim().split(/\s+/);
+            const avatar = nameParts.length >= 2
+              ? (nameParts[0][0] + nameParts[1][0]).toUpperCase()
+              : nameParts[0].slice(0, 2).toUpperCase();
+
+            // Pertahankan email & nomor telepon yang baru diperbarui jika backend belum menyinkronkan
+            const localOfficer = storageService.getOfficers().find((lo) =>
+              lo.id === `PET-${String(bo.id).padStart(2, '0')}` ||
+              lo.backendOfficerId === bo.id ||
+              (lo.nama && bo.nama && lo.nama.trim().toLowerCase() === bo.nama.trim().toLowerCase())
+            );
+
+            const effectiveEmail = (bo.email && bo.email !== '—')
+              ? bo.email
+              : (localOfficer?.email && localOfficer.email !== '—' ? localOfficer.email : '—');
+
+            const effectivePhone = (bo.telepon && bo.telepon !== '—')
+              ? bo.telepon
+              : (localOfficer?.telepon && localOfficer.telepon !== '—' ? localOfficer.telepon : '—');
+
+            return {
+              id: `PET-${String(bo.id).padStart(2, '0')}`,
+              backendId: bo.id,
+              backendOfficerId: bo.id,
+              username: bo.username || null,
+              nama: bo.nama,
+              nip: bo.nip || '—',
+              jabatan: bo.jabatan || 'Mobile Service Officer',
+              wilayah: bo.wilayah || 'Pekanbaru Kota',
+              telepon: effectivePhone,
+              email: effectiveEmail,
+              avatar,
+              status: bo.operational_status || (bo.is_active ? 'Aktif Lapangan' : 'Nonaktif'),
+              kapasitas: '0/10 Kasus',
+              plottingRs,
+              hospitals: hospitals || []
+            };
+          })
+        );
+        const filtered = filterValidOfficers(enrichedOfficers);
+        setOfficers(filtered);
+        storageService.saveOfficers(enrichedOfficers);
+      }
+
+      // 3. Sinkronkan kasus dengan backend
+      await storageService.syncWithBackend(true);
+      setVictims(storageService.getVictims());
+    } catch (err) {
+      console.warn('[loadFreshBackendData] Warning:', err.message);
+    } finally {
+      setIsLoadingData(false);
+    }
+  };
 
   // Listen to live storage changes & initial backend sync
   useEffect(() => {
-    storageService.syncWithBackend(true).catch(() => {});
-    storageService.getOrFetchHospitals().then((res) => {
-      if (Array.isArray(res)) {
-        setAvailableHospitals(res.map((h) => typeof h === 'string' ? h : h.nama_rs).filter(Boolean));
-      }
-    }).catch(() => {});
+    loadFreshBackendData();
     const handleUpdate = () => {
       setOfficers(filterValidOfficers(storageService.getOfficers()));
       setVictims(storageService.getVictims());
@@ -204,17 +341,17 @@ export default function KabagOfficerDirectory() {
     if (!backendId || isNaN(backendId)) return;
 
     try {
-      const masterHospitals = await api.getHospitals(true);
+      const masterHs = await api.getHospitals(true).catch(() => masterHospitals);
       const currentPlots = await api.getOfficerHospitals(backendId).catch(() => []);
       const currentHospitalIds = new Set((currentPlots || []).map((p) => p.hospital_id));
 
       const targetHospitalIds = new Set();
       for (let i = 0; i < hospitalNames.length; i++) {
         const rsName = hospitalNames[i];
-        let matched = masterHospitals.find(
+        let matched = (masterHs || []).find(
           (h) => (h.nama_rs || '').toLowerCase().trim() === rsName.toLowerCase().trim() ||
-                 (h.nama_rs || '').toLowerCase().includes(rsName.toLowerCase()) ||
-                 rsName.toLowerCase().includes((h.nama_rs || '').toLowerCase())
+            (h.nama_rs || '').toLowerCase().includes(rsName.toLowerCase()) ||
+            rsName.toLowerCase().includes((h.nama_rs || '').toLowerCase())
         );
 
         if (!matched) {
@@ -226,21 +363,34 @@ export default function KabagOfficerDirectory() {
               longitude: 101.4478,
               radius_meter: 200
             });
-          } catch (_) {}
+          } catch (_) { }
         }
 
         if (matched && matched.id) {
-          targetHospitalIds.add(matched.id);
-          if (!currentHospitalIds.has(matched.id)) {
-            await api.plotHospitalToOfficer(backendId, matched.id, i === 0).catch(() => {});
+          const hid = Number(matched.id);
+          targetHospitalIds.add(hid);
+
+          // Lepas dari petugas lain jika RS ini sebelumnya dipegang oleh petugas lain (cegah penugasan ganda)
+          for (const otherOff of officers) {
+            const otherBackendId = otherOff.backendOfficerId || otherOff.backendId || Number(String(otherOff.id).replace(/\D/g, ''));
+            if (otherBackendId && otherBackendId !== backendId) {
+              const holds = (otherOff.hospitals || []).some((h) => Number(h.hospital_id || h.id) === hid);
+              if (holds) {
+                await api.removeHospitalFromOfficer(otherBackendId, hid).catch(() => {});
+              }
+            }
+          }
+
+          if (!currentHospitalIds.has(hid)) {
+            await api.plotHospitalToOfficer(backendId, hid, i === 0).catch(() => { });
           }
         }
       }
 
-      // Lepas relasi RS di backend yang sudah tidak dipilih
+      // Lepas relasi RS di backend yang sudah tidak dipilih oleh petugas ini
       for (const existingPlot of currentPlots || []) {
         if (!targetHospitalIds.has(existingPlot.hospital_id)) {
-          await api.removeHospitalFromOfficer(backendId, existingPlot.hospital_id).catch(() => {});
+          await api.removeHospitalFromOfficer(backendId, existingPlot.hospital_id).catch(() => { });
         }
       }
     } catch (err) {
@@ -280,7 +430,7 @@ export default function KabagOfficerDirectory() {
     }
 
     if (!newOfficerForm.plottingRs || newOfficerForm.plottingRs.length === 0) {
-      alert('Mohon pilih minimal satu rumah sakit tanggung jawab (plotting RS) untuk petugas.');
+      alert('Mohon pilih minimal satu rumah sakit yang ditangani untuk petugas.');
       return;
     }
 
@@ -293,7 +443,7 @@ export default function KabagOfficerDirectory() {
       .trim()
       .toLowerCase()
       .replace(/[^a-z0-9_]/g, '');
-    
+
     if (!cleanUsername) {
       const firstWord = newOfficerForm.nama.trim().toLowerCase().split(/\s+/)[0].replace(/[^a-z0-9]/g, '');
       cleanUsername = firstWord || 'petugas';
@@ -362,6 +512,14 @@ export default function KabagOfficerDirectory() {
       status: newOfficerForm.status,
       plottingRs: [...newOfficerForm.plottingRs]
     });
+
+    if (cleanEmail && cleanEmail !== '—') {
+      try {
+        localStorage.setItem(`jr_officer_email_to_username_${cleanEmail.toLowerCase()}`, cleanUsername);
+      } catch {
+        // ignore
+      }
+    }
 
     setIsSubmittingOfficer(false);
     setIsAddOfficerModalOpen(false);
@@ -439,7 +597,7 @@ export default function KabagOfficerDirectory() {
     }
   };
 
-  const handleSaveEdit = (e) => {
+  const handleSaveEdit = async (e) => {
     e.preventDefault();
     if (!editingOfficer) return;
     if (!editForm.nama.trim()) {
@@ -465,6 +623,11 @@ export default function KabagOfficerDirectory() {
       }
     }
 
+    if (!editForm.plottingRs || editForm.plottingRs.length === 0) {
+      alert('Mohon pilih minimal satu rumah sakit yang ditangani untuk petugas.');
+      return;
+    }
+
     const finalWilayah =
       editForm.wilayah === 'OTHER'
         ? (editForm.customWilayah || 'Pekanbaru Kota').trim()
@@ -472,6 +635,7 @@ export default function KabagOfficerDirectory() {
 
     const finalPlottingRs = [...editForm.plottingRs];
 
+    // 1. Simpan perubahan ke storage service lokal
     const updated = storageService.updateOfficer(editingOfficer.id, {
       nama: editForm.nama.trim(),
       nip: editForm.nip.trim() || '—',
@@ -483,20 +647,69 @@ export default function KabagOfficerDirectory() {
       plottingRs: finalPlottingRs
     });
 
-    // Sinkronkan ke database backend MySQL (tabel officers & officer_hospitals)
+    // Simpan email baru dan arsipkan email lama ke daftar tidak aktif
+    const oldEmail = (editingOfficer.email || '').toLowerCase().trim();
+    const newEmail = cleanEmail.toLowerCase().trim();
+    if (oldEmail && oldEmail !== '—' && newEmail && oldEmail !== newEmail) {
+      try {
+        const retired = JSON.parse(localStorage.getItem('jr_retired_officer_emails') || '[]');
+        if (!retired.includes(oldEmail)) {
+          retired.push(oldEmail);
+          localStorage.setItem('jr_retired_officer_emails', JSON.stringify(retired));
+        }
+        localStorage.removeItem(`jr_officer_email_to_username_${oldEmail}`);
+      } catch {
+        // ignore
+      }
+    }
+
+    if (newEmail && newEmail !== '—') {
+      try {
+        const targetUsername = editingOfficer.username || (editingOfficer.backendOfficerId === 1 ? 'petugas' : `petugas${editingOfficer.backendOfficerId || ''}`);
+        localStorage.setItem(`jr_officer_email_to_username_${newEmail}`, targetUsername);
+      } catch {
+        // ignore
+      }
+    }
+
+    // 2. Langsung perbarui local React state agar tabel & modal langsung menampilkan data & email baru
+    setOfficers((prev) =>
+      prev.map((o) => (String(o.id) === String(editingOfficer.id) ? { ...o, ...updated } : o))
+    );
+    if (detailOfficerModal && String(detailOfficerModal.id) === String(editingOfficer.id)) {
+      setDetailOfficerModal((prev) => (prev ? { ...prev, ...updated } : null));
+    }
+    if (activeOfficerModal && String(activeOfficerModal.id) === String(editingOfficer.id)) {
+      setActiveOfficerModal((prev) => (prev ? { ...prev, ...updated } : null));
+    }
+
+    // 3. Sinkronkan ke database backend MySQL (tabel officers & officer_hospitals)
     const targetOfficerId = editingOfficer.backendOfficerId || editingOfficer.backendId || Number(String(editingOfficer.id).replace(/\D/g, ''));
     if (targetOfficerId) {
-      api.updateOfficer(targetOfficerId, {
-        nama: editForm.nama.trim(),
-        nip: editForm.nip.trim() || null,
-        jabatan: editForm.jabatan.trim() || 'Mobile Service Officer',
-        wilayah: finalWilayah,
-        telepon: cleanPhone && cleanPhone !== '—' ? cleanPhone : null,
-        email: cleanEmail && cleanEmail !== '—' ? cleanEmail : null,
-        is_active: editForm.status !== 'Nonaktif'
-      }).catch((e) => console.warn('[KabagOfficerDirectory] updateOfficer backend warning:', e.message));
+      try {
+        await api.updateOfficer(targetOfficerId, {
+          nama: editForm.nama.trim(),
+          nip: editForm.nip.trim() || null,
+          jabatan: editForm.jabatan.trim() || 'Mobile Service Officer',
+          wilayah: finalWilayah,
+          telepon: cleanPhone && cleanPhone !== '—' ? cleanPhone : null,
+          email: cleanEmail && cleanEmail !== '—' ? cleanEmail : null,
+          is_active: editForm.status !== 'Nonaktif'
+        });
+      } catch (e) {
+        console.warn('[KabagOfficerDirectory] updateOfficer backend warning:', e.message);
+      }
+      try {
+        await syncOfficerHospitalsToBackend(targetOfficerId, finalPlottingRs);
+      } catch (e) {
+        console.warn('[KabagOfficerDirectory] syncOfficerHospitalsToBackend warning:', e.message);
+      }
     }
-    syncOfficerHospitalsToBackend(targetOfficerId, finalPlottingRs);
+
+    // 4. Siarkan event perubahan petugas agar seluruh komponen (termasuk profil) ikut sinkron
+    if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+      window.dispatchEvent(new Event('jr_officers_updated'));
+    }
 
     setIsEditModalOpen(false);
     setEditingOfficer(null);
@@ -504,49 +717,336 @@ export default function KabagOfficerDirectory() {
     setTimeout(() => setToastMessage(null), 4500);
   };
 
-  // ── MODAL: ATUR PENUGASAN RS KHUSUS ──
+  // ── MODAL: KELOLA PENUGASAN RS (MULTI-SELECT) ──
   const [isHospitalAssignmentModalOpen, setIsHospitalAssignmentModalOpen] = useState(false);
   const [assignmentOfficer, setAssignmentOfficer] = useState(null);
-  const [assignmentRsList, setAssignmentRsList] = useState([]);
+  const [assignmentSelectedHospitalIds, setAssignmentSelectedHospitalIds] = useState(new Set());
+  const [assignmentSearchTerm, setAssignmentSearchTerm] = useState('');
+  const [assignmentTabFilter, setAssignmentTabFilter] = useState('all'); // 'all' | 'assigned' | 'available'
+  const [isSavingAssignment, setIsSavingAssignment] = useState(false);
   const [newAssignmentRsInput, setNewAssignmentRsInput] = useState('');
 
-  const handleOpenHospitalAssignmentModal = (officer) => {
+  const handleOpenHospitalAssignmentModal = async (officer) => {
     setAssignmentOfficer(officer);
-    setAssignmentRsList(Array.isArray(officer.plottingRs) ? [...officer.plottingRs] : []);
+    const officerBackendId = officer.backendOfficerId || officer.backendId || Number(String(officer.id).replace(/\D/g, ''));
+
+    let currentPlotIds = [];
+    if (officerBackendId) {
+      try {
+        const plots = await api.getOfficerHospitals(officerBackendId);
+        currentPlotIds = plots.map((p) => p.hospital_id);
+      } catch (_) {
+        currentPlotIds = masterHospitals
+          .filter((h) => (officer.plottingRs || []).includes(h.nama_rs))
+          .map((h) => h.id);
+      }
+    } else {
+      currentPlotIds = masterHospitals
+        .filter((h) => (officer.plottingRs || []).includes(h.nama_rs))
+        .map((h) => h.id);
+    }
+
+    setAssignmentSelectedHospitalIds(new Set(currentPlotIds));
+    setAssignmentSearchTerm('');
+    setAssignmentTabFilter('all');
     setNewAssignmentRsInput('');
     setIsHospitalAssignmentModalOpen(true);
   };
 
-  const handleToggleAssignmentHospital = (rs) => {
-    setAssignmentRsList((prev) =>
-      prev.includes(rs) ? prev.filter((r) => r !== rs) : [...prev, rs]
-    );
+  const handleToggleAssignmentHospitalId = (hospitalId) => {
+    setAssignmentSelectedHospitalIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(hospitalId)) {
+        next.delete(hospitalId);
+      } else {
+        next.add(hospitalId);
+      }
+      return next;
+    });
   };
 
-  const handleAddCustomAssignmentHospital = () => {
+  const handleAddCustomAssignmentHospital = async () => {
     const clean = newAssignmentRsInput.trim();
     if (!clean) return;
-    if (!assignmentRsList.includes(clean)) {
-      setAssignmentRsList((prev) => [...prev, clean]);
+
+    try {
+      // Buat RS baru di backend jika belum ada
+      const created = await api.createHospital({
+        nama_rs: clean,
+        alamat: 'Riau, Indonesia',
+        latitude: 0.5071,
+        longitude: 101.4478,
+        radius_meter: 200
+      });
+      if (created && created.id) {
+        setMasterHospitals((prev) => [...prev, created]);
+        setAvailableHospitals((prev) => [...prev, created.nama_rs]);
+        setAssignmentSelectedHospitalIds((prev) => new Set([...prev, created.id]));
+      }
+    } catch (err) {
+      console.warn('[handleAddCustomAssignmentHospital] Backend create error:', err.message);
     }
     setNewAssignmentRsInput('');
   };
 
-  const handleSaveHospitalAssignment = () => {
+  const handleSaveHospitalAssignment = async () => {
     if (!assignmentOfficer) return;
-    const finalPlottingRs = [...assignmentRsList];
-    const updated = storageService.updateOfficer(assignmentOfficer.id, {
-      plottingRs: finalPlottingRs
-    });
+    const officerBackendId = assignmentOfficer.backendOfficerId || assignmentOfficer.backendId || Number(String(assignmentOfficer.id).replace(/\D/g, ''));
+    if (!officerBackendId) return;
 
-    // Sinkronkan ke database backend MySQL (tabel officer_hospitals)
-    const targetOfficerId = assignmentOfficer.backendOfficerId || assignmentOfficer.backendId || Number(String(assignmentOfficer.id).replace(/\D/g, ''));
-    syncOfficerHospitalsToBackend(targetOfficerId, finalPlottingRs);
+    setIsSavingAssignment(true);
+    try {
+      const selectedIds = Array.from(assignmentSelectedHospitalIds).map((id) => Number(String(id).replace(/\D/g, ''))).filter((n) => !isNaN(n) && n > 0);
+      const currentPlots = await api.getOfficerHospitals(officerBackendId).catch(() => []);
+      const currentIds = new Set(currentPlots.map((p) => p.hospital_id));
 
-    setIsHospitalAssignmentModalOpen(false);
-    setAssignmentOfficer(null);
-    setToastMessage(`Penugasan rumah sakit untuk ${updated.nama} berhasil diperbarui (${finalPlottingRs.length} RS).`);
-    setTimeout(() => setToastMessage(null), 4500);
+      // 1. Tambah plotting RS baru & lepas dari petugas lama jika sebelumnya dipegang orang lain
+      // Ketentuan: mencegah penugasan ganda & memastikan faskes tidak tetap menampilkan petugas lama
+      for (const hid of selectedIds) {
+        for (const otherOff of officers) {
+          const otherBackendId = otherOff.backendOfficerId || otherOff.backendId || Number(String(otherOff.id).replace(/\D/g, ''));
+          if (otherBackendId && otherBackendId !== officerBackendId) {
+            const holds = (otherOff.hospitals || []).some((h) => Number(h.hospital_id || h.id) === hid);
+            if (holds) {
+              await api.removeHospitalFromOfficer(otherBackendId, hid).catch(() => {});
+            }
+          }
+        }
+        if (!currentIds.has(hid)) {
+          await api.plotHospitalToOfficer(officerBackendId, hid).catch((err) => console.warn(err));
+        }
+      }
+
+      // 2. Lepas plotting RS yang di-uncheck
+      for (const plot of currentPlots) {
+        if (!selectedIds.includes(plot.hospital_id)) {
+          await api.removeHospitalFromOfficer(officerBackendId, plot.hospital_id).catch((err) => console.warn(err));
+        }
+      }
+
+      // 3. Re-fetch data plotting RS terbaru seluruh petugas dari backend
+      const freshPlots = await api.getOfficerHospitals(officerBackendId).catch(() => []);
+      const freshRsNames = freshPlots.map((p) => p.nama_rs);
+
+      const freshOfficers = await Promise.all(
+        officers.map(async (o) => {
+          const bId = o.backendOfficerId || o.backendId || Number(String(o.id).replace(/\D/g, ''));
+          if (!bId) return o;
+          try {
+            const plots = await api.getOfficerHospitals(bId);
+            return {
+              ...o,
+              hospitals: plots || [],
+              plottingRs: (plots || []).map((p) => p.nama_rs)
+            };
+          } catch {
+            return o;
+          }
+        })
+      );
+      setOfficers(freshOfficers);
+      storageService.saveOfficers(freshOfficers);
+
+      if (detailOfficerModal && String(detailOfficerModal.id) === String(assignmentOfficer.id)) {
+        setDetailOfficerModal((prev) => ({
+          ...prev,
+          plottingRs: freshRsNames,
+          hospitals: freshPlots
+        }));
+      }
+
+      await storageService.syncWithBackend(true);
+      if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+        window.dispatchEvent(new Event('jr_officers_updated'));
+        window.dispatchEvent(new Event('jr_victims_updated'));
+      }
+
+      setToastMessage(`Penugasan rumah sakit untuk ${assignmentOfficer.nama} berhasil diperbarui (${freshPlots.length} RS aktif).`);
+      setTimeout(() => setToastMessage(null), 4500);
+      setIsHospitalAssignmentModalOpen(false);
+      setAssignmentOfficer(null);
+    } catch (err) {
+      alert(`Gagal menyimpan penugasan rumah sakit: ${err.message}`);
+    } finally {
+      setIsSavingAssignment(false);
+    }
+  };
+
+  // Mengakhiri penugasan rumah sakit
+  const handleEndAssignment = async (officer, hospitalId, hospitalName) => {
+    const officerBackendId = officer.backendOfficerId || officer.backendId || Number(String(officer.id).replace(/\D/g, ''));
+    const hid = Number(String(hospitalId).replace(/\D/g, ''));
+    if (!officerBackendId || !hid) return;
+
+    if (!window.confirm(`Yakin ingin mengakhiri penugasan ${officer.nama} untuk ${hospitalName}? Status RS ini akan menjadi "Belum ada Petugas".`)) {
+      return;
+    }
+
+    try {
+      await api.removeHospitalFromOfficer(officerBackendId, hid);
+      const freshPlots = await api.getOfficerHospitals(officerBackendId).catch(() => []);
+      const freshRsNames = freshPlots.map((p) => p.nama_rs);
+
+      storageService.updateOfficer(officer.id, {
+        plottingRs: freshRsNames,
+        hospitals: freshPlots
+      });
+
+      const nextOfficers = officers.map((o) =>
+        String(o.id) === String(officer.id)
+          ? { ...o, plottingRs: freshRsNames, hospitals: freshPlots }
+          : o
+      );
+      setOfficers(nextOfficers);
+      storageService.saveOfficers(nextOfficers);
+
+      if (detailOfficerModal && String(detailOfficerModal.id) === String(officer.id)) {
+        setDetailOfficerModal((prev) => ({
+          ...prev,
+          plottingRs: freshRsNames,
+          hospitals: freshPlots
+        }));
+      }
+
+      await storageService.syncWithBackend(true);
+      if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+        window.dispatchEvent(new Event('jr_officers_updated'));
+        window.dispatchEvent(new Event('jr_victims_updated'));
+      }
+
+      setToastMessage(`Penugasan di ${hospitalName} berhasil diakhiri. Rumah sakit kini berstatus "Belum ada Petugas".`);
+      setTimeout(() => setToastMessage(null), 4500);
+    } catch (err) {
+      alert(`Gagal mengakhiri penugasan: ${err.message}`);
+    }
+  };
+
+  // Buka Modal Atur Petugas untuk Satu Rumah Sakit (POV Data Rumah Sakit)
+  const handleOpenSingleAssignModal = (hospital) => {
+    setSingleAssignHospital(hospital);
+    const assignedOff = getHospitalAssignedOfficer(hospital.id, hospital.nama_rs);
+    setSingleAssignOfficerId(assignedOff ? assignedOff.id : 'NONE');
+  };
+
+  // Simpan Penugasan untuk Satu Rumah Sakit
+  const handleSaveSingleAssign = async () => {
+    if (!singleAssignHospital) return;
+    setIsSavingSingleAssign(true);
+    try {
+      const hid = Number(String(singleAssignHospital.id).replace(/\D/g, ''));
+      if (!hid) throw new Error('ID rumah sakit tidak valid.');
+
+      const currentAssigned = getHospitalAssignedOfficer(hid, singleAssignHospital.nama_rs);
+
+      if (singleAssignOfficerId === 'NONE') {
+        // Lepaskan penugasan jika dipilih Belum ada Petugas
+        if (currentAssigned) {
+          const cId = currentAssigned.backendOfficerId || currentAssigned.backendId || Number(String(currentAssigned.id).replace(/\D/g, ''));
+          if (cId) {
+            await api.removeHospitalFromOfficer(cId, hid);
+          }
+        }
+      } else {
+        const targetOfficer = officers.find((o) => String(o.id) === String(singleAssignOfficerId));
+        if (!targetOfficer) throw new Error('Petugas yang dipilih tidak ditemukan.');
+        const tBackendId = targetOfficer.backendOfficerId || targetOfficer.backendId || Number(String(targetOfficer.id).replace(/\D/g, ''));
+        if (!tBackendId) throw new Error('ID backend petugas tidak valid.');
+
+        // Lepas dari petugas sebelumnya jika ada (cegah penugasan ganda)
+        if (currentAssigned && String(currentAssigned.id) !== String(targetOfficer.id)) {
+          const cId = currentAssigned.backendOfficerId || currentAssigned.backendId || Number(String(currentAssigned.id).replace(/\D/g, ''));
+          if (cId) {
+            await api.removeHospitalFromOfficer(cId, hid).catch(() => {});
+          }
+        }
+
+        // Hubungkan ke petugas baru
+        await api.plotHospitalToOfficer(tBackendId, hid);
+      }
+
+      // Re-fetch seluruh data penugasan dari backend
+      const freshOfficers = await Promise.all(
+        officers.map(async (o) => {
+          const bId = o.backendOfficerId || o.backendId || Number(String(o.id).replace(/\D/g, ''));
+          if (!bId) return o;
+          try {
+            const plots = await api.getOfficerHospitals(bId);
+            return {
+              ...o,
+              hospitals: plots || [],
+              plottingRs: (plots || []).map((p) => p.nama_rs)
+            };
+          } catch {
+            return o;
+          }
+        })
+      );
+      setOfficers(freshOfficers);
+      storageService.saveOfficers(freshOfficers);
+
+      await storageService.syncWithBackend(true);
+      if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+        window.dispatchEvent(new Event('jr_officers_updated'));
+        window.dispatchEvent(new Event('jr_victims_updated'));
+      }
+
+      const assignedTarget = officers.find((o) => String(o.id) === String(singleAssignOfficerId));
+      setToastMessage(
+        singleAssignOfficerId === 'NONE'
+          ? `Penugasan di ${singleAssignHospital.nama_rs} telah dilepas (Status: Belum ada Petugas).`
+          : `Penugasan ${singleAssignHospital.nama_rs} berhasil dialihkan ke ${assignedTarget?.nama || 'Petugas'}.`
+      );
+      setTimeout(() => setToastMessage(null), 4500);
+      setSingleAssignHospital(null);
+    } catch (err) {
+      alert(`Gagal menyimpan penugasan rumah sakit: ${err.message}`);
+    } finally {
+      setIsSavingSingleAssign(false);
+    }
+  };
+
+  // Lepas Penugasan Rumah Sakit langsung dari baris tabel
+  const handleUnassignHospital = async (hospital) => {
+    const assignedOff = getHospitalAssignedOfficer(hospital.id, hospital.nama_rs);
+    if (!assignedOff) return;
+
+    if (!window.confirm(`Yakin ingin melepas penugasan ${assignedOff.nama} dari ${hospital.nama_rs}? Status rumah sakit akan menjadi "Belum ada Petugas".`)) {
+      return;
+    }
+
+    const officerBackendId = assignedOff.backendOfficerId || assignedOff.backendId || Number(String(assignedOff.id).replace(/\D/g, ''));
+    const hid = Number(String(hospital.id).replace(/\D/g, ''));
+    if (!officerBackendId || !hid) return;
+
+    try {
+      await api.removeHospitalFromOfficer(officerBackendId, hid);
+      const freshPlots = await api.getOfficerHospitals(officerBackendId).catch(() => []);
+      const freshRsNames = freshPlots.map((p) => p.nama_rs);
+
+      storageService.updateOfficer(assignedOff.id, {
+        plottingRs: freshRsNames,
+        hospitals: freshPlots
+      });
+
+      const nextOfficers = officers.map((o) =>
+        String(o.id) === String(assignedOff.id)
+          ? { ...o, plottingRs: freshRsNames, hospitals: freshPlots }
+          : o
+      );
+      setOfficers(nextOfficers);
+      storageService.saveOfficers(nextOfficers);
+
+      await storageService.syncWithBackend(true);
+      if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+        window.dispatchEvent(new Event('jr_officers_updated'));
+        window.dispatchEvent(new Event('jr_victims_updated'));
+      }
+
+      setToastMessage(`Penugasan ${assignedOff.nama} di ${hospital.nama_rs} berhasil diakhiri.`);
+      setTimeout(() => setToastMessage(null), 4500);
+    } catch (err) {
+      alert(`Gagal melepas penugasan: ${err.message}`);
+    }
   };
 
   // Quick toggle status aktif/nonaktif
@@ -566,6 +1066,88 @@ export default function KabagOfficerDirectory() {
     setToastMessage(`Status petugas ${updated.nama} diubah menjadi "${nextStatus}".`);
     setTimeout(() => setToastMessage(null), 4000);
   };
+
+  // Fungsi kanonikal untuk mendapatkan petugas penanggung jawab satu RS (Utamakan ID)
+  const getHospitalAssignedOfficer = (hospitalId, hospitalName) => {
+    const numId = Number(String(hospitalId || '').replace(/\D/g, ''));
+    const cleanName = (hospitalName || '').toLowerCase().replace(/[\s\-_.]+/g, '');
+
+    // 1. Acuan Utama: ID Rumah Sakit & ID Petugas
+    if (numId) {
+      for (const off of officers) {
+        if (off.status === 'Nonaktif') continue;
+        if (Array.isArray(off.hospitals) && off.hospitals.some((h) => Number(h.hospital_id || h.id) === numId)) {
+          return off;
+        }
+      }
+    }
+
+    // 2. Acuan Nama Fasilitas Kesehatan jika ID belum sinkron
+    if (cleanName) {
+      for (const off of officers) {
+        if (off.status === 'Nonaktif') continue;
+        if (Array.isArray(off.hospitals) && off.hospitals.some((h) => (h.nama_rs || '').toLowerCase().replace(/[\s\-_.]+/g, '') === cleanName)) {
+          return off;
+        }
+        if (Array.isArray(off.plottingRs) && off.plottingRs.some((rs) => (rs || '').toLowerCase().replace(/[\s\-_.]+/g, '') === cleanName)) {
+          return off;
+        }
+      }
+    }
+
+    return null;
+  };
+
+  // Rumah sakit yang belum memiliki petugas penanggung jawab
+  const unassignedHospitals = useMemo(() => {
+    return masterHospitals.filter((h) => !getHospitalAssignedOfficer(h.id, h.nama_rs));
+  }, [officers, masterHospitals]);
+
+  // Filtered Master Hospitals untuk POV Data Rumah Sakit
+  const filteredMasterHospitals = useMemo(() => {
+    return masterHospitals.filter((h) => {
+      const q = hospitalSearch.trim().toLowerCase();
+      const assignedOff = getHospitalAssignedOfficer(h.id, h.nama_rs);
+      if (hospitalStatusFilter === 'ASSIGNED' && !assignedOff) return false;
+      if (hospitalStatusFilter === 'UNASSIGNED' && assignedOff) return false;
+      if (!q) return true;
+      const matchName = (h.nama_rs || '').toLowerCase().includes(q);
+      const matchAddr = (h.alamat || '').toLowerCase().includes(q);
+      const matchOff = assignedOff && (assignedOff.nama || '').toLowerCase().includes(q);
+      return matchName || matchAddr || matchOff;
+    });
+  }, [masterHospitals, hospitalSearch, hospitalStatusFilter, officers]);
+
+  // Pemetaan RS ke petugas yang menangani (ID-based & Name-based)
+  const hospitalAssignedOfficersMap = useMemo(() => {
+    const map = new Map();
+    officers.forEach((off) => {
+      (off.hospitals || []).forEach((h) => {
+        const hid = h.hospital_id || h.id;
+        if (hid) {
+          if (!map.has(hid)) map.set(hid, []);
+          if (!map.get(hid).some((o) => String(o.id) === String(off.id))) {
+            map.get(hid).push(off);
+          }
+        }
+        if (h.nama_rs) {
+          const lower = h.nama_rs.toLowerCase().trim();
+          if (!map.has(lower)) map.set(lower, []);
+          if (!map.get(lower).some((o) => String(o.id) === String(off.id))) {
+            map.get(lower).push(off);
+          }
+        }
+      });
+      (off.plottingRs || []).forEach((rsName) => {
+        const lower = (rsName || '').toLowerCase().trim();
+        if (!map.has(lower)) map.set(lower, []);
+        if (!map.get(lower).some((o) => String(o.id) === String(off.id))) {
+          map.get(lower).push(off);
+        }
+      });
+    });
+    return map;
+  }, [officers]);
 
   // Extract distinct regions & hospitals for filter options
   const uniqueRegions = useMemo(() => {
@@ -588,21 +1170,47 @@ export default function KabagOfficerDirectory() {
   const officerWorkloads = useMemo(() => {
     const map = {};
     officers.forEach((off) => {
-      const assigned = storageService.getVictimsByOfficer(off);
+      // Ambil seluruh korban yang berhubungan dengan petugas ini (baik aktif, rujukan masuk, maupun yang pernah dirujuk keluar)
+      const allRelated = storageService.getOfficerVictimsForPortal(off);
 
-      const active = assigned.filter(isVictimActive);
-      const finished = assigned.filter((v) => !isVictimActive(v));
+      const activeVictims = [];
+      const referredVictims = [];
+      const finishedVictims = [];
 
-      // Calculate load % (default max 10 cases)
-      const pct = Math.min(100, Math.round((active.length / 10) * 100));
+      allRelated.forEach((v) => {
+        const role = storageService.getOfficerVictimRole(off, v);
+        const isDischarged =
+          v.kondisiTerakhir === 'Sudah Pulang' ||
+          v.kondisiTerakhir === 'Pulang' ||
+          v.kondisiTerakhir === 'Selesai' ||
+          v.kondisiTerakhir === 'Meninggal Dunia' ||
+          v.statusPemantauan === 'Selesai Dipantau';
+
+        if (role === 'ORIGIN_OFFICER') {
+          // Korban yang pernah dirawat di RS binaan petugas ini namun telah dirujuk keluar ke RS lain
+          referredVictims.push(v);
+        } else if (isDischarged) {
+          finishedVictims.push(v);
+        } else {
+          // Korban aktif dalam pemantauan petugas ini (penugasan langsung atau rujukan masuk)
+          activeVictims.push(v);
+        }
+      });
+
+      // Beban aktif HANYA dihitung dari korban aktif (korban yang sudah dirujuk ke RS lain tidak membebani kapasitas!)
+      const activeCount = activeVictims.length;
+      const pct = Math.min(100, Math.round((activeCount / 10) * 100));
 
       map[off.id] = {
-        allVictims: assigned,
-        activeVictims: active,
-        finishedVictims: finished,
-        activeCount: active.length,
-        totalCount: assigned.length,
-        capacityText: `${active.length}/10 Kasus`,
+        allVictims: allRelated,
+        activeVictims,
+        referredVictims,
+        finishedVictims,
+        activeCount,
+        referredCount: referredVictims.length,
+        finishedCount: finishedVictims.length,
+        totalCount: allRelated.length,
+        capacityText: `${activeCount}/10 Kasus`,
         loadPct: pct > 0 ? pct : (off.bebanKasusPct || 0)
       };
     });
@@ -615,20 +1223,25 @@ export default function KabagOfficerDirectory() {
     const activeOfficersCount = officers.filter(
       (o) => o.status === 'Aktif Lapangan' || !o.status
     ).length;
-    
+
     let totalActiveVictims = 0;
     Object.values(officerWorkloads).forEach((wl) => {
       totalActiveVictims += wl.activeCount;
     });
 
+    const assignedCount = masterHospitals.filter((h) => getHospitalAssignedOfficer(h.id, h.nama_rs)).length;
+    const unassignedCount = masterHospitals.length - assignedCount;
+
     return {
       totalOfficers,
       activeOfficersCount,
       totalRegions: uniqueRegions.length,
-      totalHospitals: uniqueHospitals.length,
+      totalHospitals: masterHospitals.length,
+      assignedHospitalsCount: assignedCount,
+      unassignedHospitalsCount: unassignedCount,
       totalActiveVictims
     };
-  }, [officers, uniqueRegions, uniqueHospitals, officerWorkloads]);
+  }, [officers, uniqueRegions, masterHospitals, officerWorkloads]);
 
   // Filtered officers list
   const filteredOfficers = useMemo(() => {
@@ -683,15 +1296,14 @@ export default function KabagOfficerDirectory() {
       'Status Petugas',
       'Wilayah Tugas',
       'Rumah Sakit Ditangani',
-      'Korban Aktif Tanggung Jawab',
       'Total Korban Ditangani',
-      'Kapasitas Beban',
+      'Korban Aktif',
       'Nomor Telepon',
       'Email'
     ];
 
     const rows = filteredOfficers.map((off, index) => {
-      const wl = officerWorkloads[off.id] || { activeCount: 0, totalCount: 0, capacityText: '0/10' };
+      const wl = officerWorkloads[off.id] || { activeCount: 0, totalCount: 0 };
       const rsList = (off.plottingRs || []).join('; ');
       return [
         index + 1,
@@ -701,9 +1313,8 @@ export default function KabagOfficerDirectory() {
         `"${off.status || 'Aktif Lapangan'}"`,
         `"${off.wilayah || '—'}"`,
         `"${rsList}"`,
-        wl.activeCount,
         wl.totalCount,
-        `"${wl.capacityText}"`,
+        wl.activeCount,
         `"${off.telepon || '—'}"`,
         `"${off.email || '—'}"`
       ];
@@ -733,12 +1344,14 @@ export default function KabagOfficerDirectory() {
     const wl = officerWorkloads[activeOfficerModal.id] || {
       allVictims: [],
       activeVictims: [],
+      referredVictims: [],
       finishedVictims: []
     };
 
-    if (modalVictimTab === 'active') return wl.activeVictims;
-    if (modalVictimTab === 'finished') return wl.finishedVictims;
-    return wl.allVictims;
+    if (modalVictimTab === 'active') return wl.activeVictims || [];
+    if (modalVictimTab === 'referred') return wl.referredVictims || [];
+    if (modalVictimTab === 'finished') return wl.finishedVictims || [];
+    return wl.allVictims || [];
   }, [activeOfficerModal, modalVictimTab, officerWorkloads]);
 
   const getStatusDisplay = (status) => {
@@ -748,51 +1361,77 @@ export default function KabagOfficerDirectory() {
     return { label: 'Aktif Lapangan', color: 'text-emerald-700', dot: 'bg-emerald-500' };
   };
 
-  const renderHospitalSummary = (hospitals, compact = false) => {
+  const renderHospitalSummary = (hospitals, officer) => {
     const listedHospitals = hospitals || [];
-    const visibleHospitals = listedHospitals.slice(0, compact ? 1 : 2);
+    const visibleHospitals = listedHospitals.slice(0, 2);
     const remaining = listedHospitals.length - visibleHospitals.length;
 
     if (listedHospitals.length === 0) {
-      return <span className="text-[11px] text-slate-400">Belum ada RS ditugaskan</span>;
+      return (
+        <div className="flex items-center gap-1.5 text-[11px] text-amber-700 font-medium bg-amber-50 px-2.5 py-1 rounded-lg border border-amber-200/80">
+          <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+          <span>Belum ada RS ditugaskan</span>
+        </div>
+      );
     }
 
     return (
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-600">
-        {visibleHospitals.map((hospital) => (
-          <span key={hospital} className="truncate max-w-[170px]">{hospital}</span>
-        ))}
-        {remaining > 0 && (
-          <span className="text-slate-400 whitespace-nowrap">+{remaining} lainnya</span>
-        )}
+      <div className="space-y-1.5">
+        <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+          {visibleHospitals.map((hospital) => (
+            <span
+              key={hospital}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-blue-50 text-[#145DA0] border border-blue-200/80 max-w-[190px] truncate shadow-2xs"
+              title={hospital}
+            >
+              <Building2 className="w-3 h-3 text-[#145DA0] shrink-0" />
+              <span className="truncate">{hospital}</span>
+            </span>
+          ))}
+          {remaining > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowAllHospitalsOfficer(officer)}
+              className="inline-flex items-center px-2 py-1 rounded-lg text-[11px] font-bold bg-slate-100 hover:bg-blue-100 hover:text-[#0A3981] text-slate-700 border border-slate-300 transition-colors cursor-pointer"
+              title="Klik untuk melihat seluruh daftar rumah sakit"
+            >
+              +{remaining} lainnya
+            </button>
+          )}
+        </div>
+
+        <div className="pt-0.5">
+          <span className="text-[10px] text-slate-400 font-medium">
+            Total {listedHospitals.length} Fasilitas Kesehatan
+          </span>
+        </div>
       </div>
     );
   };
 
   return (
     <div className="space-y-6">
-      {/* 1. Header Section (Bentuk Identik Petugas) */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200/80 pb-4">
+      {/* 1. Header Section */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200/80 pb-4">
         <div>
-          <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
+          <h1 className="text-xl sm:text-2xl font-bold text-slate-800 tracking-tight">
             Data Petugas Lapangan
           </h1>
           <p className="text-xs text-slate-500 mt-1 max-w-3xl leading-relaxed">
-            Direktori personil petugas Jasa Raharja, penugasan wilayah, rumah sakit yang ditangani, dan kapasitas beban kasus.
+            Direktori personil petugas Jasa Raharja, penugasan wilayah, faskes rumah sakit yang ditangani, dan total beban kasus korban.
           </p>
         </div>
 
-        <div className="flex items-center gap-2.5 flex-wrap">
+        <div className="flex items-center gap-2.5 flex-wrap self-start sm:self-auto">
           {/* View mode toggle */}
-          <div className="inline-flex items-center bg-slate-100 p-1 rounded-lg border border-slate-200 text-xs">
+          <div className="inline-flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs">
             <button
               type="button"
               onClick={() => setViewMode('table')}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md font-bold transition-all ${
-                viewMode === 'table'
-                  ? 'bg-white text-[#0A3981] shadow-2xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-medium transition-all cursor-pointer ${viewMode === 'table'
+                ? 'bg-white text-[#145DA0] shadow-xs font-semibold'
+                : 'text-slate-600 hover:text-slate-900'
+                }`}
               title="Tampilan Tabel Matriks"
             >
               <TableIcon className="w-3.5 h-3.5" />
@@ -801,123 +1440,123 @@ export default function KabagOfficerDirectory() {
             <button
               type="button"
               onClick={() => setViewMode('grid')}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md font-bold transition-all ${
-                viewMode === 'grid'
-                  ? 'bg-white text-[#0A3981] shadow-2xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-              title="Tampilan Kartu 4 Pilar"
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-medium transition-all cursor-pointer ${viewMode === 'grid'
+                ? 'bg-white text-[#145DA0] shadow-xs font-semibold'
+                : 'text-slate-600 hover:text-slate-900'
+                }`}
+              title="Tampilan Kartu Profil"
             >
               <LayoutGrid className="w-3.5 h-3.5" />
               <span>Kartu Profil</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode('hospitals')}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-medium transition-all cursor-pointer ${viewMode === 'hospitals'
+                ? 'bg-white text-[#145DA0] shadow-xs font-semibold'
+                : 'text-slate-600 hover:text-slate-900'
+                }`}
+              title="Tampilan Data Rumah Sakit & Kelola Penugasan"
+            >
+              <Building2 className="w-3.5 h-3.5" />
+              <span>Data Rumah Sakit</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-slate-200 text-slate-700">
+                {masterHospitals.length}
+              </span>
             </button>
           </div>
 
           <button
             type="button"
-            onClick={handleExportCSV}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 shadow-2xs transition-colors"
-          >
-            <Download className="w-3.5 h-3.5 text-slate-500" />
-            <span>Export Data (.CSV)</span>
-          </button>
-
-          <button
-            type="button"
             onClick={() => setIsAddOfficerModalOpen(true)}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold bg-[#0A3981] hover:bg-blue-900 text-white shadow-2xs transition-all active:scale-[0.98]"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium bg-[#145DA0] hover:bg-[#0A3981] text-white shadow-xs transition-all active:scale-[0.98] cursor-pointer"
           >
             <Plus className="w-3.5 h-3.5" />
-            <span>Tambah Petugas Baru</span>
+            <span>Tambah Petugas</span>
           </button>
         </div>
       </div>
 
 
-      {/* 2. Four Metric Cards representing the 4 Core Questions */}
+      {/* 2. Four Metric Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-        {/* Pilar 1: Siapa Petugasnya? */}
-        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs flex items-center gap-3.5 hover:border-blue-300 transition-colors">
-          <div className="w-11 h-11 rounded-xl bg-blue-50 text-[#145DA0] flex items-center justify-center shrink-0 border border-blue-100">
+        {/* Card 1: Total Petugas */}
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-xs flex items-center gap-3.5 hover:border-blue-200 transition-colors">
+          <div className="w-10 h-10 rounded-xl bg-blue-50 text-[#145DA0] flex items-center justify-center shrink-0 border border-blue-100">
             <Users className="w-5 h-5" />
           </div>
           <div>
-            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
-              1. Siapa Petugasnya
+            <span className="text-xs text-slate-500 font-medium block">
+              Total Petugas
             </span>
             <div className="flex items-baseline gap-1.5 mt-0.5">
-              <span className="text-xl font-black text-slate-900">
+              <span className="text-2xl font-bold text-slate-800 tracking-tight">
                 {globalMetrics.totalOfficers}
               </span>
-              <span className="text-xs text-slate-500 font-semibold">Petugas</span>
+              <span className="text-xs text-slate-500 font-normal">Petugas</span>
             </div>
-            <p className="text-[10px] text-emerald-600 font-semibold mt-0.5 flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
-              {globalMetrics.activeOfficersCount} Aktif Lapangan
-            </p>
           </div>
         </div>
 
-        {/* Pilar 2: Di Mana Wilayah Tugasnya? */}
-        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs flex items-center gap-3.5 hover:border-emerald-300 transition-colors">
-          <div className="w-11 h-11 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center shrink-0 border border-emerald-100">
+        {/* Card 2: Wilayah Penugasan */}
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-xs flex items-center gap-3.5 hover:border-emerald-200 transition-colors">
+          <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center shrink-0 border border-emerald-100">
             <MapPin className="w-5 h-5" />
           </div>
           <div>
-            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
-              2. Wilayah Tugas
+            <span className="text-xs text-slate-500 font-medium block">
+              Wilayah Penugasan
             </span>
             <div className="flex items-baseline gap-1.5 mt-0.5">
-              <span className="text-xl font-black text-slate-900">
+              <span className="text-2xl font-bold text-slate-800 tracking-tight">
                 {globalMetrics.totalRegions}
               </span>
-              <span className="text-xs text-slate-500 font-semibold">Wilayah</span>
+              <span className="text-xs text-slate-500 font-normal">Wilayah</span>
             </div>
-            <p className="text-[10px] text-slate-500 font-medium mt-0.5">
-              Pekanbaru, Kampar, Dumai, dll.
-            </p>
           </div>
         </div>
 
-        {/* Pilar 3: Rumah Sakit Mana yang Ditangani? */}
-        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs flex items-center gap-3.5 hover:border-indigo-300 transition-colors">
-          <div className="w-11 h-11 rounded-xl bg-indigo-50 text-indigo-700 flex items-center justify-center shrink-0 border border-indigo-100">
+        {/* Card 3: Data Rumah Sakit */}
+        <div
+          onClick={() => setViewMode('hospitals')}
+          className={`bg-white rounded-2xl border p-4 sm:p-5 shadow-xs flex items-center gap-3.5 transition-all cursor-pointer group ${
+            viewMode === 'hospitals'
+              ? 'border-[#145DA0] ring-2 ring-blue-100 bg-blue-50/20'
+              : 'border-slate-200/90 hover:border-indigo-200'
+          }`}
+          title="Klik untuk membuka Data Rumah Sakit & Kelola Penugasan Petugas"
+        >
+          <div className="w-10 h-10 rounded-xl bg-indigo-50 text-indigo-700 flex items-center justify-center shrink-0 border border-indigo-100 group-hover:bg-[#145DA0] group-hover:text-white transition-colors">
             <Building2 className="w-5 h-5" />
           </div>
           <div>
-            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
-              3. RS yang Ditangani
+            <span className="text-xs text-slate-500 font-medium block">
+              Fasilitas Kesehatan
             </span>
             <div className="flex items-baseline gap-1.5 mt-0.5">
-              <span className="text-xl font-black text-slate-900">
+              <span className="text-2xl font-bold text-slate-800 tracking-tight">
                 {globalMetrics.totalHospitals}
               </span>
-              <span className="text-xs text-slate-500 font-semibold">RS Rujukan</span>
+              <span className="text-xs text-slate-500 font-normal">Faskes RS</span>
             </div>
-            <p className="text-[10px] text-slate-500 font-medium mt-0.5">
-              Plotting Fasilitas Kesehatan
-            </p>
           </div>
         </div>
 
-        {/* Pilar 4: Berapa Korban yang Sedang Menjadi Tanggung Jawabnya? */}
-        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs flex items-center gap-3.5 hover:border-amber-300 transition-colors">
-          <div className="w-11 h-11 rounded-xl bg-amber-50 text-amber-700 flex items-center justify-center shrink-0 border border-amber-100">
+        {/* Card 4: Korban Tanggung Jawab */}
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-xs flex items-center gap-3.5 hover:border-amber-200 transition-colors">
+          <div className="w-10 h-10 rounded-xl bg-amber-50 text-amber-700 flex items-center justify-center shrink-0 border border-amber-100">
             <HeartHandshake className="w-5 h-5" />
           </div>
           <div>
-            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
-              4. Korban Tanggung Jawab
+            <span className="text-xs text-slate-500 font-medium block">
+              Beban Kasus Korban
             </span>
             <div className="flex items-baseline gap-1.5 mt-0.5">
-              <span className="text-xl font-black text-slate-900">
+              <span className="text-2xl font-bold text-slate-800 tracking-tight">
                 {globalMetrics.totalActiveVictims}
               </span>
-              <span className="text-xs text-slate-500 font-semibold">Korban Aktif</span>
+              <span className="text-xs text-slate-500 font-normal">Pasien Aktif</span>
             </div>
-            <p className="text-[10px] text-amber-700 font-medium mt-0.5">
-              Pasien dirawat / dipantau
-            </p>
           </div>
         </div>
       </div>
@@ -1024,57 +1663,213 @@ export default function KabagOfficerDirectory() {
             <span>Tambah Petugas Pertama</span>
           </button>
         </div>
+      ) : viewMode === 'hospitals' ? (
+        /* ======================== DATA RUMAH SAKIT & MATRIKS PENUGASAN ======================== */
+        <div className="space-y-4">
+          {/* Sub Header Bar */}
+          <div className="bg-white rounded-2xl border border-slate-200/90 shadow-2xs p-4 sm:p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-blue-50 text-[#145DA0] flex items-center justify-center shrink-0 border border-blue-100">
+                <Building2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h2 className="text-sm font-black text-slate-900 tracking-tight">
+                  Direktori Data Rumah Sakit &amp; Penugasan Petugas
+                </h2>
+                <p className="text-[11px] text-slate-500">
+                  Pemetaan akurat faskes di Provinsi Riau dengan petugas penanggung jawab lapangan.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 flex-wrap w-full sm:w-auto">
+              {/* Search Hospital */}
+              <div className="relative flex-1 sm:w-64">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={hospitalSearch}
+                  onChange={(e) => setHospitalSearch(e.target.value)}
+                  placeholder="Cari RS, alamat, atau petugas..."
+                  className="w-full pl-8 pr-3 py-1.5 rounded-xl border border-slate-200 focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#145DA0] bg-slate-50/70 text-xs text-slate-900"
+                />
+              </div>
+
+              {/* Filter Status Penugasan */}
+              <select
+                value={hospitalStatusFilter}
+                onChange={(e) => setHospitalStatusFilter(e.target.value)}
+                className="bg-slate-50/70 border border-slate-200 text-slate-700 text-xs font-semibold rounded-xl px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-[#145DA0]"
+              >
+                <option value="ALL">Semua RS ({masterHospitals.length})</option>
+                <option value="ASSIGNED">Sudah Ada Petugas ({globalMetrics.assignedHospitalsCount})</option>
+                <option value="UNASSIGNED">Belum Ada Petugas ({globalMetrics.unassignedHospitalsCount})</option>
+              </select>
+            </div>
+          </div>
+
+          {/* Tabel Data Rumah Sakit */}
+          <div className="bg-white rounded-2xl border border-slate-200/90 shadow-2xs overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs text-slate-600">
+                <thead className="bg-slate-50/90 text-slate-600 font-bold border-b border-slate-200 uppercase text-[10px] tracking-wider">
+                  <tr>
+                    <th className="py-3.5 px-3 text-center w-12">NO</th>
+                    <th className="py-3.5 px-3 w-24">KODE RS</th>
+                    <th className="py-3.5 px-4 min-w-[260px]">NAMA RUMAH SAKIT</th>
+                    <th className="py-3.5 px-4 min-w-[200px]">ALAMAT &amp; WILAYAH</th>
+                    <th className="py-3.5 px-4 min-w-[240px]">PETUGAS PENANGGUNG JAWAB</th>
+                    <th className="py-3.5 px-3 text-center min-w-[120px]">PASIEN AKTIF</th>
+                    <th className="py-3.5 px-4 text-center w-48">KONTROL PENUGASAN</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {filteredMasterHospitals.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="py-12 text-center text-slate-400">
+                        <Building2 className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                        <p className="font-semibold text-slate-700 text-xs">Tidak ada rumah sakit yang sesuai filter pencarian.</p>
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredMasterHospitals.map((hosp, idx) => {
+                      const assignedOff = getHospitalAssignedOfficer(hosp.id, hosp.nama_rs);
+                      const activeCasesInHosp = victims.filter((v) => {
+                        if (!isVictimActive(v)) return false;
+                        if (v.hospital_id && hosp.id && Number(v.hospital_id) === Number(hosp.id)) return true;
+                        const vRs = (v.rumahSakit || '').toLowerCase().trim();
+                        const hRs = (hosp.nama_rs || '').toLowerCase().trim();
+                        return vRs === hRs || (hRs.length >= 4 && (vRs.includes(hRs) || hRs.includes(vRs)));
+                      }).length;
+
+                      return (
+                        <tr key={hosp.id || idx} className="hover:bg-blue-50/30 transition-colors group">
+                          {/* 1. NO */}
+                          <td className="py-3.5 px-3 text-center text-slate-400 font-mono text-xs">
+                            {idx + 1}
+                          </td>
+
+                          {/* 2. KODE RS */}
+                          <td className="py-3.5 px-3 whitespace-nowrap font-mono text-xs text-slate-500 font-bold">
+                            {typeof hosp.id === 'number' || !isNaN(Number(hosp.id)) ? `RS-${String(hosp.id).padStart(2, '0')}` : hosp.id}
+                          </td>
+
+                          {/* 3. NAMA RUMAH SAKIT */}
+                          <td className="py-3.5 px-4">
+                            <div className="flex items-center gap-2">
+                              <div className="w-7 h-7 rounded-lg bg-blue-50 text-[#145DA0] flex items-center justify-center shrink-0 border border-blue-100">
+                                <Building2 className="w-3.5 h-3.5" />
+                              </div>
+                              <div>
+                                <span className="font-bold text-slate-900 group-hover:text-[#145DA0] text-xs block">
+                                  {hosp.nama_rs}
+                                </span>
+                                <span className="text-[10px] text-slate-400 block font-mono">
+                                  Radius Audit: {hosp.radius_meter || 200} Meter
+                                </span>
+                              </div>
+                            </div>
+                          </td>
+
+                          {/* 4. ALAMAT & WILAYAH */}
+                          <td className="py-3.5 px-4 text-slate-600 text-xs">
+                            <div className="flex items-start gap-1.5">
+                              <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
+                              <span className="line-clamp-2 leading-relaxed">
+                                {hosp.alamat || 'Provinsi Riau'}
+                              </span>
+                            </div>
+                          </td>
+
+                          {/* 5. PETUGAS PENANGGUNG JAWAB */}
+                          <td className="py-3.5 px-4 whitespace-nowrap">
+                            {assignedOff ? (
+                              <div>
+                                <Link
+                                  to={`/kabag/kinerja?tab=detail&officerId=${assignedOff.id}`}
+                                  className="font-bold text-slate-900 hover:text-[#145DA0] hover:underline block text-xs"
+                                >
+                                  {assignedOff.nama}
+                                </Link>
+                                <span className="text-[10px] text-slate-400 font-mono block">
+                                  {assignedOff.nip && assignedOff.nip !== '—' ? `NIP. ${assignedOff.nip}` : assignedOff.wilayah}
+                                </span>
+                              </div>
+                            ) : (
+                              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold bg-amber-50 text-amber-800 border border-amber-300 shadow-2xs">
+                                <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                                <span>Belum ada Petugas</span>
+                              </span>
+                            )}
+                          </td>
+
+                          {/* 6. PASIEN AKTIF */}
+                          <td className="py-3.5 px-3 text-center whitespace-nowrap">
+                            {activeCasesInHosp > 0 ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold bg-blue-50 text-[#0A3981] border border-blue-200">
+                                <HeartHandshake className="w-3.5 h-3.5" />
+                                <span>{activeCasesInHosp} Pasien</span>
+                              </span>
+                            ) : (
+                              <span className="text-slate-400 text-xs">0 Pasien</span>
+                            )}
+                          </td>
+
+                          {/* 7. KONTROL PENUGASAN */}
+                          <td className="py-3.5 px-4 text-center whitespace-nowrap">
+                            <div className="flex items-center justify-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => handleOpenSingleAssignModal(hosp)}
+                                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-bold bg-blue-50 hover:bg-blue-100 text-[#0A3981] border border-blue-200 transition-colors cursor-pointer shadow-2xs"
+                                title="Atur atau ubah petugas penanggung jawab RS ini"
+                              >
+                                <Sliders className="w-3.5 h-3.5" />
+                                <span>{assignedOff ? 'Ganti Petugas' : 'Atur Petugas'}</span>
+                              </button>
+
+                              {assignedOff && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleUnassignHospital(hosp)}
+                                  className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-bold text-rose-600 hover:text-rose-700 hover:bg-rose-50 border border-rose-200 transition-colors cursor-pointer"
+                                  title="Lepas penugasan petugas dari RS ini"
+                                >
+                                  <Power className="w-3 h-3" />
+                                  <span>Lepas</span>
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
       ) : viewMode === 'table' ? (
-        /* ======================== TABEL MATRIKS 4 PILAR ======================== */
+        /* ======================== TABEL MATRIKS PETUGAS ======================== */
         <div className="bg-white rounded-2xl border border-slate-200/90 shadow-2xs overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs text-slate-600">
-              <thead className="bg-slate-50/80 text-slate-500 font-bold border-b border-slate-200/90 uppercase text-[10px] tracking-wider">
+              <thead className="bg-slate-50/90 text-slate-600 font-bold border-b border-slate-200 uppercase text-[10px] tracking-wider">
                 <tr>
-                  <th className="py-3 px-3 text-center w-12">NO</th>
-                  <th className="py-3 px-4 min-w-[240px]">
-                    <div className="flex items-center gap-1.5 text-slate-900 font-black">
-                      <Users className="w-3.5 h-3.5 text-[#0A3981]" />
-                      <span>1. SIAPA PETUGASNYA</span>
-                    </div>
-                    <span className="text-[9px] font-normal text-slate-400 block normal-case">
-                      Nama, NIP, Kontak &amp; Status
-                    </span>
-                  </th>
-                  <th className="py-3 px-4 min-w-[160px]">
-                    <div className="flex items-center gap-1.5 text-slate-900 font-black">
-                      <MapPin className="w-3.5 h-3.5 text-emerald-600" />
-                      <span>2. WILAYAH TUGAS</span>
-                    </div>
-                    <span className="text-[9px] font-normal text-slate-400 block normal-case">
-                      Area Operasional Penugasan
-                    </span>
-                  </th>
-                  <th className="py-3 px-4 min-w-[240px]">
-                    <div className="flex items-center gap-1.5 text-slate-900 font-black">
-                      <Building2 className="w-3.5 h-3.5 text-indigo-600" />
-                      <span>3. RUMAH SAKIT DITANGANI</span>
-                    </div>
-                    <span className="text-[9px] font-normal text-slate-400 block normal-case">
-                      Plotting Faskes Rujukan &amp; Penugasan
-                    </span>
-                  </th>
-                  <th className="py-3 px-4 min-w-[200px]">
-                    <div className="flex items-center gap-1.5 text-slate-900 font-black">
-                      <HeartHandshake className="w-3.5 h-3.5 text-amber-600" />
-                      <span>4. KORBAN TANGGUNG JAWAB</span>
-                    </div>
-                    <span className="text-[9px] font-normal text-slate-400 block normal-case">
-                      Jumlah Korban Aktif &amp; Beban
-                    </span>
-                  </th>
-                  <th className="py-3 px-4 text-center w-36">AKSI OPERASIONAL</th>
+                  <th className="py-3.5 px-3 text-center w-12">NO</th>
+                  <th className="py-3.5 px-4 min-w-[240px]">NAMA PETUGAS</th>
+                  <th className="py-3.5 px-3 min-w-[130px]">STATUS OPERASIONAL</th>
+                  <th className="py-3.5 px-3 min-w-[130px]">WILAYAH TUGAS</th>
+                  <th className="py-3.5 px-4 min-w-[240px]">RUMAH SAKIT DITANGANI</th>
+                  <th className="py-3.5 px-3 text-center min-w-[110px]">TOTAL KORBAN</th>
+                  <th className="py-3.5 px-3 text-center w-44">AKSI OPERASIONAL</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {filteredOfficers.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-12 text-center text-slate-400">
+                    <td colSpan={7} className="py-12 text-center text-slate-400">
                       <AlertCircle className="w-8 h-8 text-slate-300 mx-auto mb-2" />
                       <p className="text-sm font-semibold text-slate-600">
                         Tidak ada petugas yang cocok dengan filter atau kata kunci
@@ -1082,7 +1877,7 @@ export default function KabagOfficerDirectory() {
                       <button
                         type="button"
                         onClick={resetFilters}
-                        className="mt-3 inline-flex items-center gap-1 text-xs font-bold text-[#0A3981] hover:underline"
+                        className="mt-3 inline-flex items-center gap-1 text-xs font-bold text-[#145DA0] hover:underline cursor-pointer"
                       >
                         <RotateCcw className="w-3 h-3" />
                         <span>Reset Filter Pencarian</span>
@@ -1101,138 +1896,128 @@ export default function KabagOfficerDirectory() {
 
                     return (
                       <tr key={off.id} className="hover:bg-slate-50/70 transition-colors">
-                        {/* NO */}
+                        {/* 1. NO */}
                         <td className="py-4 px-3 text-center font-bold text-slate-400">
                           {no}
                         </td>
 
-                        {/* 1. SIAPA PETUGASNYA */}
+                        {/* 2. NAMA PETUGAS (Nama, NIP, No HP) */}
                         <td className="py-4 px-4">
-                          <div className="flex items-start gap-3">
-                            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#0A3981] to-[#145DA0] text-white font-black text-xs flex items-center justify-center shrink-0 shadow-2xs mt-0.5">
-                              {off.avatar || 'JR'}
-                            </div>
-                            <div className="min-w-0 flex-1">
-                              <Link
-                                to={`/kabag/kinerja-petugas/${off.id}`}
-                                className="font-extrabold text-slate-900 block text-xs hover:text-[#0A3981] transition-colors hover:underline"
-                              >
-                                {off.nama}
-                              </Link>
-                              <span className="text-[10px] text-slate-400 font-mono block mt-0.5">
-                                NIP. {off.nip}
-                              </span>
-                              <div className="flex items-center gap-3 mt-1.5 flex-wrap">
-                                <span className="inline-flex items-center gap-1 text-[10px] font-medium text-slate-500">
-                                  <Phone className="w-2.5 h-2.5 text-slate-400" />
-                                  <span>{off.telepon || '—'}</span>
-                                </span>
-                                {(() => {
-                                  const st = getStatusDisplay(off.status);
-                                  return (
-                                    <span className={`inline-flex items-center gap-1.5 text-[11px] font-semibold ${st.color}`}>
-                                      <span className={`w-1.5 h-1.5 rounded-full ${st.dot}`} />
-                                      <span>{st.label}</span>
-                                    </span>
-                                  );
-                                })()}
-                              </div>
-                            </div>
-                          </div>
-                        </td>
-
-                        {/* 2. WILAYAH TUGAS */}
-                        <td className="py-4 px-4">
-                          <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800">
-                            <MapPin className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                            <span>{off.wilayah}</span>
-                          </div>
-                        </td>
-
-                        {/* 3. RUMAH SAKIT DITANGANI */}
-                        <td className="py-4 px-4">
-                          {renderHospitalSummary(off.plottingRs)}
-                          <div className="flex items-center justify-between gap-2 mt-1.5 max-w-xs">
-                            <span className="text-[10px] text-slate-400 font-medium">
-                              Total {(off.plottingRs || []).length} Fasilitas Kesehatan
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => handleOpenHospitalAssignmentModal(off)}
-                              className="text-[10px] font-bold text-[#0A3981] hover:text-[#072B62] hover:underline cursor-pointer"
-                              title="Atur penugasan rumah sakit untuk petugas ini"
-                            >
-                              Atur RS
-                            </button>
-                          </div>
-                        </td>
-
-                        {/* 4. KORBAN TANGGUNG JAWAB */}
-                        <td className="py-4 px-4">
-                          <div className="flex items-center justify-between text-[11px] mb-1">
-                            <span className="font-bold text-slate-900">
-                              {wl.activeCount} Korban Aktif
-                            </span>
-                            <span className="text-[10px] text-slate-400 font-mono">
-                              {wl.capacityText} ({wl.loadPct}%)
-                            </span>
-                          </div>
-
-                          {/* Progress bar kapasitas beban */}
-                          <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden mt-1">
-                            <div
-                              className={`h-full rounded-full transition-all duration-300 ${
-                                wl.loadPct >= 90
-                                  ? 'bg-rose-500'
-                                  : wl.loadPct >= 70
-                                  ? 'bg-[#0A3981]'
-                                  : 'bg-emerald-500'
-                              }`}
-                              style={{ width: `${Math.max(8, wl.loadPct)}%` }}
-                            />
-                          </div>
-                        </td>
-
-                        {/* AKSI OPERASIONAL */}
-                        <td className="py-4 px-4 text-center whitespace-nowrap">
-                          <div className="flex flex-col gap-1.5 items-center justify-center">
+                          <div className="min-w-0">
                             <button
                               type="button"
                               onClick={() => handleOpenOfficerVictims(off)}
-                              className="w-full px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-blue-50 text-[#0A3981] hover:bg-blue-100 border border-blue-200 transition-colors inline-flex items-center justify-center gap-1 cursor-pointer"
+                              className="font-extrabold text-slate-900 block text-xs sm:text-sm hover:text-[#145DA0] transition-colors hover:underline text-left cursor-pointer"
                             >
-                              <Eye className="w-3 h-3" />
-                              <span>Lihat Korban</span>
+                              {off.nama}
                             </button>
-                            <div className="flex items-center gap-1 w-full">
-                              <Link
-                                to={`/kabag/kinerja-petugas/${off.id}`}
-                                className="flex-1 inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-[#0A3981] text-white hover:bg-[#072B62] transition-colors shadow-2xs"
-                              >
-                                <span>Detail</span>
-                                <ChevronRight className="w-3 h-3" />
-                              </Link>
-                              <button
-                                type="button"
-                                onClick={() => handleOpenEditModal(off)}
-                                title="Edit Petugas & Penugasan RS"
-                                className="p-1.5 rounded-lg text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 transition-colors cursor-pointer"
-                              >
-                                <Edit3 className="w-3 h-3" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setDeleteModalError(null);
-                                  setOfficerToDelete(off);
-                                  setIsDeleteModalOpen(true);
-                                }}
-                                title="Hapus Petugas Ini"
-                                className="p-1.5 rounded-lg text-rose-600 bg-rose-50 hover:bg-rose-100 border border-rose-200 transition-colors cursor-pointer"
-                              >
-                                <Trash2 className="w-3 h-3" />
-                              </button>
-                            </div>
+                              <span className="text-[11px] text-slate-500 font-medium block mt-0.5">
+                                NIP: <span className="font-mono text-slate-700 font-semibold">{off.nip || off.id || '—'}</span>
+                              </span>
+                              <span className="text-[11px] text-slate-500 font-medium block">
+                                {off.telepon ? (
+                                  <a
+                                    href={`https://wa.me/${String(off.telepon).replace(/\D/g, '')}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-slate-600 hover:text-emerald-600 transition-colors inline-flex items-center gap-1 font-mono"
+                                    title="Hubungi via WhatsApp"
+                                  >
+                                    <span>{off.telepon}</span>
+                                    <ExternalLink className="w-2.5 h-2.5 text-slate-400" />
+                                  </a>
+                                ) : (
+                                  <span className="text-slate-400">No. HP: —</span>
+                                )}
+                              </span>
+                              {off.email && off.email !== '—' && (
+                                <span className="text-[11px] text-slate-500 font-medium block truncate max-w-[200px]" title={off.email}>
+                                  <span className="font-mono text-slate-600">{off.email}</span>
+                                </span>
+                              )}
+                          </div>
+                        </td>
+
+                        {/* 5. STATUS OPERASIONAL */}
+                        <td className="py-4 px-3">
+                          {(() => {
+                            const st = getStatusDisplay(off.status);
+                            return (
+                              <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold border ${off.status === 'Nonaktif'
+                                ? 'bg-slate-100 text-slate-600 border-slate-200'
+                                : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                }`}>
+                                <span className={`w-1.5 h-1.5 rounded-full ${st.dot}`} />
+                                <span>{st.label}</span>
+                              </span>
+                            );
+                          })()}
+                        </td>
+
+                        {/* 6. WILAYAH TUGAS */}
+                        <td className="py-4 px-3">
+                          <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800">
+                            <MapPin className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                            <span>{off.wilayah || '—'}</span>
+                          </div>
+                        </td>
+
+                        {/* 7. RUMAH SAKIT DITANGANI */}
+                        <td className="py-4 px-4">
+                          {renderHospitalSummary(off.plottingRs, off)}
+                        </td>
+
+                        {/* 8. TOTAL KORBAN */}
+                        <td className="py-4 px-3 text-center">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenOfficerVictims(off)}
+                            className="inline-flex flex-col items-center justify-center p-1.5 rounded-xl hover:bg-blue-50 transition-colors cursor-pointer group"
+                            title="Klik untuk melihat rincian korban yang ditangani"
+                          >
+                            <span className="text-sm font-black text-[#0A3981] group-hover:underline">
+                              {wl.totalCount}
+                            </span>
+                            <span className="text-[10px] font-semibold text-slate-500">
+                              Total Korban
+                            </span>
+                          </button>
+                        </td>
+
+                        {/* 10. AKSI OPERASIONAL */}
+                        <td className="py-4 px-3 text-center whitespace-nowrap">
+                          <div className="flex items-center justify-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => handleOpenOfficerVictims(off)}
+                              className="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-[#145DA0] text-white hover:bg-[#0A3981] transition-colors inline-flex items-center gap-1 shadow-2xs cursor-pointer"
+                              title="Lihat Detail Korban Tanggung Jawab"
+                            >
+                              <Eye className="w-3.5 h-3.5" />
+                              <span>Detail</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditModal(off)}
+                              className="p-1.5 rounded-lg text-slate-600 bg-slate-100 hover:bg-slate-200 border border-slate-200 transition-colors cursor-pointer"
+                              title="Edit Data Petugas"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setDeleteModalError(null);
+                                setOfficerToDelete(off);
+                                setIsDeleteModalOpen(true);
+                              }}
+                              className="p-1.5 rounded-lg text-rose-600 bg-rose-50 hover:bg-rose-100 border border-rose-200 transition-colors cursor-pointer"
+                              title="Nonaktifkan Petugas"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
                           </div>
                         </td>
                       </tr>
@@ -1278,21 +2063,16 @@ export default function KabagOfficerDirectory() {
                   {/* Card Header: 1. SIAPA PETUGASNYA */}
                   <div className="p-4 border-b border-slate-100 bg-gradient-to-r from-slate-50/70 to-blue-50/30">
                     <div className="flex items-start justify-between gap-3">
-                      <div className="flex items-center gap-3">
-                        <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-[#0A3981] to-[#145DA0] text-white font-black text-sm flex items-center justify-center shrink-0 shadow-2xs">
-                          {off.avatar || 'JR'}
-                        </div>
-                        <div>
-                          <Link
-                            to={`/kabag/kinerja-petugas/${off.id}`}
-                            className="font-extrabold text-slate-900 text-sm hover:text-[#0A3981] hover:underline block leading-snug"
-                          >
-                            {off.nama}
-                          </Link>
-                          <span className="text-[10px] text-slate-400 font-mono block">
-                            NIP. {off.nip}
-                          </span>
-                        </div>
+                      <div>
+                        <Link
+                          to={`/kabag/kinerja-petugas/${off.id}`}
+                          className="font-extrabold text-slate-900 text-sm hover:text-[#0A3981] hover:underline block leading-snug"
+                        >
+                          {off.nama}
+                        </Link>
+                        <span className="text-[10px] text-slate-400 font-mono block">
+                          NIP. {off.nip}
+                        </span>
                       </div>
                       <div>
                         {(() => {
@@ -1331,21 +2111,17 @@ export default function KabagOfficerDirectory() {
                     <div>
                       <div className="flex items-center justify-between gap-2 mb-1">
                         <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">RS Ditangani ({(off.plottingRs || []).length})</span>
-                        <button type="button" onClick={() => handleOpenHospitalAssignmentModal(off)} className="text-[10px] font-bold text-[#0A3981] hover:underline cursor-pointer" title="Atur penugasan rumah sakit">Atur RS</button>
                       </div>
                       {renderHospitalSummary(off.plottingRs)}
                     </div>
                     <div className="pt-2 border-t border-slate-100">
                       <div className="flex items-baseline justify-between mb-1">
-                        <span className="text-xs font-bold text-slate-900">{wl.activeCount} Korban Aktif</span>
-                        <span className="text-[10px] text-slate-400 font-mono">{wl.capacityText} ({wl.loadPct}%)</span>
+                        <span className="text-xs font-bold text-slate-900">{wl.totalCount} Total Korban</span>
+                        <span className="text-[10px] text-slate-500 font-medium">{wl.activeCount} Aktif Dipantau</span>
                       </div>
-                      <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden mt-1">
-                        <div className={`h-full rounded-full ${wl.loadPct >= 90 ? 'bg-rose-500' : wl.loadPct >= 70 ? 'bg-[#0A3981]' : 'bg-emerald-500'}`} style={{ width: `${Math.max(8, wl.loadPct)}%` }} />
-                      </div>
-                      <button type="button" onClick={() => handleOpenOfficerVictims(off)} className="w-full mt-3 py-1.5 rounded-lg bg-blue-50/80 hover:bg-blue-100/80 text-[#0A3981] border border-blue-200/80 text-xs font-bold transition-colors inline-flex items-center justify-center gap-1.5 cursor-pointer">
+                      <button type="button" onClick={() => handleOpenOfficerVictims(off)} className="w-full mt-2 py-1.5 rounded-lg bg-blue-50/80 hover:bg-blue-100/80 text-[#0A3981] border border-blue-200/80 text-xs font-bold transition-colors inline-flex items-center justify-center gap-1.5 cursor-pointer">
                         <Eye className="w-3.5 h-3.5" />
-                        <span>Lihat {wl.activeCount} Korban Tanggung Jawab</span>
+                        <span>Lihat {wl.totalCount} Korban Ditangani</span>
                       </button>
                     </div>
                   </div>
@@ -1400,24 +2176,22 @@ export default function KabagOfficerDirectory() {
           <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[90vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
             {/* Modal Header */}
             <div className="p-4 sm:p-5 border-b border-slate-200 bg-slate-50/70 flex items-start justify-between gap-4">
-              <div className="flex items-center gap-3.5">
-                <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-[#0A3981] to-[#145DA0] text-white font-black text-sm flex items-center justify-center shrink-0 shadow-xs">
-                  {activeOfficerModal.avatar || 'JR'}
+              <div>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-base sm:text-lg font-black text-slate-900 tracking-tight">
+                    Korban Tanggung Jawab: {activeOfficerModal.nama}
+                  </h2>
+                  <span className="text-xs font-semibold text-slate-500">
+                    • {activeOfficerModal.wilayah}
+                  </span>
                 </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h2 className="text-base sm:text-lg font-black text-slate-900 tracking-tight">
-                      Korban Tanggung Jawab: {activeOfficerModal.nama}
-                    </h2>
-                    <span className="text-xs font-semibold text-slate-500">
-                      • {activeOfficerModal.wilayah}
-                    </span>
-                  </div>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    NIP. {activeOfficerModal.nip} • Plotting RS:{' '}
-                    {(activeOfficerModal.plottingRs || []).join(', ')}
-                  </p>
-                </div>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  NIP. {activeOfficerModal.nip || activeOfficerModal.id || '—'} • Plotting RS:{' '}
+                  {((activeOfficerModal.plottingRs && activeOfficerModal.plottingRs.length > 0)
+                    ? activeOfficerModal.plottingRs
+                    : (activeOfficerModal.hospitals || []).map((h) => h.nama_rs)
+                  ).join(', ') || 'Belum diplot'}
+                </p>
               </div>
 
               <button
@@ -1431,39 +2205,46 @@ export default function KabagOfficerDirectory() {
             </div>
 
             {/* Modal Sub-filter Tabs */}
-            <div className="px-5 pt-2 pb-2 border-b border-slate-100 flex items-center gap-1.5 bg-white text-xs">
+            <div className="px-5 pt-2 pb-2 border-b border-slate-100 flex items-center gap-1.5 bg-white text-xs overflow-x-auto">
               <button
                 type="button"
                 onClick={() => setModalVictimTab('active')}
-                className={`px-3 py-1.5 rounded-lg font-semibold transition-colors cursor-pointer ${
-                  modalVictimTab === 'active'
-                    ? 'bg-slate-100 text-slate-900 font-bold'
-                    : 'text-slate-600 hover:bg-slate-50'
-                }`}
+                className={`px-3 py-1.5 rounded-lg font-semibold transition-colors cursor-pointer whitespace-nowrap ${modalVictimTab === 'active'
+                  ? 'bg-blue-50 text-blue-900 font-bold border border-blue-200'
+                  : 'text-slate-600 hover:bg-slate-50'
+                  }`}
               >
-                Korban Aktif ({officerWorkloads[activeOfficerModal.id]?.activeCount || 0})
+                Sedang Ditangani ({officerWorkloads[activeOfficerModal.id]?.activeCount || 0})
               </button>
               <button
                 type="button"
-                onClick={() => setModalVictimTab('all')}
-                className={`px-3 py-1.5 rounded-lg font-semibold transition-colors cursor-pointer ${
-                  modalVictimTab === 'all'
-                    ? 'bg-slate-100 text-slate-900 font-bold'
-                    : 'text-slate-600 hover:bg-slate-50'
-                }`}
+                onClick={() => setModalVictimTab('referred')}
+                className={`px-3 py-1.5 rounded-lg font-semibold transition-colors cursor-pointer whitespace-nowrap ${modalVictimTab === 'referred'
+                  ? 'bg-purple-50 text-purple-900 font-bold border border-purple-200'
+                  : 'text-slate-600 hover:bg-slate-50'
+                  }`}
               >
-                Semua ({officerWorkloads[activeOfficerModal.id]?.totalCount || 0})
+                Dirujuk ke RS Lain ({officerWorkloads[activeOfficerModal.id]?.referredCount || 0})
               </button>
               <button
                 type="button"
                 onClick={() => setModalVictimTab('finished')}
-                className={`px-3 py-1.5 rounded-lg font-semibold transition-colors cursor-pointer ${
-                  modalVictimTab === 'finished'
-                    ? 'bg-slate-100 text-slate-900 font-bold'
-                    : 'text-slate-600 hover:bg-slate-50'
-                }`}
+                className={`px-3 py-1.5 rounded-lg font-semibold transition-colors cursor-pointer whitespace-nowrap ${modalVictimTab === 'finished'
+                  ? 'bg-emerald-50 text-emerald-900 font-bold border border-emerald-200'
+                  : 'text-slate-600 hover:bg-slate-50'
+                  }`}
               >
-                Selesai Dipantau ({officerWorkloads[activeOfficerModal.id]?.finishedVictims?.length || 0})
+                Selesai Dipantau ({officerWorkloads[activeOfficerModal.id]?.finishedCount || 0})
+              </button>
+              <button
+                type="button"
+                onClick={() => setModalVictimTab('all')}
+                className={`px-3 py-1.5 rounded-lg font-semibold transition-colors cursor-pointer whitespace-nowrap ${modalVictimTab === 'all'
+                  ? 'bg-slate-100 text-slate-900 font-bold'
+                  : 'text-slate-600 hover:bg-slate-50'
+                  }`}
+              >
+                Semua ({officerWorkloads[activeOfficerModal.id]?.totalCount || 0})
               </button>
             </div>
 
@@ -1502,6 +2283,7 @@ export default function KabagOfficerDirectory() {
                         );
                         const monitoringSla = calculateMonitoringSla(vic);
                         const currentSla = !vic.kunjunganPertama ? firstVisitSla : monitoringSla;
+                        const refInfo = getReferralPerspectiveInfo(vic, selectedHospital?.nama_rs || null, selectedOfficer);
 
                         return (
                           <tr key={vic.id} className="hover:bg-slate-50/80 transition-colors">
@@ -1517,29 +2299,36 @@ export default function KabagOfficerDirectory() {
                               </span>
                             </td>
                             <td className="py-3 px-3">
-                              <span className="font-semibold text-slate-800 block">
-                                {vic.rumahSakit}
-                              </span>
-                              <span className="text-[10px] text-slate-400 block truncate max-w-[180px]">
-                                {vic.ruangan || 'Rawat Inap'}
-                              </span>
+                              <div>
+                                <span className="font-semibold text-slate-800 block">
+                                  {refInfo.displayHospital}
+                                </span>
+                                <span className="text-[10px] text-slate-400 block truncate max-w-[180px]">
+                                  {vic.ruangan || 'Rawat Inap'}
+                                </span>
+                              </div>
                             </td>
                             <td className="py-3 px-3 whitespace-nowrap text-xs text-slate-600">
                               {vic.kondisiTerakhir || '—'}
                             </td>
-                            <td className="py-3 px-3 whitespace-nowrap text-xs text-slate-600">
-                              {vic.statusPemantauan || '—'}
+                            <td className="py-3 px-3 whitespace-nowrap text-xs">
+                              {vic.statusPemantauan?.startsWith('Dirujuk ke') || vic.kondisiTerakhir === 'Dirujuk' ? (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-50 text-purple-700 border border-purple-200">
+                                  <span>{vic.statusPemantauan || 'Dirujuk ke RS Lain'}</span>
+                                </span>
+                              ) : (
+                                <span className="text-slate-600">{vic.statusPemantauan || '—'}</span>
+                              )}
                             </td>
                             <td className="py-3 px-3 text-center whitespace-nowrap">
-                              <span className={`text-xs font-medium ${
-                                currentSla.status === 'TERLAMBAT'
-                                  ? 'text-rose-600'
-                                  : currentSla.status === 'MENDEKATI_TENGGAT'
+                              <span className={`text-xs font-medium ${currentSla.status === 'TERLAMBAT'
+                                ? 'text-rose-600'
+                                : currentSla.status === 'MENDEKATI_TENGGAT'
                                   ? 'text-amber-700'
                                   : currentSla.isCompleted
-                                  ? 'text-emerald-700'
-                                  : 'text-slate-500'
-                              }`}>
+                                    ? 'text-emerald-700'
+                                    : 'text-slate-500'
+                                }`}>
                                 {currentSla.label || (currentSla.isCompleted ? 'Terkunjungi' : 'Tepat Waktu')}
                               </span>
                             </td>
@@ -1581,7 +2370,7 @@ export default function KabagOfficerDirectory() {
                   <span>Hapus Petugas</span>
                 </button>
                 <Link
-                  to={`/kabag/kinerja-petugas/${activeOfficerModal.id}`}
+                  to={`/kabag/kinerja?tab=detail&officerId=${activeOfficerModal.id}`}
                   className="px-3.5 py-1.5 rounded-lg text-xs font-bold text-[#0A3981] hover:bg-blue-50 border border-blue-200 transition-colors"
                 >
                   Evaluasi Kinerja Petugas Ini
@@ -1826,73 +2615,15 @@ export default function KabagOfficerDirectory() {
                 </div>
               </div>
 
-              {/* Seksi 3: Plotting Rumah Sakit Tanggung Jawab */}
+              {/* Seksi 3: Plotting Rumah Sakit yang Ditangani */}
               <div className="space-y-3">
-                <div className="flex items-center justify-between border-b border-slate-200 pb-2">
-                  <div className="flex items-center gap-2">
-                    <Building2 className="w-4 h-4 text-indigo-600" />
-                    <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
-                      3. Plotting Rumah Sakit Tanggung Jawab
-                    </h4>
-                  </div>
-                  <span className="text-[11px] text-slate-500 font-medium">
-                    {newOfficerForm.plottingRs.length} RS Dipilih
-                  </span>
-                </div>
-
-                <p className="text-xs text-slate-500">
-                  Pilih rumah sakit rujukan yang menjadi tanggung jawab pemantauan petugas ini:
-                </p>
-
-                {/* Hospital Selection Chips */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-44 overflow-y-auto p-2 bg-slate-50 rounded-xl border border-slate-200">
-                  {availableHospitals.map((rs) => {
-                    const isSelected = newOfficerForm.plottingRs.includes(rs);
-                    return (
-                      <button
-                        key={rs}
-                        type="button"
-                        onClick={() => handleToggleHospitalSelection(rs)}
-                        className={`flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium text-left border transition-all ${
-                          isSelected
-                            ? 'bg-blue-50 text-[#0A3981] border-blue-300 font-bold shadow-2xs'
-                            : 'bg-white text-slate-700 border-slate-200 hover:border-slate-300 hover:bg-slate-100/50'
-                        }`}
-                      >
-                        <span className="truncate pr-2">{rs}</span>
-                        {isSelected ? (
-                          <Check className="w-3.5 h-3.5 text-[#0A3981] shrink-0" />
-                        ) : (
-                          <div className="w-3.5 h-3.5 rounded border border-slate-300 shrink-0" />
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-
-                {/* Add Custom Hospital Input */}
-                <div className="flex items-center gap-2 pt-1">
-                  <input
-                    type="text"
-                    placeholder="Tambah RS lainnya jika tidak ada di daftar..."
-                    value={newOfficerForm.newRsInput}
-                    onChange={(e) => setNewOfficerForm({ ...newOfficerForm, newRsInput: e.target.value })}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault();
-                        handleAddCustomHospital();
-                      }
-                    }}
-                    className="flex-1 px-3 py-2 text-xs rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleAddCustomHospital}
-                    className="px-3 py-2 text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 rounded-lg transition-colors whitespace-nowrap"
-                  >
-                    + Tambah RS
-                  </button>
-                </div>
+                <HospitalSearchSelect
+                  selectedHospitals={newOfficerForm.plottingRs}
+                  onChange={(nextList) => setNewOfficerForm((prev) => ({ ...prev, plottingRs: nextList }))}
+                  availableHospitals={availableHospitals}
+                  label="Rumah Sakit yang Ditangani"
+                  required={true}
+                />
               </div>
 
               {/* Seksi 4: Akun & Kredensial Login Petugas (Otoritas Kabag) */}
@@ -2147,73 +2878,15 @@ export default function KabagOfficerDirectory() {
                 </div>
               </div>
 
-              {/* Seksi 3: Plotting Rumah Sakit Tanggung Jawab */}
+              {/* Seksi 3: Plotting Rumah Sakit yang Ditangani */}
               <div className="space-y-3">
-                <div className="flex items-center justify-between border-b border-slate-200 pb-2">
-                  <div className="flex items-center gap-2">
-                    <Building2 className="w-4 h-4 text-indigo-600" />
-                    <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
-                      3. Plotting Rumah Sakit yang Ditangani
-                    </h4>
-                  </div>
-                  <span className="text-[11px] font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-full">
-                    {editForm.plottingRs.length} Rumah Sakit Terpilih
-                  </span>
-                </div>
-
-                <p className="text-xs text-slate-500">
-                  Centang rumah sakit yang ditugaskan ke petugas ini (satu petugas dapat menangani beberapa rumah sakit):
-                </p>
-
-                {/* Hospital Selection Chips */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-44 overflow-y-auto p-2 bg-slate-50 rounded-xl border border-slate-200">
-                  {Array.from(new Set([...availableHospitals, ...editForm.plottingRs])).map((rs) => {
-                    const isSelected = editForm.plottingRs.includes(rs);
-                    return (
-                      <button
-                        key={rs}
-                        type="button"
-                        onClick={() => handleToggleEditHospital(rs)}
-                        className={`flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium text-left border transition-all cursor-pointer ${
-                          isSelected
-                            ? 'bg-blue-50 text-[#0A3981] border-blue-300 font-bold shadow-2xs'
-                            : 'bg-white text-slate-700 border-slate-200 hover:border-slate-300 hover:bg-slate-100/50'
-                        }`}
-                      >
-                        <span className="truncate pr-2">{rs}</span>
-                        {isSelected ? (
-                          <Check className="w-3.5 h-3.5 text-[#0A3981] shrink-0" />
-                        ) : (
-                          <div className="w-3.5 h-3.5 rounded border border-slate-300 shrink-0" />
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-
-                {/* Add Custom Hospital Input */}
-                <div className="flex items-center gap-2 pt-1">
-                  <input
-                    type="text"
-                    placeholder="Tambah RS lainnya jika tidak ada di daftar..."
-                    value={editForm.newRsInput}
-                    onChange={(e) => setEditForm({ ...editForm, newRsInput: e.target.value })}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault();
-                        handleAddCustomEditHospital();
-                      }
-                    }}
-                    className="flex-1 px-3 py-2 text-xs rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleAddCustomEditHospital}
-                    className="px-3 py-2 text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
-                  >
-                    + Tambah RS
-                  </button>
-                </div>
+                <HospitalSearchSelect
+                  selectedHospitals={editForm.plottingRs}
+                  onChange={(nextList) => setEditForm((prev) => ({ ...prev, plottingRs: nextList }))}
+                  availableHospitals={availableHospitals}
+                  label="Rumah Sakit yang Ditangani"
+                  required={true}
+                />
               </div>
 
               {/* Form Buttons */}
@@ -2254,23 +2927,23 @@ export default function KabagOfficerDirectory() {
       )}
 
       {/* ========================================================================= */}
-      {/* 9. MODAL: ATUR PENUGASAN RUMAH SAKIT KHUSUS                               */}
+      {/* 9. MODAL: KELOLA PENUGASAN RUMAH SAKIT                                    */}
       {/* ========================================================================= */}
       {isHospitalAssignmentModalOpen && assignmentOfficer && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-fade-in overflow-y-auto">
-          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-xl overflow-hidden my-8 animate-scale-up">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-2xl overflow-hidden my-8 animate-scale-up">
             {/* Modal Header */}
-            <div className="p-5 bg-gradient-to-r from-indigo-900 to-[#0A3981] text-white flex items-center justify-between">
+            <div className="p-5 bg-gradient-to-r from-blue-900 via-[#0A3981] to-[#145DA0] text-white flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 rounded-xl bg-white/10 flex items-center justify-center border border-white/20 shrink-0">
                   <Sliders className="w-5 h-5 text-white" />
                 </div>
                 <div>
                   <h3 className="text-base font-black">
-                    Atur Penugasan Rumah Sakit
+                    Kelola Penugasan Rumah Sakit
                   </h3>
-                  <p className="text-xs text-indigo-200 font-medium">
-                    {assignmentOfficer.nama} ({assignmentOfficer.id}) • {assignmentOfficer.wilayah}
+                  <p className="text-xs text-blue-100 font-medium">
+                    {assignmentOfficer.nama} (NIP: {assignmentOfficer.nip || assignmentOfficer.id}) • {assignmentOfficer.wilayah}
                   </p>
                 </div>
               </div>
@@ -2285,46 +2958,79 @@ export default function KabagOfficerDirectory() {
 
             {/* Modal Body */}
             <div className="p-6 space-y-4 max-h-[75vh] overflow-y-auto">
-              <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-xl text-xs text-indigo-900 space-y-1">
+              <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-xs text-blue-900 space-y-1">
                 <div className="font-bold flex items-center gap-1.5">
-                  <Building2 className="w-4 h-4 text-indigo-600 shrink-0" />
-                  <span>Relasi Petugas JR & Rumah Sakit:</span>
+                  <Building2 className="w-4 h-4 text-blue-700 shrink-0" />
+                  <span>Keterhubungan Rumah Sakit & Beban Kasus Korban:</span>
                 </div>
-                <p className="text-[11px] text-indigo-800 leading-relaxed">
-                  Satu petugas dapat menangani beberapa rumah sakit rujukan. Korban baru yang dilaporkan dari rumah sakit yang dicentang akan otomatis menjadi tanggung jawab <strong>{assignmentOfficer.nama}</strong>.
+                <p className="text-[11px] text-blue-800 leading-relaxed">
+                  Pilih rumah sakit yang menjadi tanggung jawab <strong>{assignmentOfficer.nama}</strong>. Setiap korban baru yang masuk di rumah sakit terpilih akan otomatis terhubung ke petugas ini untuk dipantau kunjungannya sesuai SLA.
                 </p>
               </div>
 
+              {/* Status Bar */}
               <div className="flex items-center justify-between pt-1">
                 <span className="text-xs font-bold text-slate-700">
-                  Daftar Rumah Sakit Wilayah Riau:
+                  Daftar Rumah Sakit Tersedia:
                 </span>
-                <span className="text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 px-2.5 py-0.5 rounded-full">
-                  {assignmentRsList.length} RS Terpilih
+                <span className="text-xs font-bold text-[#145DA0] bg-blue-50 border border-blue-200 px-3 py-1 rounded-full">
+                  {assignmentSelectedHospitalIds.size} RS Terpilih
                 </span>
               </div>
 
               {/* Hospital Selection Grid */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-56 overflow-y-auto p-2 bg-slate-50 rounded-xl border border-slate-200">
-                {Array.from(new Set([...availableHospitals, ...assignmentRsList])).map((rs) => {
-                  const isSelected = assignmentRsList.includes(rs);
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-64 overflow-y-auto p-2.5 bg-slate-50 rounded-xl border border-slate-200">
+                {masterHospitals.map((rs) => {
+                  const isSelected = assignmentSelectedHospitalIds.has(rs.id) || assignmentSelectedHospitalIds.has(Number(rs.id));
+                  const assignedOff = getHospitalAssignedOfficer(rs.id, rs.nama_rs);
+                  const isOtherOfficer = assignedOff && String(assignedOff.id) !== String(assignmentOfficer.id);
+
                   return (
                     <button
-                      key={rs}
+                      key={rs.id}
                       type="button"
-                      onClick={() => handleToggleAssignmentHospital(rs)}
-                      className={`flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium text-left border transition-all cursor-pointer ${
-                        isSelected
-                          ? 'bg-indigo-50 text-indigo-900 border-indigo-300 font-bold shadow-2xs'
-                          : 'bg-white text-slate-700 border-slate-200 hover:border-slate-300 hover:bg-slate-100/50'
-                      }`}
+                      onClick={() => handleToggleAssignmentHospitalId(rs.id)}
+                      className={`flex flex-col p-2.5 rounded-xl text-xs text-left border transition-all cursor-pointer ${isSelected
+                        ? 'bg-blue-50 text-blue-900 border-blue-400 font-semibold shadow-2xs ring-1 ring-blue-300'
+                        : 'bg-white text-slate-700 border-slate-200 hover:border-slate-300 hover:bg-slate-100/60'
+                        }`}
                     >
-                      <span className="truncate pr-2">{rs}</span>
-                      {isSelected ? (
-                        <Check className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
-                      ) : (
-                        <div className="w-3.5 h-3.5 rounded border border-slate-300 shrink-0" />
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center gap-1.5">
+                          <Building2 className={`w-3.5 h-3.5 shrink-0 ${isSelected ? 'text-[#145DA0]' : 'text-slate-400'}`} />
+                          <span className="font-bold text-xs line-clamp-1">{rs.nama_rs}</span>
+                        </div>
+                        <div className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 transition-colors ${isSelected ? 'bg-[#145DA0] border-[#145DA0] text-white' : 'border-slate-300 bg-white'
+                          }`}>
+                          {isSelected && <Check className="w-3 h-3 stroke-[3]" />}
+                        </div>
+                      </div>
+
+                      {rs.alamat && (
+                        <span className="text-[10px] text-slate-400 line-clamp-1 mt-1 pl-5">
+                          {rs.alamat}
+                        </span>
                       )}
+
+                      {/* Status Petugas Penanggung Jawab RS */}
+                      <div className="mt-1.5 pl-5 flex items-center gap-1 text-[10px]">
+                        {isOtherOfficer ? (
+                          <span className="text-amber-700 font-medium truncate flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
+                            Saat ini: {assignedOff.nama} (akan dialihkan)
+                          </span>
+                        ) : isSelected ? (
+                          <span className="text-emerald-700 font-semibold flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
+                            Ditugaskan ke {assignmentOfficer.nama}
+                          </span>
+                        ) : (
+                          <span className="text-amber-700 font-bold flex items-center gap-1">
+                            <AlertCircle className="w-3 h-3 text-amber-600 shrink-0" />
+                            Belum ada Petugas
+                          </span>
+                        )}
+                      </div>
                     </button>
                   );
                 })}
@@ -2334,7 +3040,7 @@ export default function KabagOfficerDirectory() {
               <div className="flex items-center gap-2 pt-1">
                 <input
                   type="text"
-                  placeholder="Ketik nama rumah sakit baru..."
+                  placeholder="Tambah nama rumah sakit baru..."
                   value={newAssignmentRsInput}
                   onChange={(e) => setNewAssignmentRsInput(e.target.value)}
                   onKeyDown={(e) => {
@@ -2343,12 +3049,12 @@ export default function KabagOfficerDirectory() {
                       handleAddCustomAssignmentHospital();
                     }
                   }}
-                  className="flex-1 px-3 py-2 text-xs rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                  className="flex-1 px-3 py-2 text-xs rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-[#145DA0] focus:border-[#145DA0]"
                 />
                 <button
                   type="button"
                   onClick={handleAddCustomAssignmentHospital}
-                  className="px-3 py-2 text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
+                  className="px-3.5 py-2 text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
                 >
                   + Tambah RS
                 </button>
@@ -2358,6 +3064,7 @@ export default function KabagOfficerDirectory() {
               <div className="pt-4 border-t border-slate-200 flex items-center justify-end gap-2.5">
                 <button
                   type="button"
+                  disabled={isSavingAssignment}
                   onClick={() => setIsHospitalAssignmentModalOpen(false)}
                   className="px-4 py-2 rounded-lg text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors cursor-pointer"
                 >
@@ -2365,12 +3072,209 @@ export default function KabagOfficerDirectory() {
                 </button>
                 <button
                   type="button"
+                  disabled={isSavingAssignment}
                   onClick={handleSaveHospitalAssignment}
-                  className="px-5 py-2 rounded-lg text-xs font-bold bg-[#0A3981] hover:bg-blue-900 text-white shadow-2xs transition-all active:scale-[0.98] cursor-pointer"
+                  className="inline-flex items-center gap-2 px-5 py-2 rounded-lg text-xs font-bold bg-[#0A3981] hover:bg-blue-900 text-white shadow-2xs transition-all active:scale-[0.98] cursor-pointer disabled:opacity-50"
                 >
-                  Simpan Penugasan RS
+                  {isSavingAssignment ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Menyimpan ke Database...</span>
+                    </>
+                  ) : (
+                    <span>Simpan Penugasan RS</span>
+                  )}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL: DAFTAR LENGKAP RUMAH SAKIT (+N LAINNYA)                            */}
+      {/* ========================================================================= */}
+      {showAllHospitalsOfficer && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-fade-in">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-lg overflow-hidden animate-scale-up">
+            <div className="p-5 bg-gradient-to-r from-[#0A3981] to-[#145DA0] text-white flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-white/10 flex items-center justify-center border border-white/20">
+                  <Building2 className="w-4 h-4 text-white" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-black">Daftar Rumah Sakit Penugasan</h3>
+                  <p className="text-xs text-blue-100">{showAllHospitalsOfficer.nama} ({(showAllHospitalsOfficer.hospitals || []).length || (showAllHospitalsOfficer.plottingRs || []).length} RS)</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAllHospitalsOfficer(null)}
+                className="p-1 rounded-lg text-white/70 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 max-h-72 overflow-y-auto divide-y divide-slate-100">
+              {((showAllHospitalsOfficer.hospitals && showAllHospitalsOfficer.hospitals.length > 0)
+                ? showAllHospitalsOfficer.hospitals
+                : (showAllHospitalsOfficer.plottingRs || []).map((name, i) => ({ hospital_id: i, nama_rs: name }))
+              ).map((hosp, idx) => (
+                <div key={hosp.hospital_id || idx} className="py-2.5 flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-2">
+                    <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                    <span className="font-semibold text-slate-800">{hosp.nama_rs}</span>
+                  </div>
+                  <span className="text-[11px] text-slate-500">{hosp.alamat || 'Riau'}</span>
+                </div>
+              ))}
+            </div>
+
+            <div className="p-4 bg-slate-50 border-t border-slate-200 flex items-center justify-between">
+              <button
+                type="button"
+                onClick={() => {
+                  const off = showAllHospitalsOfficer;
+                  setShowAllHospitalsOfficer(null);
+                  handleOpenHospitalAssignmentModal(off);
+                }}
+                className="text-xs font-bold text-[#145DA0] hover:underline flex items-center gap-1"
+              >
+                <Sliders className="w-3.5 h-3.5" />
+                <span>Kelola Penugasan RS</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowAllHospitalsOfficer(null)}
+                className="px-4 py-2 rounded-lg text-xs font-bold bg-slate-200 hover:bg-slate-300 text-slate-700 transition-colors cursor-pointer"
+              >
+                Tutup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL: ATUR PETUGAS UNTUK SATU RUMAH SAKIT (POV DATA RUMAH SAKIT)        */}
+      {/* ========================================================================= */}
+      {singleAssignHospital && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-fade-in">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-md overflow-hidden animate-scale-up">
+            <div className="p-5 bg-gradient-to-r from-[#0A3981] to-[#145DA0] text-white flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-white/10 flex items-center justify-center border border-white/20 shrink-0">
+                  <Building2 className="w-5 h-5 text-white" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-black">Atur Petugas Penanggung Jawab</h3>
+                  <p className="text-xs text-blue-100 line-clamp-1">{singleAssignHospital.nama_rs}</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSingleAssignHospital(null)}
+                className="p-1 rounded-lg text-white/70 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              {/* Status Penugasan Saat Ini */}
+              <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block mb-1">
+                  Penugasan Saat Ini
+                </span>
+                {(() => {
+                  const assigned = getHospitalAssignedOfficer(singleAssignHospital.id, singleAssignHospital.nama_rs);
+                  if (assigned) {
+                    return (
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <div className="w-7 h-7 rounded-lg bg-blue-100 text-[#0A3981] font-bold text-xs flex items-center justify-center">
+                            {assigned.nama.charAt(0)}
+                          </div>
+                          <div>
+                            <div className="text-xs font-bold text-slate-800">{assigned.nama}</div>
+                            <div className="text-[10px] text-slate-500">NIP/ID: {assigned.nip || assigned.id}</div>
+                          </div>
+                        </div>
+                        <span className="px-2 py-0.5 rounded-md text-[10px] font-black bg-emerald-100 text-emerald-800 border border-emerald-200">
+                          Aktif
+                        </span>
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="flex items-center gap-2 text-amber-700 bg-amber-50 p-2 rounded-lg border border-amber-200">
+                      <AlertCircle className="w-4 h-4 shrink-0" />
+                      <span className="text-xs font-bold">Belum ada Petugas</span>
+                    </div>
+                  );
+                })()}
+              </div>
+
+              {/* Pilih Petugas Baru */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-700 block">
+                  Pilih Petugas Penanggung Jawab Baru:
+                </label>
+                <select
+                  value={singleAssignOfficerId}
+                  onChange={(e) => setSingleAssignOfficerId(e.target.value)}
+                  className="w-full px-3 py-2.5 rounded-xl border border-slate-300 text-xs font-medium text-slate-800 bg-white focus:outline-none focus:ring-2 focus:ring-[#0A3981]"
+                >
+                  <option value="NONE">Lepas Penugasan (Jadikan: Belum ada Petugas)</option>
+                  {officers.map((off) => {
+                    const rsCount = (off.hospitals || []).length || (off.plottingRs || []).length;
+                    return (
+                      <option key={off.id} value={off.id}>
+                        {off.nama} — ({rsCount} RS aktif)
+                      </option>
+                    );
+                  })}
+                </select>
+                <p className="text-[11px] text-slate-500">
+                  Satu petugas dapat mengelola beberapa rumah sakit sekaligus.
+                </p>
+              </div>
+
+              <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-[11px] text-blue-900 flex items-start gap-2">
+                <ShieldCheck className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
+                <p className="leading-relaxed">
+                  Perubahan penugasan tidak akan menghapus riwayat pemantauan korban dan riwayat kunjungan yang sebelumnya telah ditangani petugas.
+                </p>
+              </div>
+            </div>
+
+            <div className="p-4 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setSingleAssignHospital(null)}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-white border border-slate-300 text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={isSavingSingleAssign}
+                onClick={handleSaveSingleAssign}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-[#0A3981] text-white hover:bg-blue-900 transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              >
+                {isSavingSingleAssign ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Menyimpan...</span>
+                  </>
+                ) : (
+                  <>
+                    <Check className="w-3.5 h-3.5" />
+                    <span>Simpan Perubahan</span>
+                  </>
+                )}
+              </button>
             </div>
           </div>
         </div>

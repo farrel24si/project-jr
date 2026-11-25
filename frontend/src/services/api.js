@@ -268,6 +268,21 @@ export const api = {
   },
 
   /**
+   * Nonaktifkan master rumah sakit (Kabag)
+   * DELETE /api/hospitals/:id
+   */
+  async deleteHospital(id) {
+    const res = await fetchWithFallback(`/api/hospitals/${id}`, {
+      method: 'DELETE'
+    });
+    const json = await res.json();
+    if (!res.ok || !json.success) {
+      throw new Error(json.message || 'Gagal menonaktifkan rumah sakit.');
+    }
+    return json;
+  },
+
+  /**
    * Mengambil master petugas
    * GET /api/officers
    */
@@ -415,6 +430,21 @@ export const api = {
       throw new Error(json.message || 'Gagal membuat akun user.');
     }
     return json.data || json;
+  },
+
+  /**
+   * Nonaktifkan akun user (Kabag)
+   * DELETE /api/users/:id
+   */
+  async deleteUser(id) {
+    const res = await fetchWithFallback(`/api/users/${id}`, {
+      method: 'DELETE'
+    });
+    const json = await res.json();
+    if (!res.ok || !json.success) {
+      throw new Error(json.message || 'Gagal menonaktifkan akun user.');
+    }
+    return json;
   },
 
   /**

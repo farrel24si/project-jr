@@ -12,6 +12,7 @@ import {
   Info,
   FileText,
   AlertTriangle,
+  AlertOctagon,
   PlusCircle,
   Eye,
   Lock,
@@ -20,41 +21,24 @@ import {
 } from 'lucide-react';
 import { parseCatatanKondisi, parseDateToTimestamp } from '../../services/backendMapper';
 import { groupCareEpisodes } from '../../services/careHistoryService';
+import { formatDateIndo, formatTimeIndo, formatDateTimeIndo } from '../../utils/dateUtils';
+import { storageService } from '../../services/storageService';
+import { isSameHospital } from '../../utils/referralUtils';
 import RiwayatPerawatanAntarRs from './RiwayatPerawatanAntarRs';
 
 function formatDate(dateStr) {
   if (!dateStr) return '—';
-  try {
-    const ts = parseDateToTimestamp(dateStr);
-    if (!ts || isNaN(ts)) return dateStr;
-    const d = new Date(ts);
-    return d.toLocaleDateString('id-ID', {
-      day: 'numeric',
-      month: 'long',
-      year: 'numeric'
-    });
-  } catch {
-    return dateStr;
-  }
+  return formatDateIndo(dateStr);
 }
 
 function formatTime(dateStr) {
   if (!dateStr) return '';
-  try {
-    const ts = parseDateToTimestamp(dateStr);
-    if (!ts || isNaN(ts)) return '';
-    const d = new Date(ts);
-    return `${d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })} WIB`;
-  } catch {
-    return '';
-  }
+  return formatTimeIndo(dateStr);
 }
 
 function formatDateTime(dateStr) {
   if (!dateStr) return '—';
-  const fd = formatDate(dateStr);
-  const ft = formatTime(dateStr);
-  return ft ? `${fd}, ${ft}` : fd;
+  return formatDateTimeIndo(dateStr);
 }
 
 /**
@@ -78,12 +62,22 @@ export function resolveReferralHospitals(victim) {
     const currentEp = victim.careEpisodes[victim.careEpisodes.length - 1];
     const rsAsalVal = originEp.rumahSakit || victim.rumahSakitAsal;
     const rsSaatIniVal = currentEp.rumahSakit || victim.rumahSakit;
-    const isDistinct = Boolean(
-      rsAsalVal && rsSaatIniVal &&
-      rsAsalVal.toLowerCase().trim() !== rsSaatIniVal.toLowerCase().trim()
+
+    // Rujukan HANYA valid jika memang ada aksi rujukan resmi dan BUKAN rawat lanjutan
+    const isExplicitReferred = Boolean(
+      !victim.isRawatLanjutan &&
+      !victim.rawatLanjutanDariPulang &&
+      victim.statusPerawatan !== 'Rawat Lanjutan' &&
+      (
+        victim.careEpisodes.some((ep) => ep.tipePerawatan === 'Rujukan' || ep.status === 'Dirujuk') ||
+        victim.statusPerawatan === 'Rujukan' ||
+        (Array.isArray(victim.riwayatRujukan) && victim.riwayatRujukan.length > 0) ||
+        (Array.isArray(victim.referrals) && victim.referrals.length > 0)
+      )
     );
+
     return {
-      isReferred: isDistinct,
+      isReferred: isExplicitReferred,
       rsAsal: rsAsalVal || 'Rumah Sakit Asal',
       rsTujuan: rsSaatIniVal || 'Rumah Sakit Saat Ini',
       rsSaatIni: rsSaatIniVal || 'Rumah Sakit Saat Ini'
@@ -189,21 +183,23 @@ export function resolveReferralHospitals(victim) {
     }
   }
 
-  const isReferred =
-    Boolean(rsTujuan && rsAsal && rsTujuan !== rsAsal) ||
-    Boolean(victim.rumahSakitAsal && victim.rumahSakit && victim.rumahSakitAsal !== victim.rumahSakit) ||
-    Boolean(victim.rumahSakitTujuan && victim.rumahSakit && victim.rumahSakitTujuan !== victim.rumahSakitAsal) ||
-    (typeof victim.kondisiTerakhir === 'string' && victim.kondisiTerakhir.startsWith('Dirujuk')) ||
-    (typeof victim.statusPemantauan === 'string' && victim.statusPemantauan.startsWith('Dirujuk')) ||
-    victim.statusPerawatan === 'Rujukan' ||
-    victim.statusPerawatan === 'Rujukan Diterima' ||
-    Boolean(victim.isRujukanMasuk) ||
-    Boolean(victim.rujukanAccepted) ||
-    (Array.isArray(victim.riwayatRujukan) && victim.riwayatRujukan.length > 0) ||
-    (Array.isArray(victim.referrals) && victim.referrals.length > 0);
+  const isExplicitReferral = Boolean(
+    !victim.isRawatLanjutan &&
+    !victim.rawatLanjutanDariPulang &&
+    victim.statusPerawatan !== 'Rawat Lanjutan' &&
+    (
+      (Array.isArray(victim.riwayatRujukan) && victim.riwayatRujukan.length > 0) ||
+      (Array.isArray(victim.referrals) && victim.referrals.length > 0) ||
+      victim.statusPerawatan === 'Rujukan' ||
+      victim.statusPerawatan === 'Rujukan Diterima' ||
+      Boolean(victim.isRujukanMasuk) ||
+      (typeof victim.kondisiTerakhir === 'string' && victim.kondisiTerakhir.startsWith('Dirujuk ke')) ||
+      (typeof victim.statusPemantauan === 'string' && victim.statusPemantauan.startsWith('Dirujuk ke'))
+    )
+  );
 
   // Jika pasien berstatus rujukan tapi salah satu nama belum terisi:
-  if (isReferred) {
+  if (isExplicitReferral) {
     if (!rsAsal) {
       rsAsal = victim.rumahSakitAsal || (victim.rumahSakit !== rsTujuan ? victim.rumahSakit : 'RS Asal');
     }
@@ -227,12 +223,13 @@ export function resolveReferralHospitals(victim) {
 
   // RS Saat Ini: lokasi aktif perawatan korban saat ini
   let rsSaatIni = victim.rumahSakit || rsTujuan || rsAsal;
-  if (isReferred && rsSaatIni === rsAsal && rsTujuan !== rsAsal) {
+  if (isExplicitReferral && rsSaatIni === rsAsal && rsTujuan !== rsAsal) {
     rsSaatIni = rsTujuan;
   }
 
-  // Rujukan visual valid HANYA jika RS Asal dan RS Saat Ini benar-benar berbeda
+  // Rujukan visual valid HANYA jika memang rujukan resmi DAN RS Asal & RS Saat Ini berbeda
   const isActuallyReferred = Boolean(
+    isExplicitReferral &&
     rsAsal &&
     rsSaatIni &&
     rsAsal.toLowerCase().trim() !== rsSaatIni.toLowerCase().trim()
@@ -265,7 +262,8 @@ export function buildPatientJourney(victim) {
     new Date().toISOString();
 
   // ── PRIORITAS UTAMA: STRUKTUR CARE EPISODES (ISOLASI LENGKAP TIAP RUMAH SAKIT) ──
-  if (Array.isArray(victim.careEpisodes) && victim.careEpisodes.length >= 2) {
+  // HANYA gunakan alur multi-episode jika memang terbukti kasus rujukan resmi
+  if (Array.isArray(victim.careEpisodes) && victim.careEpisodes.length >= 2 && isReferred) {
     const episodeJourney = [];
     victim.careEpisodes.forEach((ep, epIdx) => {
       const isFirstEpisode = epIdx === 0;
@@ -434,19 +432,39 @@ export function buildPatientJourney(victim) {
   );
 
   const isMultiHospital = Boolean(
-    hasDistinctHospitals && (
-      victim.isRawatLanjutan ||
-      victim.rawatLanjutanDariPulang ||
-      victim.statusPerawatan === 'Rawat Lanjutan' ||
-      (Array.isArray(victim.careEpisodes) && victim.careEpisodes.length > 1) ||
-      Boolean(victim.rumahSakitAsal && victim.rumahSakit && victim.rumahSakitAsal.trim().toLowerCase() !== victim.rumahSakit.trim().toLowerCase())
-    )
+    isReferred &&
+    hasDistinctHospitals
   );
 
   if (isMultiHospital) {
     // ── MULTI-HOSPITAL RAWAT LANJUTAN SCENARIO (No. 1: RS Asal/Prima, No. 2: RS Lanjutan/Syafira) ──
     const originVisits = [];
     const currentVisits = [];
+
+    // Cari petugas resmi yang bertanggung jawab terhadap rumah sakit asal dan rumah sakit tujuan
+    const allOfficers = typeof storageService?.getOfficers === 'function' ? storageService.getOfficers() : [];
+    const officerForCurrentRs = allOfficers.find(
+      (o) => o.status !== 'Nonaktif' && Array.isArray(o.plottingRs) && o.plottingRs.some((rs) => isSameHospital(rs, currentRs))
+    );
+    const officerForOriginRs = allOfficers.find(
+      (o) => o.status !== 'Nonaktif' && Array.isArray(o.plottingRs) && o.plottingRs.some((rs) => isSameHospital(rs, originRs))
+    );
+
+    // Resolusi nama petugas yang benar sesuai plotting RS resmi:
+    // RS Syafira Pekanbaru -> Siti Isrizkiah
+    // RS Tabrani -> Syaiful Hidayat
+    // RS Bhayangkara -> Dimas Andaru
+    const refTargetOfficer = officerForCurrentRs?.nama ||
+      (isSameHospital(currentRs, 'RS Syafira') ? 'Siti Isrizkiah' : null) ||
+      victim.petugasTujuanNama ||
+      victim.riwayatRujukan?.[0]?.petugasTujuanNama ||
+      'Petugas RS Tujuan';
+
+    const refOriginOfficer = officerForOriginRs?.nama ||
+      (isSameHospital(originRs, 'RS Tabrani') ? 'Syaiful Hidayat' : null) ||
+      victim.petugasAsalNama ||
+      victim.riwayatRujukan?.[0]?.petugasAsalNama ||
+      'Petugas RS Asal';
 
     const readmitThresholdTime = victim.tanggalMasukTerbaru
       ? new Date(victim.tanggalMasukTerbaru).getTime()
@@ -473,7 +491,7 @@ export function buildPatientJourney(victim) {
       }
     });
 
-    // 1. TAHAPAN RS ASAL / RS PERTAMA (Misal: RS Prima Pekanbaru) -> NO. 1
+    // 1. TAHAPAN RS ASAL / RS PERTAMA (Misal: RS Syafira Pekanbaru)
     if (originVisits.length > 0) {
       originVisits.forEach((act, idx) => {
         const isFirst = idx === 0;
@@ -483,24 +501,32 @@ export function buildPatientJourney(victim) {
           ? act.checklistTindakan
           : parsed.tindakanList;
 
+        const visitStatus = isReferred
+          ? (act.kondisiKorban || (isFirst ? 'Masih Dirawat' : 'Sedang Dipantau'))
+          : 'Pulang';
+
         journey.push({
           id: act.id || `JOURNEY-ORIGIN-${idx}`,
           tanggal: actDate,
           rumahSakit: originRs,
           judul: isFirst ? `Kunjungan Awal di ${originRs}` : `Pemantauan Berkala di ${originRs}`,
           jenis: isFirst ? 'Kunjungan Awal' : 'Pemantauan Berkala',
-          type: 'discharge',
-          status: 'Pulang',
-          petugasNama: act.petugasNama || victim.petugasAsalNama || victim.namaPetugas,
-          catatan: parsed.cleanRingkasan || act.catatanTambahan || act.hasilKomunikasi || act.hasilKunjungan || `Pasien pertama kali mendapatkan perawatan di ${originRs}. Seluruh riwayat kunjungan dan pemantauan tersimpan. Pasien telah dinyatakan pulang dan proses pemantauan di ${originRs} telah selesai (Arsip Read-Only).`,
+          type: isReferred ? (isFirst ? 'initial' : 'visit') : 'discharge',
+          status: visitStatus,
+          petugasNama: act.petugasNama || victim.petugasAsalNama || refOriginOfficer,
+          catatan: parsed.cleanRingkasan || act.catatanTambahan || act.hasilKomunikasi || act.hasilKunjungan || (isReferred
+            ? `Petugas melakukan pemantauan kondisi korban di ${originRs}.`
+            : `Pasien pertama kali mendapatkan perawatan di ${originRs}. Seluruh riwayat kunjungan dan pemantauan tersimpan. Pasien telah dinyatakan pulang dan proses pemantauan di ${originRs} telah selesai (Arsip Read-Only).`),
           tindakanList: tindakanList.length > 0 ? tindakanList : ['Memastikan kondisi terbaru korban', 'Memberikan Edukasi kepada pihak keluarga korban'],
           rawActivity: {
             ...act,
             rumahSakit: originRs,
-            kondisiKorban: 'Pulang',
+            kondisiKorban: visitStatus,
             jenisAktivitas: isFirst ? 'Kunjungan Awal' : 'Pemantauan Berkala',
-            statusTindakLanjut: 'Sudah Selesai',
-            hasilKunjungan: `Pasien telah menyelesaikan masa perawatan di ${originRs} dan dinyatakan pulang.`
+            statusTindakLanjut: isReferred ? 'Masih Perlu Ditindaklanjuti' : 'Sudah Selesai',
+            hasilKunjungan: isReferred
+              ? `Kunjungan pemantauan di ${originRs}.`
+              : `Pasien telah menyelesaikan masa perawatan di ${originRs} dan dinyatakan pulang.`
           }
         });
       });
@@ -512,10 +538,12 @@ export function buildPatientJourney(victim) {
         rumahSakit: originRs,
         judul: `Kunjungan Awal di ${originRs}`,
         jenis: 'Kunjungan Awal',
-        type: 'discharge',
-        status: 'Pulang',
-        petugasNama: victim.petugasAsalNama || victim.namaPetugas || 'Petugas Jasa Raharja',
-        catatan: `Pasien pertama kali mendapatkan perawatan di ${originRs}. Seluruh riwayat kunjungan dan pemantauan tersimpan. Pasien telah dinyatakan pulang dan proses pemantauan di ${originRs} telah selesai (Arsip Read-Only).`,
+        type: isReferred ? 'initial' : 'discharge',
+        status: isReferred ? 'Masih Dirawat' : 'Pulang',
+        petugasNama: refOriginOfficer || victim.petugasAsalNama || 'Petugas Jasa Raharja',
+        catatan: isReferred
+          ? `Pasien pertama kali mendapatkan penanganan awal dan dirawat di ${originRs}. Petugas asal bertanggung jawab atas penanganan korban.`
+          : `Pasien pertama kali mendapatkan perawatan di ${originRs}. Seluruh riwayat kunjungan dan pemantauan tersimpan. Pasien telah dinyatakan pulang dan proses pemantauan di ${originRs} telah selesai (Arsip Read-Only).`,
         tindakanList: ['Memastikan kondisi terbaru korban', 'Memberikan Edukasi kepada pihak keluarga korban'],
         rawActivity: {
           id: `ACT-ORIGIN-${victim.id}`,
@@ -523,18 +551,47 @@ export function buildPatientJourney(victim) {
           tanggalKunjungan: originDate,
           waktuAktualKunjungan: originDate,
           rumahSakit: originRs,
-          petugasNama: victim.petugasAsalNama || victim.namaPetugas,
-          kondisiKorban: 'Pulang',
+          petugasNama: refOriginOfficer || victim.petugasAsalNama,
+          kondisiKorban: isReferred ? 'Masih Dirawat' : 'Pulang',
           jenisAktivitas: 'Kunjungan Awal',
-          hasilKunjungan: `Pasien telah menyelesaikan masa perawatan awal di ${originRs} dan dinyatakan pulang.`,
-          catatanTambahan: 'Kunjungan dan penanganan awal selesai. Menunggu kelengkapan berkas.',
-          statusTindakLanjut: 'Sudah Selesai',
+          hasilKunjungan: `Kunjungan dan penerimaan awal di ${originRs}.`,
+          catatanTambahan: 'Kunjungan dan penanganan awal selesai.',
+          statusTindakLanjut: isReferred ? 'Masih Perlu Ditindaklanjuti' : 'Sudah Selesai',
           checklistTindakan: ['Memastikan kondisi terbaru korban', 'Memberikan Edukasi kepada pihak keluarga korban']
         }
       });
     }
 
-    // 2. TAHAPAN RS KEDUA / PERIODE PERAWATAN BARU (Misal: RS Syafira Pekanbaru) -> NO. 2 dst.
+    // TAHAPAN RUJUKAN & PENGALIHAN TANGGUNG JAWAB (Jika kasus rujukan)
+    if (isReferred) {
+      const refDate = victim.tanggalRujukan || (victim.riwayatRujukan?.[0]?.tanggal) || initialDate;
+
+      journey.push({
+        id: `JOURNEY-REF-${victim.id}`,
+        tanggal: refDate,
+        rumahSakit: originRs,
+        judul: `Korban Dirujuk ke ${currentRs}`,
+        jenis: 'Rujukan Antar-Rumah Sakit',
+        type: 'referral',
+        status: `Dirujuk ke ${currentRs}`,
+        petugasNama: refOriginOfficer,
+        catatan: `Korban dirujuk dari ${originRs} ke ${currentRs} untuk fasilitas medis lanjutan. Petugas mencatat informasi rujukan.`
+      });
+
+      journey.push({
+        id: `JOURNEY-HANDOFF-${victim.id}`,
+        tanggal: refDate,
+        rumahSakit: currentRs,
+        judul: `Pengalihan Tanggung Jawab ke Petugas ${currentRs}`,
+        jenis: 'Pengalihan Tanggung Jawab',
+        type: 'referral_accepted',
+        status: 'Sedang Dipantau',
+        petugasNama: refTargetOfficer,
+        catatan: `Tanggung jawab pemantauan aktif dialihkan kepada ${refTargetOfficer} selaku petugas penanggung jawab ${currentRs}. Petugas penerima menerima notifikasi rujukan.`
+      });
+    }
+
+    // 2. TAHAPAN RS KEDUA / RS TUJUAN (Misal: RS Tabrani Rab) -> NO. 2 dst.
     const isSecondEpisodeDischarged = Boolean(
       ['Sudah Pulang', 'Pulang', 'Selesai'].includes(victim.kondisiTerakhir) ||
       ['Sudah Pulang', 'Pulang', 'Selesai'].includes(victim.status_kondisi)
@@ -561,18 +618,26 @@ export function buildPatientJourney(victim) {
           id: act.id || `JOURNEY-CURRENT-${idx}`,
           tanggal: actDate,
           rumahSakit: currentRs,
-          judul: isFirstInCurrent ? `Kunjungan Perawatan di ${currentRs}` : `Pemantauan Berkala di ${currentRs}`,
-          jenis: isFirstInCurrent ? 'Kunjungan Perawatan Lanjutan' : 'Pemantauan Berkala',
-          type: visitStatus === 'Pulang' ? 'discharge' : (isFirstInCurrent ? 'readmit' : 'visit'),
+          judul: isFirstInCurrent
+            ? (isReferred ? `Kunjungan Lanjutan di ${currentRs}` : `Kunjungan Perawatan di ${currentRs}`)
+            : `Pemantauan Berkala di ${currentRs}`,
+          jenis: isFirstInCurrent
+            ? (isReferred ? 'Kunjungan Lanjutan di RS Rujukan' : 'Kunjungan Perawatan Lanjutan')
+            : 'Pemantauan Berkala',
+          type: visitStatus === 'Pulang' ? 'discharge' : (isFirstInCurrent ? (isReferred ? 'visit' : 'readmit') : 'visit'),
           status: visitStatus,
-          petugasNama: act.petugasNama || victim.namaPetugas,
-          catatan: parsed.cleanRingkasan || act.catatanTambahan || act.hasilKomunikasi || act.hasilKunjungan || `Pasien kembali mendapatkan perawatan di ${currentRs} sebagai periode perawatan baru.`,
+          petugasNama: act.petugasNama || refTargetOfficer,
+          catatan: parsed.cleanRingkasan || act.catatanTambahan || act.hasilKomunikasi || act.hasilKunjungan || (isReferred
+            ? `Petugas penerima melanjutkan pemantauan dan pencatatan kondisi korban di ${currentRs}.`
+            : `Pasien kembali mendapatkan perawatan di ${currentRs} sebagai periode perawatan baru.`),
           tindakanList: tindakanList.length > 0 ? tindakanList : ['Memastikan kondisi terbaru korban'],
           rawActivity: {
             ...act,
             rumahSakit: currentRs,
             kondisiKorban: visitStatus,
-            jenisAktivitas: isFirstInCurrent ? 'Kunjungan Perawatan Lanjutan' : 'Pemantauan Berkala'
+            jenisAktivitas: isFirstInCurrent
+              ? (isReferred ? 'Kunjungan Lanjutan di RS Rujukan' : 'Kunjungan Perawatan Lanjutan')
+              : 'Pemantauan Berkala'
           }
         });
       });
@@ -582,12 +647,14 @@ export function buildPatientJourney(victim) {
         id: `JOURNEY-LANJUT-RS2-${victim.id}`,
         tanggal: admissionDate,
         rumahSakit: currentRs,
-        judul: `Kunjungan Perawatan di ${currentRs}`,
-        jenis: 'Kunjungan Perawatan Lanjutan',
-        type: isSecondEpisodeDischarged ? 'discharge' : 'readmit',
+        judul: isReferred ? `Kunjungan Lanjutan di ${currentRs}` : `Kunjungan Perawatan di ${currentRs}`,
+        jenis: isReferred ? 'Kunjungan Lanjutan di RS Rujukan' : 'Kunjungan Perawatan Lanjutan',
+        type: isSecondEpisodeDischarged ? 'discharge' : (isReferred ? 'visit' : 'readmit'),
         status: currentHospitalStatus,
-        petugasNama: victim.namaPetugas || 'Petugas Jasa Raharja',
-        catatan: victim.catatanRawatLanjutan || `Pasien kembali mendapatkan perawatan di ${currentRs} sebagai periode perawatan baru setelah sebelumnya menyelesaikan perawatan di ${originRs}.`,
+        petugasNama: refTargetOfficer || 'Petugas Jasa Raharja',
+        catatan: isReferred
+          ? `Pasien dalam pemantauan petugas penanggung jawab di ${currentRs} pasca rujukan dari ${originRs}.`
+          : (victim.catatanRawatLanjutan || `Pasien kembali mendapatkan perawatan di ${currentRs} sebagai periode perawatan baru setelah sebelumnya menyelesaikan perawatan di ${originRs}.`),
         tindakanList: ['Memastikan kondisi terbaru korban'],
         rawActivity: {
           id: `ACT-LANJUT-${victim.id}`,
@@ -595,9 +662,9 @@ export function buildPatientJourney(victim) {
           tanggalKunjungan: admissionDate,
           waktuAktualKunjungan: admissionDate,
           rumahSakit: currentRs,
-          petugasNama: victim.namaPetugas,
+          petugasNama: refTargetOfficer,
           kondisiKorban: currentHospitalStatus,
-          jenisAktivitas: 'Kunjungan Perawatan Lanjutan',
+          jenisAktivitas: isReferred ? 'Kunjungan Lanjutan di RS Rujukan' : 'Kunjungan Perawatan Lanjutan',
           hasilKunjungan: `Kunjungan perawatan pasien di ${currentRs}.`,
           catatanTambahan: victim.catatanRawatLanjutan || 'Pemantauan perawatan pasien di rumah sakit.',
           statusTindakLanjut: isSecondEpisodeDischarged ? 'Sudah Selesai' : 'Masih Perlu Ditindaklanjuti',
@@ -607,7 +674,7 @@ export function buildPatientJourney(victim) {
     }
   } else {
     // ── KASUS BIASA (SATU RUMAH SAKIT / BUKAN RAWAT LANJUTAN ANTAR-RS) ──
-    const singleHospital = originRs || victim.rumahSakit || 'Rumah Sakit';
+    const singleHospital = victim.rumahSakit || originRs || 'Rumah Sakit';
     const isSingleDischarged = Boolean(
       ['Sudah Pulang', 'Pulang', 'Selesai'].includes(victim.kondisiTerakhir) ||
       ['Sudah Pulang', 'Pulang', 'Selesai'].includes(victim.status_kondisi) ||
@@ -615,7 +682,26 @@ export function buildPatientJourney(victim) {
       victim.statusPerawatan === 'Pulang'
     );
 
-    if (sortedVisits.length === 0) {
+    // Kunjungan dari faskes lain dilarang muncul pada alur satu rumah sakit (non-rujukan)
+    const validVisits = sortedVisits.filter((act) => {
+      if (!act) return false;
+      const vRs = act.rumahSakit;
+      if (!vRs || vRs === '—') return true;
+      return isSameHospital(vRs, singleHospital);
+    });
+
+    const allOfficers = typeof storageService?.getOfficers === 'function' ? storageService.getOfficers() : [];
+    const officerForSingleRs = allOfficers.find(
+      (o) => o.status !== 'Nonaktif' && Array.isArray(o.plottingRs) && o.plottingRs.some((rs) => isSameHospital(rs, singleHospital))
+    );
+    const resolvedSingleOfficer = officerForSingleRs?.nama ||
+      (isSameHospital(singleHospital, 'RS Syafira') ? 'Siti Isrizkiah' : null) ||
+      (isSameHospital(singleHospital, 'RS Tabrani') ? 'Syaiful Hidayat' : null) ||
+      (isSameHospital(singleHospital, 'RS Bhayangkara') ? 'Dimas Andaru' : null) ||
+      victim.namaPetugas ||
+      'Petugas Jasa Raharja';
+
+    if (validVisits.length === 0) {
       journey.push({
         id: `JOURNEY-INIT-${victim.id}`,
         tanggal: initialDate,
@@ -624,7 +710,7 @@ export function buildPatientJourney(victim) {
         jenis: 'Kunjungan Awal',
         type: isSingleDischarged ? 'discharge' : 'initial',
         status: isSingleDischarged ? 'Pulang' : (victim.kondisiTerakhir || 'Masih Dirawat'),
-        petugasNama: victim.petugasAsalNama || victim.namaPetugas || 'Petugas Jasa Raharja',
+        petugasNama: victim.petugasAsalNama || resolvedSingleOfficer,
         catatan: victim.lokasiKejadian && victim.lokasiKejadian !== '—'
           ? `Pasien masuk fasilitas kesehatan pasca kejadian kecelakaan di ${victim.lokasiKejadian}.`
           : `Penerimaan awal dan rawatan pertama pasien di ${singleHospital}.`,
@@ -634,7 +720,7 @@ export function buildPatientJourney(victim) {
           tanggalKunjungan: initialDate,
           waktuAktualKunjungan: initialDate,
           rumahSakit: singleHospital,
-          petugasNama: victim.petugasAsalNama || victim.namaPetugas,
+          petugasNama: victim.petugasAsalNama || resolvedSingleOfficer,
           kondisiKorban: isSingleDischarged ? 'Pulang' : (victim.kondisiTerakhir || 'Masih Dirawat'),
           jenisAktivitas: 'Kunjungan Awal',
           hasilKunjungan: `Kunjungan awal di ${singleHospital}.`,
@@ -643,7 +729,7 @@ export function buildPatientJourney(victim) {
         }
       });
     } else {
-      sortedVisits.forEach((act, idx) => {
+      validVisits.forEach((act, idx) => {
         const isFirst = idx === 0;
         const actDate = act.waktuAktualKunjungan || act.tanggal || act.tanggalKunjungan || initialDate;
         const parsed = parseCatatanKondisi(act.catatan_kondisi || act.hasilKomunikasi || act.hasilKunjungan || act.hasilPemantauan);
@@ -651,7 +737,7 @@ export function buildPatientJourney(victim) {
           ? act.checklistTindakan
           : parsed.tindakanList;
 
-        let hospitalName = act.rumahSakit && act.rumahSakit !== '—' ? act.rumahSakit : singleHospital;
+        let hospitalName = singleHospital;
         let judul = isFirst
           ? `Kunjungan Awal di ${hospitalName}`
           : `Pemantauan Berkala di ${hospitalName}`;
@@ -678,7 +764,7 @@ export function buildPatientJourney(victim) {
           jenis: isFirst ? 'Kunjungan Awal' : 'Pemantauan Berkala',
           type,
           status,
-          petugasNama: act.petugasNama || victim.namaPetugas,
+          petugasNama: act.petugasNama || resolvedSingleOfficer,
           catatan: parsed.cleanRingkasan || act.catatanTambahan || act.hasilKomunikasi || act.hasilKunjungan || act.hasilPemantauan || act.catatan || 'Kunjungan telah selesai dilaksanakan.',
           tindakanList,
           rawActivity: act
@@ -716,6 +802,35 @@ export function buildPatientJourney(victim) {
         });
       }
     }
+  }
+
+  // 4. Tahapan khusus Korban Meninggal Dunia (MD) jika tercatat
+  const isVictimDeceased = Boolean(
+    victim.tanggalMeninggal ||
+    victim.kondisiTerakhir === 'Meninggal Dunia' ||
+    victim.status_kondisi === 'Meninggal Dunia'
+  );
+
+  if (isVictimDeceased && !journey.some((j) => j.type === 'deceased')) {
+    const mdDate = (victim.tanggalMeninggal && victim.jamMeninggal)
+      ? `${victim.tanggalMeninggal}T${victim.jamMeninggal}:00`
+      : (victim.waktuMeninggal || victim.tanggalMeninggal || new Date().toISOString());
+
+    journey.push({
+      id: `JOURNEY-MD-${victim.id}`,
+      tanggal: mdDate,
+      rumahSakit: victim.rumahSakit || currentRs || originRs,
+      judul: 'Korban Dinyatakan Meninggal Dunia (MD)',
+      jenis: 'Status Akhir',
+      type: 'deceased',
+      status: 'Meninggal Dunia',
+      petugasNama: victim.dicatatOleh || victim.namaPetugas,
+      tanggalMeninggal: victim.tanggalMeninggal,
+      jamMeninggal: victim.jamMeninggal,
+      waktuPencatatanMD: victim.waktuPencatatanMD,
+      catatan: `Korban dinyatakan Meninggal Dunia pada tanggal ${victim.tanggalMeninggal ? new Date(victim.tanggalMeninggal).toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }) : '—'} pukul ${victim.jamMeninggal ? `${victim.jamMeninggal} WIB` : '—'}. Dicatat oleh: ${victim.dicatatOleh || victim.namaPetugas}. Pemantauan klinis berakhir.`,
+      tindakanList: ['Pencatatan Status Meninggal Dunia (MD)', 'Proses Administrasi Santunan Ahli Waris']
+    });
   }
 
   // Pastikan tanggal kronologis konsisten jika multi-RS: Seluruh episode RS Asal mendahului RS Lanjutan
@@ -832,6 +947,12 @@ export default function RiwayatPerawatanTimeline({
         victim.status_kondisi === 'Pulang'
       );
 
+  const isDeceased = Boolean(
+    victim.tanggalMeninggal ||
+    victim.kondisiTerakhir === 'Meninggal Dunia' ||
+    victim.status_kondisi === 'Meninggal Dunia'
+  );
+
   return (
     <div className="bg-white rounded-2xl border border-slate-200/90 shadow-2xs p-5 sm:p-6 space-y-5">
       {/* Header Bagian Bead Line & Riwayat Kunjungan */}
@@ -839,7 +960,7 @@ export default function RiwayatPerawatanTimeline({
         <div>
           <div className="flex items-center gap-2.5 flex-wrap">
             <h2 className="text-base font-bold text-slate-900 tracking-tight">
-              Riwayat Perjalanan &amp; Kunjungan Korban
+              Riwayat Penanganan
             </h2>
             <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-500 bg-slate-100 px-2.5 py-0.5 rounded-full">
               <Lock className="w-3 h-3 text-slate-400" />
@@ -847,7 +968,7 @@ export default function RiwayatPerawatanTimeline({
             </span>
           </div>
           <p className="text-xs text-slate-500 mt-1">
-            Rekam jejak seluruh kunjungan dan periode perawatan korban di rumah sakit.
+            Timeline kronologis perjalanan penanganan korban dari rumah sakit asal hingga rumah sakit tujuan.
           </p>
         </div>
 
@@ -1091,7 +1212,7 @@ export default function RiwayatPerawatanTimeline({
           })}
 
           {/* Kondisi 1: Pasien Masih Dalam Perawatan Aktif (Tampilkan Jadwal Pemantauan Berikutnya) */}
-          {!isDischarged && !victim.statusPemantauan?.startsWith('Dirujuk') && monitoringSla && !monitoringSla.isCompleted && monitoringSla.needed !== false && (
+          {!isDischarged && !isDeceased && !victim.statusPemantauan?.startsWith('Dirujuk') && monitoringSla && !monitoringSla.isCompleted && monitoringSla.needed !== false && (
             <div className="relative group pt-1">
               {/* Bead Berikutnya (Garis Putus-Putus) */}
               <div className="absolute -left-11 sm:-left-14 top-2 w-9 h-9 sm:w-10 sm:h-10 rounded-full border-2 border-dashed border-[#145DA0] bg-blue-50/70 text-[#145DA0] flex items-center justify-center font-bold text-xs sm:text-sm z-10 shadow-xs">
@@ -1109,11 +1230,11 @@ export default function RiwayatPerawatanTimeline({
                     </span>
                   </div>
                   <p className="text-xs text-slate-600 mt-1">
-                    Batas maksimal SLA 3 hari:{' '}
+                    Batas waktu kunjungan 3 hari:{' '}
                     <strong className={monitoringSla.isOverdue ? 'text-rose-600 font-bold' : 'text-slate-800'}>
                       {formatDateTime(monitoringSla.dueDate)}
                     </strong>{' '}
-                    ({monitoringSla.description || 'Dalam batas waktu SLA'}).
+                    ({monitoringSla.description || 'Dalam batas waktu'}).
                   </p>
                 </div>
 
@@ -1151,6 +1272,31 @@ export default function RiwayatPerawatanTimeline({
                 <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-800 bg-white border border-emerald-200 px-3 py-1.5 rounded-full shrink-0 self-start sm:self-auto">
                   <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
                   <span>Selesai / Menunggu Berkas</span>
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* Kondisi 3: Korban Meninggal Dunia (Pemantauan Selesai Secara Permanen) */}
+          {isDeceased && (
+            <div className="relative group pt-1">
+              <div className="rounded-xl border border-red-200 bg-red-50/50 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-full bg-red-100 text-red-700 flex items-center justify-center shrink-0">
+                    <AlertOctagon className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold text-red-950">
+                      Pemantauan Klinis Berakhir (Korban Meninggal Dunia)
+                    </h4>
+                    <p className="text-xs text-red-800 mt-0.5">
+                      Status akhir korban telah tercatat sebagai Meninggal Dunia. Seluruh riwayat kunjungan tersimpan permanen dan pemantauan aktif dihentikan.
+                    </p>
+                  </div>
+                </div>
+                <span className="inline-flex items-center gap-1.5 text-xs font-bold text-red-800 bg-white border border-red-200 px-3 py-1.5 rounded-full shrink-0 self-start sm:self-auto">
+                  <span className="w-2 h-2 rounded-full bg-red-500"></span>
+                  <span>MD / Selesai Dipantau</span>
                 </span>
               </div>
             </div>

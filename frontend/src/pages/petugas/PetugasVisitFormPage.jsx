@@ -37,6 +37,8 @@ export default function PetugasVisitFormPage() {
   });
 
   const [kondisiKorban, setKondisiKorban] = useState('Rawat Inap');
+  const [tanggalMeninggal, setTanggalMeninggal] = useState('');
+  const [jamMeninggal, setJamMeninggal] = useState('');
   const [cekKomunikasiKeluarga, setCekKomunikasiKeluarga] = useState(true);
   const [cekEdukasiSantunan, setCekEdukasiSantunan] = useState(true);
   const [cekArahanLp, setCekArahanLp] = useState(true);
@@ -71,9 +73,24 @@ export default function PetugasVisitFormPage() {
       if (data.kondisiTerakhir) {
         setKondisiKorban(data.kondisiTerakhir);
       }
+      if (data.tanggalMeninggal) {
+        setTanggalMeninggal(data.tanggalMeninggal);
+      }
+      if (data.jamMeninggal) {
+        setJamMeninggal(data.jamMeninggal);
+      }
     };
     load();
   }, [id, navigate]);
+
+  const previousVisitDate = victim?.tanggalKunjunganTerakhir || 
+                            victim?.waktuPemantauanTerakhir || 
+                            victim?.kunjunganPertama?.tanggalKunjungan || 
+                            victim?.tanggalInformasiDiterima;
+
+  const intervalCheck = useMemo(() => {
+    return checkVisitInterval(previousVisitDate, waktuKunjungan);
+  }, [previousVisitDate, waktuKunjungan]);
 
   if (!victim) {
     return (
@@ -115,15 +132,6 @@ export default function PetugasVisitFormPage() {
     );
   }
 
-  const previousVisitDate = victim?.tanggalKunjunganTerakhir || 
-                            victim?.waktuPemantauanTerakhir || 
-                            victim?.kunjunganPertama?.tanggalKunjungan || 
-                            victim?.tanggalInformasiDiterima;
-
-  const intervalCheck = useMemo(() => {
-    return checkVisitInterval(previousVisitDate, waktuKunjungan);
-  }, [previousVisitDate, waktuKunjungan]);
-
   const isFirstVisit = !victim?.kunjunganPertama && (victim?.riwayatAktivitas || []).filter((a) => a.statusKunjungan !== 'Menunggu').length === 0;
 
   const handleSubmit = async (e) => {
@@ -143,7 +151,27 @@ export default function PetugasVisitFormPage() {
       return;
     }
 
-    if (!gpsData || !gpsData.latitude || !gpsData.longitude) {
+    if (kondisiKorban === 'Meninggal Dunia') {
+      if (!tanggalMeninggal) {
+        setValidationError('Tanggal meninggal dunia wajib diisi.');
+        return;
+      }
+      if (!jamMeninggal) {
+        setValidationError('Jam meninggal dunia wajib diisi.');
+        return;
+      }
+      const deathTime = new Date(`${tanggalMeninggal}T${jamMeninggal}`);
+      if (deathTime.getTime() > Date.now()) {
+        setValidationError('Tanggal dan jam meninggal dunia tidak boleh berada di masa depan.');
+        return;
+      }
+    }
+
+    const hasValidGps = gpsData &&
+      Number.isFinite(Number(gpsData.latitude ?? gpsData.lat_petugas)) &&
+      Number.isFinite(Number(gpsData.longitude ?? gpsData.lng_petugas));
+
+    if (!hasValidGps) {
       setValidationError('Harap mengunci lokasi koordinat GPS / maps rumah sakit terlebih dahulu.');
       return;
     }
@@ -163,6 +191,11 @@ export default function PetugasVisitFormPage() {
         petugasId: currentUser?.profile?.id || victim.petugasId,
         petugasNama: currentUser?.profile?.nama || victim.namaPetugas,
         kondisiKorban,
+        tanggalMeninggal: kondisiKorban === 'Meninggal Dunia' ? tanggalMeninggal : null,
+        jamMeninggal: kondisiKorban === 'Meninggal Dunia' ? jamMeninggal : null,
+        waktuMeninggal: kondisiKorban === 'Meninggal Dunia' ? new Date(`${tanggalMeninggal}T${jamMeninggal}`).toISOString() : null,
+        dicatatOleh: currentUser?.profile?.nama || victim.namaPetugas || 'Petugas Jasa Raharja',
+        waktuPencatatanMD: kondisiKorban === 'Meninggal Dunia' ? new Date().toISOString() : null,
         cek_komunikasi_keluarga: cekKomunikasiKeluarga,
         cek_edukasi_santunan: cekEdukasiSantunan,
         cek_arahan_lp: cekArahanLp,
@@ -173,9 +206,15 @@ export default function PetugasVisitFormPage() {
         arahanLp,
         tindakLanjut: catatanTindakLanjut || `Kunjungan selesai: kondisi ${kondisiKorban}`,
         fotoUrl: photoData,
-        latitude: gpsData.latitude,
-        longitude: gpsData.longitude,
-        akurasiLokasi: gpsData.akurasiLokasi,
+        latitude: Number(gpsData.latitude ?? gpsData.lat_petugas),
+        longitude: Number(gpsData.longitude ?? gpsData.lng_petugas),
+        lat_petugas: Number(gpsData.lat_petugas ?? gpsData.latitude),
+        lng_petugas: Number(gpsData.lng_petugas ?? gpsData.longitude),
+        akurasiLokasi: Number.isFinite(Number(gpsData.akurasiLokasi ?? gpsData.akurasi_lokasi_meter)) ? Number(gpsData.akurasiLokasi ?? gpsData.akurasi_lokasi_meter) : null,
+        akurasi_lokasi_meter: Number.isFinite(Number(gpsData.akurasi_lokasi_meter ?? gpsData.akurasiLokasi)) ? Number(gpsData.akurasi_lokasi_meter ?? gpsData.akurasiLokasi) : null,
+        sumberKoordinat: gpsData.sumberKoordinat ?? gpsData.sumber_koordinat ?? (gpsData.isSimulated ? 'Koordinat Rumah Sakit' : 'GPS Perangkat'),
+        sumber_koordinat: gpsData.sumberKoordinat ?? gpsData.sumber_koordinat ?? (gpsData.isSimulated ? 'Koordinat Rumah Sakit' : 'GPS Perangkat'),
+        isSimulated: Boolean(gpsData.isSimulated),
         waktuFoto: gpsData.waktu || new Date().toISOString()
       };
 
@@ -325,14 +364,14 @@ export default function PetugasVisitFormPage() {
                       <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5 animate-pulse" />
                       <div className="text-[11px] leading-relaxed">
                         <strong className="block font-bold text-rose-950">PERINGATAN: Kunjungan Melewati Batas Waktu 3 Hari!</strong>
-                        Waktu kunjungan ini berjarak <strong>{intervalCheck.durationText}</strong> dari tanggal informasi / kunjungan sebelumnya. Batas standar SLA Jasa Raharja adalah <strong>maksimal 72 jam (3 hari)</strong>. Kunjungan akan tercatat sebagai selesai terlambat.
+                        Waktu kunjungan ini berjarak <strong>{intervalCheck.durationText}</strong> dari tanggal informasi / kunjungan sebelumnya. Batas waktu standar kunjungan adalah <strong>maksimal 72 jam (3 hari)</strong>. Kunjungan akan tercatat sebagai selesai terlambat.
                       </div>
                     </div>
                   ) : (
                     <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center gap-2 text-emerald-800 text-[11px]">
                       <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
                       <span>
-                        Sesuai jadwal SLA: berjarak <strong>{intervalCheck.durationText}</strong> dari kunjungan sebelumnya (dalam batas maksimal 3 hari).
+                        Tepat waktu: berjarak <strong>{intervalCheck.durationText}</strong> dari kunjungan sebelumnya (dalam batas waktu maksimal 3 hari).
                       </span>
                     </div>
                   )}
@@ -384,6 +423,57 @@ export default function PetugasVisitFormPage() {
               </label>
             ))}
           </div>
+
+          {/* Kolom Khusus jika Kondisi Meninggal Dunia (MD) */}
+          {kondisiKorban === 'Meninggal Dunia' && (
+            <div className="p-4 rounded-xl bg-red-50 border border-red-200 space-y-3 mt-3">
+              <div className="flex items-center gap-2 font-bold text-red-950 text-xs">
+                <AlertOctagon className="w-4 h-4 text-red-600 shrink-0" />
+                <span>Pencatatan Korban Meninggal Dunia (MD)</span>
+              </div>
+              <p className="text-[11px] text-red-800 leading-relaxed">
+                Wajib memasukkan tanggal dan jam meninggal dunia korban sesuai informasi resmi medis. Waktu pencatatan sistem akan dicatat terpisah saat formulir disimpan.
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 bg-white rounded-xl border border-red-200">
+                <div>
+                  <label className="block font-semibold text-slate-800 mb-1 text-xs">
+                    Tanggal Meninggal Dunia <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    max={new Date().toISOString().split('T')[0]}
+                    value={tanggalMeninggal}
+                    onChange={(e) => {
+                      setTanggalMeninggal(e.target.value);
+                      setValidationError('');
+                    }}
+                    className="w-full text-xs rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-800 focus:ring-red-500 focus:border-red-500"
+                  />
+                  <span className="text-[10px] text-slate-400 mt-0.5 block">Tidak boleh berada di masa depan</span>
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-800 mb-1 text-xs">
+                    Jam Meninggal Dunia <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="time"
+                    required
+                    value={jamMeninggal}
+                    onChange={(e) => {
+                      setJamMeninggal(e.target.value);
+                      setValidationError('');
+                    }}
+                    className="w-full text-xs rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-800 focus:ring-red-500 focus:border-red-500"
+                  />
+                  <span className="text-[10px] text-slate-400 mt-0.5 block">Format waktu WIB</span>
+                </div>
+              </div>
+              <div className="text-[11px] text-slate-600">
+                Dicatat oleh: <strong>{currentUser?.profile?.nama || victim?.namaPetugas || 'Petugas Jasa Raharja'}</strong>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* ── BAGIAN C: CHECKLIST KUNJUNGAN & HASIL KOMUNIKASI ── */}
@@ -517,6 +607,11 @@ export default function PetugasVisitFormPage() {
                 onLocationCaptured={setGpsData}
                 initialLocation={gpsData}
                 hospitalName={victim.rumahSakit}
+                hospitalCoords={
+                  victim?.hospital_lat != null && victim?.hospital_lng != null
+                    ? { lat: Number(victim.hospital_lat), lng: Number(victim.hospital_lng), accuracy: Number(victim.hospital_radius || 5) }
+                    : null
+                }
               />
             </div>
 
@@ -528,9 +623,11 @@ export default function PetugasVisitFormPage() {
                   petugasNama: currentUser?.profile?.nama || victim.namaPetugas,
                   rumahSakit: victim.rumahSakit,
                   korbanNama: victim.nama,
-                  latitude: gpsData?.latitude,
-                  longitude: gpsData?.longitude,
-                  akurasiLokasi: gpsData?.akurasiLokasi,
+                  latitude: gpsData?.latitude ?? gpsData?.lat_petugas,
+                  longitude: gpsData?.longitude ?? gpsData?.lng_petugas,
+                  akurasiLokasi: gpsData?.akurasiLokasi ?? gpsData?.akurasi_lokasi_meter,
+                  sumberKoordinat: gpsData?.sumberKoordinat ?? gpsData?.sumber_koordinat,
+                  isSimulated: gpsData?.isSimulated,
                   waktu: waktuKunjungan
                 }}
               />

@@ -5,12 +5,22 @@ import { storageService } from '../../services/storageService';
 import { 
   calculateMonitoringSla, 
   getVictimDeadline, 
-  compareByDeadlinePriority 
+  compareByDeadlinePriority,
+  compareVictimsBySlaPriority
 } from '../../services/slaService';
+import { formatDateIndo, formatDateTimeIndo } from '../../utils/dateUtils';
+import { getReferralPerspectiveInfo, matchesHospitalFilter, isSameHospital } from '../../utils/referralUtils';
 import SlaBadge from '../../components/common/SlaBadge';
 import ConditionBadge from '../../components/common/ConditionBadge';
 import MonitoringStatusBadge from '../../components/common/MonitoringStatusBadge';
+import {
+  MONITORING_STATUS,
+  getMonitoringStatus,
+  isVictimFinished,
+  canRecordVisit
+} from '../../utils/monitoringStatus';
 import FormPemantauanModal from '../../components/petugas/FormPemantauanModal';
+import SortableHeader from '../../components/common/SortableHeader';
 import {
   CalendarCheck,
   Search,
@@ -23,32 +33,44 @@ import {
   Calendar,
   Clock,
   UserCheck,
-  CheckCircle2
+  CheckCircle2,
+  Users,
+  Filter,
+  ArrowUpDown
 } from 'lucide-react';
 
 function formatDateShort(dateStr) {
-  if (!dateStr) return '—';
-  try {
-    const d = new Date(dateStr);
-    return d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' });
-  } catch {
-    return dateStr;
-  }
+  return formatDateIndo(dateStr);
 }
 
 function formatDateTimeShort(dateStr) {
-  if (!dateStr) return '—';
-  try {
-    const d = new Date(dateStr);
-    return (
-      d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' }) +
-      ' ' +
-      d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) +
-      ' WIB'
-    );
-  } catch {
-    return dateStr;
+  return formatDateTimeIndo(dateStr);
+}
+
+function getTlTerakhir(v) {
+  const lastDate =
+    v.tanggalKunjunganTerakhir ||
+    v.waktuPemantauanTerakhir ||
+    v.tanggalPemantauanTerakhir ||
+    v.kunjunganPertama?.waktuAktualKunjungan ||
+    v.kunjunganPertama?.tanggalKunjungan ||
+    v.kunjunganPertama?.tanggal;
+
+  const count = Array.isArray(v.riwayatAktivitas)
+    ? v.riwayatAktivitas.filter((a) => a.statusKunjungan !== 'Menunggu').length
+    : (v.kunjunganPertama ? 1 : 0);
+
+  if (!lastDate) {
+    return {
+      dateText: 'Belum Ada',
+      subText: 'Menunggu Kunjungan'
+    };
   }
+
+  return {
+    dateText: formatDateShort(lastDate),
+    subText: count > 0 ? `Kunjungan ke-${count}` : 'Kunjungan Awal'
+  };
 }
 
 export default function PetugasMonitoringList() {
@@ -62,9 +84,21 @@ export default function PetugasMonitoringList() {
   const [victims, setVictims] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [hospitalFilter, setHospitalFilter] = useState('ALL');
+  const [statusFilter, setStatusFilter] = useState('ALL');
   const [conditionFilter, setConditionFilter] = useState('ALL');
   const [careCategoryFilter, setCareCategoryFilter] = useState('ALL');
   const [slaFilter, setSlaFilter] = useState('ALL');
+  const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
+
+  const handleSort = (key) => {
+    setSortConfig((prev) => {
+      if (prev.key === key) {
+        if (prev.direction === 'asc') return { key, direction: 'desc' };
+        return { key: null, direction: 'asc' };
+      }
+      return { key, direction: 'asc' };
+    });
+  };
 
   const [selectedVictimForMonitoring, setSelectedVictimForMonitoring] = useState(null);
 
@@ -83,10 +117,7 @@ export default function PetugasMonitoringList() {
 
   const isHospitalMatched = (targetRs) => {
     if (!targetRs) return false;
-    const cleanTarget = targetRs.toLowerCase().trim();
-    return officerHospitals.some(
-      (h) => h === cleanTarget || (cleanTarget.length >= 4 && (h.includes(cleanTarget) || cleanTarget.includes(h)))
-    );
+    return officerHospitals.some((h) => isSameHospital(h, targetRs));
   };
 
   const loadData = () => {
@@ -106,6 +137,19 @@ export default function PetugasMonitoringList() {
     };
   }, [officerId, officerHospitals]);
 
+  // Otomatis kembalikan petugas ke modal formulir pemantauan jika browser HP sempat reload saat ambil foto kamera
+  useEffect(() => {
+    try {
+      const activeVicId = sessionStorage.getItem('jr_active_monitoring_victim_id');
+      if (activeVicId && victims.length > 0 && !selectedVictimForMonitoring) {
+        const found = victims.find((v) => String(v.id) === String(activeVicId) || String(v.caseId) === String(activeVicId));
+        if (found) {
+          setSelectedVictimForMonitoring(found);
+        }
+      }
+    } catch (e) {}
+  }, [victims, selectedVictimForMonitoring]);
+
   // Update URL param saat tab berubah
   const handleTabChange = (tab) => {
     setActiveTab(tab);
@@ -115,48 +159,51 @@ export default function PetugasMonitoringList() {
   // 1. Tab Pemantauan Aktif (hanya pasien yang masih aktif dirawat di RS petugas dan BELUM dirujuk keluar)
   const activeMonitoringVictims = useMemo(() => {
     return victims.filter((v) => {
-      const isReferredOut =
-        (typeof v.kondisiTerakhir === 'string' && v.kondisiTerakhir.startsWith('Dirujuk')) ||
-        (typeof v.statusPemantauan === 'string' && v.statusPemantauan.startsWith('Dirujuk'));
-      const isPendingIncoming = v.isRujukanMasuk === true && !v.rujukanAccepted;
-      if (isReferredOut || isPendingIncoming) return false;
+      // Pasien selesai (Pulang / Meninggal Dunia) otomatis keluar dari antrean pemantauan aktif
+      if (isVictimFinished(v)) return false;
 
-      return (
-        v.statusPemantauan === 'Pemantauan Aktif' ||
-        v.statusPemantauan === 'Menunggu Konfirmasi Kondisi' ||
-        v.kondisiTerakhir === 'Masih Dirawat' ||
-        v.kondisiTerakhir === 'Rawat Inap'
-      );
+      const refInfo = getReferralPerspectiveInfo(v, null, currentUser);
+
+      // Pasien yang sudah dirujuk keluar dari RS petugas ini tidak dipantau di RS ini lagi
+      if (refInfo.isReferred && refInfo.isOriginView) return false;
+
+      // Pasien rujukan masuk yang belum diterima masuk ke tab rujukan masuk terlebih dahulu
+      const isPendingIncoming = v.isRujukanMasuk === true && !v.rujukanAccepted;
+      if (isPendingIncoming) return false;
+
+      // Seluruh korban yang masih menjalani rawat inap aktif di faskes petugas ini
+      return true;
     });
-  }, [victims]);
+  }, [victims, currentUser]);
 
   // 2. Tab Pasien Rujukan Masuk (korban dari RS lain yang dirujuk ke RS petugas ini)
   const incomingReferralVictims = useMemo(() => {
-    const officerName = (currentUser?.profile?.nama || '').toLowerCase();
     return victims.filter((v) => {
-      const isTargetOfficer = v.petugasTujuanId === officerId || (officerName && v.petugasTujuanNama?.toLowerCase() === officerName);
-      const isTargetHospital = isHospitalMatched(v.rumahSakitTujuan);
-      const isDestForMe = isTargetOfficer || isTargetHospital;
+      if (isVictimFinished(v)) return false;
+      const refInfo = getReferralPerspectiveInfo(v, null, currentUser);
 
-      return isDestForMe && (v.isRujukanMasuk === true || (v.statusPerawatan === 'Rujukan' && !v.rujukanAccepted));
+      // Terdaftar sebagai rujukan dan faskes petugas ini adalah faskes penerima / tujuan
+      if (refInfo.isReferred && refInfo.isDestinationView) return true;
+
+      const isTargetOfficer = v.petugasTujuanId === officerId || (currentUser?.profile?.nama && v.petugasTujuanNama?.toLowerCase() === currentUser.profile.nama.toLowerCase());
+      const isTargetHospital = isHospitalMatched(refInfo.rsTujuan || v.rumahSakitTujuan || v.rumahSakit);
+
+      return (isTargetOfficer || isTargetHospital) && (refInfo.isReferred || v.isRujukanMasuk === true || v.statusPerawatan === 'Rujukan');
     });
   }, [victims, officerId, currentUser, officerHospitals]);
 
   // 3. Tab Pasien Dirujuk Keluar (korban yang sebelumnya di RS petugas ini dan telah dirujuk ke RS lain)
   const outgoingReferralVictims = useMemo(() => {
-    const officerName = (currentUser?.profile?.nama || '').toLowerCase();
     return victims.filter((v) => {
-      const isOriginOfficer =
-        v.petugasAsalId === officerId ||
-        (officerName && v.petugasAsalNama?.toLowerCase() === officerName) ||
-        isHospitalMatched(v.rumahSakitAsal);
+      const refInfo = getReferralPerspectiveInfo(v, null, currentUser);
 
-      const isReferredStatus =
-        (typeof v.kondisiTerakhir === 'string' && v.kondisiTerakhir.startsWith('Dirujuk')) ||
-        (typeof v.statusPemantauan === 'string' && v.statusPemantauan.startsWith('Dirujuk')) ||
-        Boolean(v.rumahSakitTujuan && v.rumahSakitTujuan !== (v.rumahSakitAsal || v.rumahSakit));
+      // Terdaftar sebagai rujukan dan faskes petugas ini adalah faskes pengirim / asal
+      if (refInfo.isReferred && refInfo.isOriginView) return true;
 
-      return isOriginOfficer && isReferredStatus;
+      const isOriginOfficer = v.petugasAsalId === officerId || (currentUser?.profile?.nama && v.petugasAsalNama?.toLowerCase() === currentUser.profile.nama.toLowerCase());
+      const isOriginHospital = isHospitalMatched(refInfo.rsAsal || v.rumahSakitAsal);
+
+      return (isOriginOfficer || isOriginHospital) && refInfo.isReferred;
     });
   }, [victims, officerId, currentUser, officerHospitals]);
 
@@ -175,17 +222,22 @@ export default function PetugasMonitoringList() {
   const filtered = useMemo(() => {
     const list = tabDataset.filter((v) => {
       const monSla = calculateMonitoringSla(v);
+      const stOfficial = getMonitoringStatus(v);
+      const regNo = String(v.nomorLaporan || v.nomorTiket || v.noRegister || v.caseId || '');
 
       const matchSearch =
         v.nama.toLowerCase().includes(searchTerm.toLowerCase()) ||
         v.rumahSakit.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        (v.rumahSakitAsal && v.rumahSakitAsal.toLowerCase().includes(searchTerm.toLowerCase())) ||
         (v.rumahSakitTujuan && v.rumahSakitTujuan.toLowerCase().includes(searchTerm.toLowerCase())) ||
-        (v.nik && v.nik.includes(searchTerm));
+        (v.nik && v.nik.includes(searchTerm)) ||
+        regNo.toLowerCase().includes(searchTerm.toLowerCase());
       if (!matchSearch) return false;
 
-      if (hospitalFilter !== 'ALL' && v.rumahSakit !== hospitalFilter && v.rumahSakitTujuan !== hospitalFilter) {
+      if (hospitalFilter !== 'ALL' && !matchesHospitalFilter(v, hospitalFilter)) {
         return false;
       }
+      if (statusFilter !== 'ALL' && stOfficial !== statusFilter) return false;
       if (conditionFilter !== 'ALL' && v.kondisiTerakhir !== conditionFilter) return false;
       if (careCategoryFilter !== 'ALL') {
         const cat = v.statusPerawatan || (v.kondisiTerakhir === 'Sudah Pulang' ? 'Pulang' : v.kondisiTerakhir);
@@ -199,17 +251,63 @@ export default function PetugasMonitoringList() {
       return true;
     });
 
-    // Urutkan data pemantauan otomatis berdasarkan prioritas tenggat waktu
     const now = new Date();
-    return list.sort((a, b) => {
-      const deadA = getVictimDeadline(a, now);
-      const deadB = getVictimDeadline(b, now);
-      return compareByDeadlinePriority(deadA, deadB, now);
+    if (!sortConfig.key) {
+      return list.sort((a, b) => compareVictimsBySlaPriority(a, b, now));
+    }
+
+    return [...list].sort((a, b) => {
+      let valA, valB;
+      switch (sortConfig.key) {
+        case 'index':
+          valA = Number(a.id) || 0;
+          valB = Number(b.id) || 0;
+          break;
+        case 'noRegister':
+          valA = String(a.nomorLaporan || a.nomorTiket || a.noRegister || a.caseId || a.id).toLowerCase();
+          valB = String(b.nomorLaporan || b.nomorTiket || b.noRegister || b.caseId || b.id).toLowerCase();
+          break;
+        case 'tglRegister':
+          valA = new Date(a.tanggalMasukRs || a.tanggalInformasiDiterima || 0).getTime();
+          valB = new Date(b.tanggalMasukRs || b.tanggalInformasiDiterima || 0).getTime();
+          break;
+        case 'rumahSakit':
+        case 'asal':
+          valA = String(a.rumahSakit || a.rumahSakitAsal || '').toLowerCase();
+          valB = String(b.rumahSakit || b.rumahSakitAsal || '').toLowerCase();
+          break;
+        case 'tglLaka':
+          valA = new Date(a.tanggalKecelakaan || a.tgl_laka || a.tanggalInformasiDiterima || 0).getTime();
+          valB = new Date(b.tanggalKecelakaan || b.tgl_laka || b.tanggalInformasiDiterima || 0).getTime();
+          break;
+        case 'namaKorban':
+          valA = String(a.nama || '').toLowerCase();
+          valB = String(b.nama || '').toLowerCase();
+          break;
+        case 'tlTerakhir': {
+          const da = a.tanggalKunjunganTerakhir || a.waktuPemantauanTerakhir || a.kunjunganPertama?.tanggalKunjungan || 0;
+          const db = b.tanggalKunjunganTerakhir || b.waktuPemantauanTerakhir || b.kunjunganPertama?.tanggalKunjungan || 0;
+          valA = new Date(da).getTime();
+          valB = new Date(db).getTime();
+          break;
+        }
+        case 'status':
+          valA = String(getMonitoringStatus(a));
+          valB = String(getMonitoringStatus(b));
+          break;
+        default:
+          return 0;
+      }
+
+      if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
+      if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
+      return 0;
     });
-  }, [tabDataset, searchTerm, hospitalFilter, conditionFilter, careCategoryFilter, slaFilter]);
+  }, [tabDataset, searchTerm, hospitalFilter, statusFilter, conditionFilter, careCategoryFilter, slaFilter, sortConfig]);
 
   const handleOpenMonitoringModal = (victim) => {
-    if (victim.isRujukanMasuk && !victim.rujukanAccepted) {
+    if (!victim || isVictimFinished(victim)) return;
+    if (!victim.isRawatLanjutan && victim.isRujukanMasuk && !victim.rujukanAccepted) {
       storageService.acceptRujukan(victim.id, currentUser?.profile);
       const updated = storageService.getVictimById(victim.id);
       setSelectedVictimForMonitoring(updated || victim);
@@ -218,75 +316,9 @@ export default function PetugasMonitoringList() {
     }
   };
 
-  // Helper render badge status seragam (titik berwarna tanpa badge bertumpuk)
+  // Helper render badge status (4 Kategori Resmi)
   const renderStatusBadge = (v) => {
-    const isDischarged =
-      v.kondisiTerakhir === 'Sudah Pulang' ||
-      v.kondisiTerakhir === 'Pulang' ||
-      v.kondisiTerakhir === 'Selesai' ||
-      v.statusPemantauan === 'Selesai Dipantau';
-
-    const isReferred =
-      (typeof v.kondisiTerakhir === 'string' && v.kondisiTerakhir.startsWith('Dirujuk')) ||
-      (typeof v.statusPemantauan === 'string' && v.statusPemantauan.startsWith('Dirujuk')) ||
-      v.statusPerawatan === 'Rujukan';
-
-    const isNeedAction =
-      v.statusTindakLanjut === 'Masih Perlu Ditindaklanjuti' ||
-      v.kondisiTerakhir === 'Masih Dirawat' ||
-      v.kondisiTerakhir === 'Rawat Inap';
-
-    if (isDischarged) {
-      return (
-        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200/80">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-          <span>Selesai</span>
-        </span>
-      );
-    }
-
-    if (isReferred) {
-      return (
-        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-purple-50 text-purple-700 border border-purple-200/80">
-          <span className="w-1.5 h-1.5 rounded-full bg-purple-500"></span>
-          <span>Dirujuk</span>
-        </span>
-      );
-    }
-
-    if (v.statusPerawatan === 'Rawat Lanjutan' || v.isRawatLanjutan) {
-      return (
-        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-sky-50 text-sky-700 border border-sky-200/80">
-          <span className="w-1.5 h-1.5 rounded-full bg-sky-500"></span>
-          <span>Rawatan Lanjutan</span>
-        </span>
-      );
-    }
-
-    if (v.kondisiTerakhir === 'Meninggal Dunia' || v.kondisiTerakhir === 'Meninggal') {
-      return (
-        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-rose-50 text-rose-700 border border-rose-200/80">
-          <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span>
-          <span>Meninggal</span>
-        </span>
-      );
-    }
-
-    if (isNeedAction) {
-      return (
-        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200/80">
-          <span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
-          <span>Masih Dirawat</span>
-        </span>
-      );
-    }
-
-    return (
-      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-slate-100 text-slate-700 border border-slate-200">
-        <span className="w-1.5 h-1.5 rounded-full bg-slate-400"></span>
-        <span>{v.kondisiTerakhir || 'Observasi'}</span>
-      </span>
-    );
+    return <MonitoringStatusBadge victim={v} size="sm" />;
   };
 
   return (
@@ -294,7 +326,7 @@ export default function PetugasMonitoringList() {
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200/80 pb-4">
         <div>
-          <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">Pemantauan Berkala Korban</h1>
+          <h1 className="text-2xl font-black text-slate-900 tracking-tight">Pemantauan Berkala Korban</h1>
           <p className="text-xs text-slate-500 mt-1">
             Monitoring kondisi korban secara berkelanjutan dan penanganan pasien rujukan antar-rumah sakit.
           </p>
@@ -304,10 +336,61 @@ export default function PetugasMonitoringList() {
             {activeMonitoringVictims.length} Pemantauan Aktif
           </span>
           {incomingReferralVictims.length > 0 && (
-            <span className="text-xs font-bold px-3 py-1.5 rounded-xl bg-purple-100 text-purple-800 border border-purple-300 animate-pulse shadow-2xs">
+            <span className="text-xs font-bold px-3 py-1.5 rounded-xl bg-purple-50 text-purple-800 border border-purple-200 shadow-2xs">
               {incomingReferralVictims.length} Rujukan Masuk
             </span>
           )}
+        </div>
+      </div>
+
+      {/* 4 Stat Cards Ringkasan */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs hover:shadow-xs transition-shadow">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Pemantauan Aktif</span>
+            <div className="w-9 h-9 rounded-xl bg-sky-50 text-[#145DA0] border border-sky-100 flex items-center justify-center shrink-0">
+              <Activity className="w-4 h-4" />
+            </div>
+          </div>
+          <span className="text-3xl font-black font-mono tracking-tight text-slate-900 block mt-2">
+            {activeMonitoringVictims.length}
+          </span>
+        </div>
+
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs hover:shadow-xs transition-shadow">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Rujukan Masuk</span>
+            <div className="w-9 h-9 rounded-xl bg-purple-50 text-purple-700 border border-purple-100 flex items-center justify-center shrink-0">
+              <ArrowUpRight className="w-4 h-4" />
+            </div>
+          </div>
+          <span className="text-3xl font-black font-mono tracking-tight text-purple-700 block mt-2">
+            {incomingReferralVictims.length}
+          </span>
+        </div>
+
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs hover:shadow-xs transition-shadow">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Rujukan Keluar</span>
+            <div className="w-9 h-9 rounded-xl bg-amber-50 text-amber-600 border border-amber-100 flex items-center justify-center shrink-0">
+              <ArrowRight className="w-4 h-4" />
+            </div>
+          </div>
+          <span className="text-3xl font-black font-mono tracking-tight text-slate-900 block mt-2">
+            {outgoingReferralVictims.length}
+          </span>
+        </div>
+
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs hover:shadow-xs transition-shadow">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Total Kasus</span>
+            <div className="w-9 h-9 rounded-xl bg-slate-50 text-slate-600 border border-slate-200 flex items-center justify-center shrink-0">
+              <Users className="w-4 h-4" />
+            </div>
+          </div>
+          <span className="text-3xl font-black font-mono tracking-tight text-slate-900 block mt-2">
+            {victims.length}
+          </span>
         </div>
       </div>
 
@@ -336,11 +419,11 @@ export default function PetugasMonitoringList() {
           onClick={() => handleTabChange('rujukan_masuk')}
           className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
             activeTab === 'rujukan_masuk'
-              ? 'bg-purple-700 text-white shadow-2xs'
-              : 'bg-white text-purple-800 hover:bg-purple-50 border border-purple-200/90'
+              ? 'bg-[#145DA0] text-white shadow-2xs'
+              : 'bg-white text-slate-600 hover:text-slate-900 hover:bg-slate-100 border border-slate-200/90'
           }`}
         >
-          <ArrowUpRight className="w-4 h-4 text-purple-300" />
+          <ArrowUpRight className="w-4 h-4" />
           <span>Pasien Rujukan Masuk</span>
           <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
             activeTab === 'rujukan_masuk' ? 'bg-white/20 text-white' : 'bg-purple-100 text-purple-800'
@@ -354,7 +437,7 @@ export default function PetugasMonitoringList() {
           onClick={() => handleTabChange('rujukan_keluar')}
           className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
             activeTab === 'rujukan_keluar'
-              ? 'bg-slate-800 text-white shadow-2xs'
+              ? 'bg-[#145DA0] text-white shadow-2xs'
               : 'bg-white text-slate-600 hover:text-slate-900 hover:bg-slate-100 border border-slate-200/90'
           }`}
         >
@@ -372,7 +455,7 @@ export default function PetugasMonitoringList() {
           onClick={() => handleTabChange('semua')}
           className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
             activeTab === 'semua'
-              ? 'bg-slate-700 text-white shadow-2xs'
+              ? 'bg-[#145DA0] text-white shadow-2xs'
               : 'bg-white text-slate-600 hover:text-slate-900 hover:bg-slate-100 border border-slate-200/90'
           }`}
         >
@@ -389,7 +472,7 @@ export default function PetugasMonitoringList() {
               type="text"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              placeholder="Cari berdasarkan nama korban, NIK, atau rumah sakit..."
+              placeholder="Cari No Register, nama korban, NIK, atau asal RS..."
               className="w-full pl-9 pr-4 py-2 text-xs rounded-xl border border-slate-200 bg-slate-50/70 focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#145DA0]"
             />
           </div>
@@ -400,12 +483,24 @@ export default function PetugasMonitoringList() {
               onChange={(e) => setHospitalFilter(e.target.value)}
               className="px-3 py-2 text-xs rounded-xl border border-slate-200 bg-slate-50/70 focus:bg-white text-slate-700 flex-1 sm:flex-initial"
             >
-              <option value="ALL">Semua Rumah Sakit</option>
+              <option value="ALL">Semua Asal / RS</option>
               {hospitals.map((h) => (
                 <option key={h} value={h}>
                   {h}
                 </option>
               ))}
+            </select>
+
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              className="px-3 py-2 text-xs rounded-xl border border-slate-200 bg-slate-50/70 focus:bg-white text-slate-700 flex-1 sm:flex-initial font-medium"
+            >
+              <option value="ALL">Semua Status</option>
+              <option value={MONITORING_STATUS.MENUNGGU_KUNJUNGAN}>Menunggu Kunjungan</option>
+              <option value={MONITORING_STATUS.DALAM_PEMANTAUAN}>Dalam Pemantauan</option>
+              <option value={MONITORING_STATUS.MENUNGGU_TINDAK_LANJUT}>Menunggu Tindak Lanjut</option>
+              <option value={MONITORING_STATUS.SELESAI}>Selesai (Pulang / MD)</option>
             </select>
 
             <select
@@ -425,7 +520,7 @@ export default function PetugasMonitoringList() {
               onChange={(e) => setSlaFilter(e.target.value)}
               className="px-3 py-2 text-xs rounded-xl border border-slate-200 bg-slate-50/70 focus:bg-white text-slate-700 flex-1 sm:flex-initial"
             >
-              <option value="ALL">Semua Status SLA</option>
+              <option value="ALL">Semua Batas Waktu</option>
               <option value="TERLAMBAT">Terlambat</option>
               <option value="MENDEKATI">Mendekati Tenggat</option>
               <option value="TEPAT_WAKTU">Tepat Waktu</option>
@@ -436,12 +531,14 @@ export default function PetugasMonitoringList() {
               onClick={() => {
                 setSearchTerm('');
                 setHospitalFilter('ALL');
+                setStatusFilter('ALL');
                 setConditionFilter('ALL');
                 setCareCategoryFilter('ALL');
                 setSlaFilter('ALL');
+                setSortConfig({ key: null, direction: 'asc' });
               }}
               className="p-2 rounded-xl border border-slate-200 hover:bg-slate-100 text-slate-600 transition-colors cursor-pointer shrink-0"
-              title="Reset Filter"
+              title="Reset Filter & Pengurutan"
             >
               <RotateCcw className="w-4 h-4" />
             </button>
@@ -454,24 +551,70 @@ export default function PetugasMonitoringList() {
         {/* DESKTOP TABLE VIEW */}
         <div className="hidden md:block overflow-x-auto">
           <table className="w-full text-left border-collapse text-xs">
-            <thead>
-              <tr className="bg-slate-50/80 border-b border-slate-200/90 text-slate-500 font-semibold uppercase text-[11px] tracking-wider">
-                <th className="py-3 px-4">Nama Korban</th>
-                <th className="py-3 px-4">
-                  {activeTab === 'rujukan_keluar' ? 'Faskes Asal & Rujukan Tujuan' : (activeTab === 'rujukan_masuk' ? 'RS Rujukan & RS Asal' : 'Rumah Sakit')}
+            <thead className="bg-slate-50/90 border-b border-slate-200/90">
+              <tr>
+                <SortableHeader
+                  label="#"
+                  sortKey="index"
+                  currentSortKey={sortConfig.key}
+                  currentSortDirection={sortConfig.direction}
+                  onSort={handleSort}
+                  align="center"
+                  className="w-12 text-center"
+                />
+                <SortableHeader
+                  label="Nama Korban"
+                  sortKey="namaKorban"
+                  currentSortKey={sortConfig.key}
+                  currentSortDirection={sortConfig.direction}
+                  onSort={handleSort}
+                />
+                <SortableHeader
+                  label="Rumah Sakit"
+                  sortKey="rumahSakit"
+                  currentSortKey={sortConfig.key}
+                  currentSortDirection={sortConfig.direction}
+                  onSort={handleSort}
+                />
+                <SortableHeader
+                  label="Tgl Kecelakaan"
+                  sortKey="tglLaka"
+                  currentSortKey={sortConfig.key}
+                  currentSortDirection={sortConfig.direction}
+                  onSort={handleSort}
+                />
+                <SortableHeader
+                  label="TGL Masuk RS"
+                  sortKey="tglRegister"
+                  currentSortKey={sortConfig.key}
+                  currentSortDirection={sortConfig.direction}
+                  onSort={handleSort}
+                />
+                <SortableHeader
+                  label="TL Terakhir"
+                  sortKey="tlTerakhir"
+                  currentSortKey={sortConfig.key}
+                  currentSortDirection={sortConfig.direction}
+                  onSort={handleSort}
+                />
+                <SortableHeader
+                  label="Status"
+                  sortKey="status"
+                  currentSortKey={sortConfig.key}
+                  currentSortDirection={sortConfig.direction}
+                  onSort={handleSort}
+                  align="center"
+                  className="text-center"
+                />
+                <th className="py-3 px-4 font-bold text-slate-700 uppercase tracking-wider text-[11px] text-right">
+                  Aksi
                 </th>
-                <th className="py-3 px-4">
-                  {activeTab === 'rujukan_keluar' || activeTab === 'rujukan_masuk' ? 'Tanggal Rujukan' : 'Tgl Masuk RS'}
-                </th>
-                <th className="py-3 px-4">Status Pasien</th>
-                <th className="py-3 px-4">SLA Pemantauan</th>
-                <th className="py-3 px-4 text-right">Aksi</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-12 text-center text-slate-400">
+                  <td colSpan={8} className="py-12 text-center text-slate-400">
                     {activeTab === 'rujukan_masuk' ? (
                       <div>
                         <ArrowUpRight className="w-8 h-8 text-slate-300 mx-auto mb-2" />
@@ -489,10 +632,13 @@ export default function PetugasMonitoringList() {
                   </td>
                 </tr>
               ) : (
-                filtered.map((v) => {
+                filtered.map((v, idx) => {
                   const monSla = calculateMonitoringSla(v);
-                  const isIncoming = v.isRujukanMasuk === true;
-                  const isReferredOut = typeof v.kondisiTerakhir === 'string' && v.kondisiTerakhir.startsWith('Dirujuk');
+                  const refInfo = getReferralPerspectiveInfo(v, hospitalFilter, currentUser);
+                  const isIncoming = refInfo.isReferred && refInfo.isDestinationView;
+                  const isReferredOut = refInfo.isReferred && refInfo.isOriginView;
+                  const isFinished = isVictimFinished(v);
+                  const tlInfo = getTlTerakhir(v);
 
                   const initials = (v.nama || 'K')
                     .split(' ')
@@ -503,111 +649,97 @@ export default function PetugasMonitoringList() {
 
                   return (
                     <tr key={v.id} className="hover:bg-slate-50/70 transition-colors">
-                      {/* Nama & NIK dengan Avatar Circle */}
-                      <td className="py-3.5 px-4 font-bold text-slate-900 whitespace-nowrap">
-                        <div className="flex items-center gap-2.5">
-                          <div className="w-8 h-8 rounded-full bg-blue-50 text-[#145DA0] font-bold text-xs flex items-center justify-center shrink-0 border border-blue-100">
-                            {initials}
-                          </div>
-                          <div>
-                            <Link
-                              to={`/petugas/korban/${v.id}`}
-                              className="hover:text-[#145DA0] hover:underline block font-bold text-slate-900 text-xs"
-                            >
-                              {v.nama}
-                            </Link>
-                            <span className="text-[10px] text-slate-400 font-mono font-normal block">
-                              NIK: {v.nik || '—'}
-                            </span>
-                          </div>
+                      {/* # (Nomor Urut) */}
+                      <td className="py-3.5 px-3.5 font-mono text-slate-400 text-center font-medium text-xs">
+                        {String(idx + 1).padStart(2, '0')}
+                      </td>
+
+                      {/* Nama Korban */}
+                      <td className="py-3.5 px-3.5 font-bold text-slate-900 whitespace-nowrap text-xs">
+                        <div>
+                          <Link
+                            to={`/petugas/korban/${v.id}`}
+                            className="hover:text-[#145DA0] hover:underline block font-bold text-slate-900 text-xs"
+                          >
+                            {v.nama}
+                          </Link>
+                          <span className="text-[10px] text-slate-400 font-mono font-normal block">
+                            NIK: {v.nik || '—'}
+                          </span>
                         </div>
                       </td>
 
-                      {/* Rumah Sakit & Jalur Rujukan */}
-                      <td className="py-3.5 px-4 text-slate-800 font-medium whitespace-nowrap">
-                        {v.rumahSakitTujuan ? (
-                          <div>
-                            <div className="flex items-center gap-1.5 font-bold text-slate-900">
-                              <span>{v.rumahSakitAsal || v.rumahSakit}</span>
-                              <ArrowRight className="w-3.5 h-3.5 text-purple-600 shrink-0" />
-                              <span className="text-purple-900">{v.rumahSakitTujuan}</span>
-                            </div>
-                            {isIncoming ? (
-                              <span className="text-[10px] text-purple-700 font-bold block mt-0.5">
-                                Menunggu konfirmasi pemantauan di {v.rumahSakitTujuan}
-                              </span>
-                            ) : (
-                              <span className="text-[10px] text-slate-500 font-semibold block mt-0.5">
-                                Dirujuk ke {v.rumahSakitTujuan}
-                              </span>
-                            )}
-                          </div>
-                        ) : (
-                          <div className="flex items-center gap-1.5">
-                            <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                            <span>{v.rumahSakit}</span>
-                            {v.rumahSakitAsal && v.rumahSakitAsal !== v.rumahSakit && (
-                              <span className="text-[10px] text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded border border-purple-200 font-semibold block">
-                                Rujukan dari {v.rumahSakitAsal}
-                              </span>
-                            )}
-                          </div>
+                      {/* Rumah Sakit (Sesuai Sudut Pandang Faskes Penangan) */}
+                      <td className="py-3.5 px-3.5 text-slate-800 font-medium whitespace-nowrap text-xs">
+                        <div className="flex items-center gap-1.5 font-semibold text-slate-900">
+                          <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                          <span>{refInfo.displayHospital}</span>
+                        </div>
+                        {refInfo.isReferred && refInfo.badgeLabel && (
+                          <span className={`text-[10px] ${refInfo.badgeColorClass} px-1.5 py-0.5 rounded border font-semibold inline-block mt-0.5 shadow-2xs`}>
+                            {refInfo.badgeLabel}
+                          </span>
                         )}
                       </td>
 
-                      {/* Tanggal Rujukan / Tanggal Masuk */}
-                      <td className="py-3.5 px-4 text-slate-700 whitespace-nowrap font-medium">
-                        {v.tanggalRujukan ? (
-                          <div>
-                            <span className="font-bold text-purple-900 block">
-                              {formatDateShort(v.tanggalRujukan)}
-                            </span>
-                            <span className="text-[10px] text-slate-400 block">
-                              Tgl Rujukan
-                            </span>
-                          </div>
-                        ) : (
-                          <div>
-                            <span>{formatDateShort(v.tanggalMasukRs || v.tanggalInformasiDiterima)}</span>
-                          </div>
-                        )}
+                      {/* Tgl Kecelakaan */}
+                      <td className="py-3.5 px-3.5 text-slate-700 whitespace-nowrap font-medium text-xs">
+                        <span className="text-slate-800 font-medium block">
+                          {formatDateShort(v.tanggalKecelakaan || v.tgl_laka || v.tanggalInformasiDiterima)}
+                        </span>
                       </td>
 
-                      {/* Status Pasien (Single Dot Badge Seragam) */}
-                      <td className="py-3.5 px-4 whitespace-nowrap">
+                      {/* TGL Masuk RS */}
+                      <td className="py-3.5 px-3.5 text-slate-700 whitespace-nowrap font-medium text-xs">
+                        <span className="text-slate-800 font-medium block">
+                          {formatDateShort(v.tanggalMasukRs || v.tanggalInformasiDiterima)}
+                        </span>
+                      </td>
+
+                      {/* TL Terakhir (Tindak Lanjut / Kunjungan Terakhir) */}
+                      <td className="py-3.5 px-3.5 text-slate-800 whitespace-nowrap text-xs">
+                        <span className="text-slate-800 font-medium block">
+                          {tlInfo.dateText}
+                        </span>
+                      </td>
+
+                      {/* Status (4 Kategori Resmi: Selesai jika pulang/MD) */}
+                      <td className="py-3.5 px-3.5 text-center whitespace-nowrap">
                         {renderStatusBadge(v)}
                       </td>
 
-                      {/* Status SLA */}
-                      <td className="py-3.5 px-4 whitespace-nowrap">
-                        <SlaBadge slaInfo={monSla} />
-                      </td>
-
-                      {/* Aksi */}
-                      <td className="py-3.5 px-4 text-right whitespace-nowrap">
+                      {/* Aksi: Jika korban Pulang/Selesai, tidak bisa catat pemantauan lagi */}
+                      <td className="py-3.5 px-3.5 text-right whitespace-nowrap">
                         <div className="flex items-center justify-end gap-1.5">
-                          {isIncoming ? (
-                            <button
-                              type="button"
-                              onClick={() => handleOpenMonitoringModal(v)}
-                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-purple-700 hover:bg-purple-800 text-white shadow-2xs transition-colors cursor-pointer"
-                            >
-                              <Activity className="w-3.5 h-3.5" />
-                              <span>Lanjutkan Pemantauan</span>
-                            </button>
-                          ) : !isReferredOut ? (
-                            <button
-                              type="button"
-                              onClick={() => handleOpenMonitoringModal(v)}
-                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-sky-50 text-[#145DA0] hover:bg-sky-100 border border-sky-200 transition-colors cursor-pointer"
-                            >
-                              <Activity className="w-3.5 h-3.5" />
-                              <span>Catat Pemantauan</span>
-                            </button>
-                          ) : (
-                            <span className="text-[11px] text-slate-400 italic px-2 py-1">
-                              Dirujuk Keluar
+                          {isFinished ? (
+                            <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-1 rounded-md border border-emerald-200 shadow-2xs">
+                              <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                              <span>Selesai</span>
                             </span>
+                          ) : (
+                            isIncoming ? (
+                              <button
+                                type="button"
+                                onClick={() => handleOpenMonitoringModal(v)}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-purple-700 hover:bg-purple-800 text-white shadow-2xs transition-colors cursor-pointer"
+                              >
+                                <Activity className="w-3.5 h-3.5" />
+                                <span>Lanjutkan Pemantauan</span>
+                              </button>
+                            ) : !isReferredOut ? (
+                              <button
+                                type="button"
+                                onClick={() => handleOpenMonitoringModal(v)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-sky-50 text-[#145DA0] hover:bg-sky-100 border border-sky-200 transition-colors cursor-pointer"
+                              >
+                                <Activity className="w-3.5 h-3.5" />
+                                <span>Catat Kunjungan</span>
+                              </button>
+                            ) : (
+                              <span className="text-[11px] text-slate-400 italic px-2 py-1">
+                                Dirujuk Keluar
+                              </span>
+                            )
                           )}
 
                           <Link
@@ -636,8 +768,10 @@ export default function PetugasMonitoringList() {
           ) : (
             filtered.map((v) => {
               const monSla = calculateMonitoringSla(v);
-              const isIncoming = v.isRujukanMasuk === true;
-              const isReferredOut = typeof v.kondisiTerakhir === 'string' && v.kondisiTerakhir.startsWith('Dirujuk');
+              const refInfo = getReferralPerspectiveInfo(v, hospitalFilter, currentUser);
+              const isIncoming = refInfo.isReferred && refInfo.isDestinationView;
+              const isReferredOut = refInfo.isReferred && refInfo.isOriginView;
+              const isFinished = isVictimFinished(v);
               const initials = (v.nama || 'K')
                 .split(' ')
                 .map((n) => n[0])
@@ -648,21 +782,16 @@ export default function PetugasMonitoringList() {
               return (
                 <div key={v.id} className="p-4 space-y-3">
                   <div className="flex items-start justify-between gap-2.5">
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <div className="w-9 h-9 rounded-full bg-blue-50 text-[#145DA0] font-bold text-xs flex items-center justify-center shrink-0 border border-blue-100">
-                        {initials}
-                      </div>
-                      <div className="min-w-0">
-                        <Link
-                          to={`/petugas/korban/${v.id}`}
-                          className="font-bold text-slate-900 text-xs hover:text-[#145DA0] truncate block"
-                        >
-                          {v.nama}
-                        </Link>
-                        <span className="text-[10px] text-slate-400 font-mono block">
-                          NIK: {v.nik || '—'}
-                        </span>
-                      </div>
+                    <div className="min-w-0">
+                      <Link
+                        to={`/petugas/korban/${v.id}`}
+                        className="font-bold text-slate-900 text-xs hover:text-[#145DA0] truncate block"
+                      >
+                        {v.nama}
+                      </Link>
+                      <span className="text-[10px] text-slate-400 font-mono block">
+                        NIK: {v.nik || '—'}
+                      </span>
                     </div>
                     <div className="shrink-0">
                       {renderStatusBadge(v)}
@@ -673,14 +802,13 @@ export default function PetugasMonitoringList() {
                   <div className="bg-slate-50 rounded-xl p-2.5 text-[11px] text-slate-600 space-y-1 border border-slate-100">
                     <div className="flex items-center gap-1.5 font-medium text-slate-800">
                       <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                      {v.rumahSakitTujuan ? (
-                        <span className="truncate">
-                          {v.rumahSakitAsal || v.rumahSakit} → <strong className="text-purple-900">{v.rumahSakitTujuan}</strong>
-                        </span>
-                      ) : (
-                        <span className="truncate">{v.rumahSakit}</span>
-                      )}
+                      <span>{refInfo.displayHospital}</span>
                     </div>
+                    {refInfo.isReferred && refInfo.badgeLabel && (
+                      <span className={`text-[10px] ${refInfo.badgeColorClass} px-1.5 py-0.5 rounded border font-semibold inline-block shadow-2xs`}>
+                        {refInfo.badgeLabel}
+                      </span>
+                    )}
                     <div className="flex items-center justify-between text-[10px] text-slate-500 pt-1">
                       <span>{v.tanggalRujukan ? `Tgl Rujukan: ${formatDateShort(v.tanggalRujukan)}` : `Masuk RS: ${formatDateShort(v.tanggalMasukRs || v.tanggalInformasiDiterima)}`}</span>
                       <SlaBadge slaInfo={monSla} />
@@ -689,28 +817,30 @@ export default function PetugasMonitoringList() {
 
                   {/* Action buttons */}
                   <div className="flex items-center gap-2 pt-1">
-                    {isIncoming ? (
-                      <button
-                        type="button"
-                        onClick={() => handleOpenMonitoringModal(v)}
-                        className="flex-1 py-2 px-3 rounded-lg text-xs font-bold bg-purple-700 hover:bg-purple-800 text-white flex items-center justify-center gap-1.5 shadow-2xs cursor-pointer"
-                      >
-                        <Activity className="w-3.5 h-3.5" />
-                        <span>Lanjutkan Pemantauan</span>
-                      </button>
-                    ) : !isReferredOut ? (
-                      <button
-                        type="button"
-                        onClick={() => handleOpenMonitoringModal(v)}
-                        className="flex-1 py-2 px-3 rounded-lg text-xs font-bold bg-sky-50 text-[#145DA0] hover:bg-sky-100 border border-sky-200 flex items-center justify-center gap-1.5 cursor-pointer"
-                      >
-                        <Activity className="w-3.5 h-3.5" />
-                        <span>Catat Pemantauan</span>
-                      </button>
-                    ) : (
-                      <span className="flex-1 text-[11px] text-slate-400 italic text-center py-1">
-                        Dirujuk Keluar
-                      </span>
+                    {!isFinished && (
+                      isIncoming ? (
+                        <button
+                          type="button"
+                          onClick={() => handleOpenMonitoringModal(v)}
+                          className="flex-1 py-2 px-3 rounded-lg text-xs font-bold bg-[#145DA0] hover:bg-[#0f497e] text-white flex items-center justify-center gap-1.5 shadow-2xs cursor-pointer"
+                        >
+                          <Activity className="w-3.5 h-3.5" />
+                          <span>Catat Kunjungan RS</span>
+                        </button>
+                      ) : !isReferredOut ? (
+                        <button
+                          type="button"
+                          onClick={() => handleOpenMonitoringModal(v)}
+                          className="flex-1 py-2 px-3 rounded-lg text-xs font-semibold bg-sky-50 text-[#145DA0] hover:bg-sky-100 border border-sky-200 flex items-center justify-center gap-1.5 cursor-pointer"
+                        >
+                          <Activity className="w-3.5 h-3.5" />
+                          <span>Catat Kunjungan</span>
+                        </button>
+                      ) : (
+                        <span className="flex-1 text-[11px] text-slate-400 italic text-center py-1">
+                          Dirujuk Keluar
+                        </span>
+                      )
                     )}
 
                     <Link

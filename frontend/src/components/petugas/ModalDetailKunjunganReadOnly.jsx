@@ -3,6 +3,8 @@ import Modal from '../common/Modal';
 import AuthenticatedImage from '../common/AuthenticatedImage';
 import { parseCatatanKondisi } from '../../services/backendMapper';
 import { getCachedPhoto } from '../../services/photoService';
+import { getRealVisitPhoto } from '../../utils/realPhotos';
+import { formatDateTimeIndo } from '../../utils/dateUtils';
 import {
   Calendar,
   Clock,
@@ -13,23 +15,13 @@ import {
   Navigation,
   ExternalLink,
   Lock,
-  X
+  X,
+  AlertTriangle
 } from 'lucide-react';
 
 function formatDateTime(dateStr) {
   if (!dateStr) return '—';
-  try {
-    const d = new Date(dateStr);
-    if (isNaN(d.getTime())) return dateStr;
-    return (
-      d.toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }) +
-      ', ' +
-      d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) +
-      ' WIB'
-    );
-  } catch {
-    return dateStr;
-  }
+  return formatDateTimeIndo(dateStr);
 }
 
 export default function ModalDetailKunjunganReadOnly({
@@ -39,6 +31,7 @@ export default function ModalDetailKunjunganReadOnly({
   victim
 }) {
   const [photoZoom, setPhotoZoom] = useState(false);
+  const [zoomedPhotoUrl, setZoomedPhotoUrl] = useState(null);
 
   if (!isOpen || !activity) return null;
 
@@ -77,13 +70,12 @@ export default function ModalDetailKunjunganReadOnly({
   const officerName = activity.petugasNama || victim?.namaPetugas || 'Petugas Jasa Raharja';
 
   const photoToDisplay =
-    (activity.fotoUrl && !activity.fotoUrl.includes('default-visit-photo.svg') ? activity.fotoUrl : null) ||
-    getCachedPhoto(activity.visitId) ||
-    getCachedPhoto(`VISIT-${activity.visitId}`) ||
-    getCachedPhoto(activity.id) ||
-    getCachedPhoto(activity.foto_bukti_url) ||
     activity.foto_bukti_url ||
-    activity.fotoUrl;
+    (activity.fotoUrl && !activity.fotoUrl.startsWith('data:') ? activity.fotoUrl : null) ||
+    (activity.visitId ? getCachedPhoto(`VISIT-${activity.visitId}`) : null) ||
+    (activity.id && !/^\d+$/.test(String(activity.id)) ? getCachedPhoto(activity.id) : null) ||
+    activity.fotoUrl ||
+    getRealVisitPhoto(activity.id || activity.visitId || victim?.id);
 
   return (
     <Modal
@@ -98,7 +90,7 @@ export default function ModalDetailKunjunganReadOnly({
         <div className="flex items-center gap-2 p-2.5 bg-slate-100 border border-slate-200/90 rounded-xl text-slate-600 text-[11px]">
           <Lock className="w-3.5 h-3.5 text-slate-500 shrink-0" />
           <span>
-            <strong>Arsip Historis Permanen:</strong> Data kunjungan ini bersifat read-only dan tidak dapat diubah atau dihapus untuk menjaga integritas rekam medis dan SLA.
+            <strong>Arsip Historis Permanen:</strong> Data kunjungan ini bersifat read-only dan tidak dapat diubah atau dihapus untuk menjaga integritas riwayat pelayanan dan batas waktu.
           </span>
         </div>
 
@@ -238,36 +230,70 @@ export default function ModalDetailKunjunganReadOnly({
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {photoToDisplay && (
-                <div className="space-y-1.5">
+                <div className="space-y-1.5 sm:col-span-1">
                   <span className="text-[11px] font-semibold text-slate-600 flex items-center gap-1">
-                    <Camera className="w-3.5 h-3.5 text-[#145DA0]" /> Foto Dokumentasi Kunjungan
+                    <Camera className="w-3.5 h-3.5 text-[#145DA0]" />
+                    <span>Foto Dokumentasi Kunjungan</span>
+                    {Array.isArray(activity.fotoUrls) && activity.fotoUrls.length > 1 && (
+                      <span className="text-[10px] text-slate-500 font-normal">({activity.fotoUrls.length} foto)</span>
+                    )}
                   </span>
-                  <div
-                    onClick={() => setPhotoZoom(true)}
-                    className="cursor-pointer rounded-xl border border-slate-200 overflow-hidden group relative max-w-[260px] shadow-2xs hover:shadow-md transition-shadow"
-                  >
-                    <AuthenticatedImage
-                      src={photoToDisplay}
-                      alt="Dokumentasi Kunjungan"
-                      className="w-full h-36 object-cover group-hover:scale-105 transition-transform duration-200"
-                    />
-                    <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 flex items-center justify-center transition-colors">
-                      <span className="bg-black/75 text-white text-[10px] font-bold px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity">
-                        Klik untuk Perbesar
-                      </span>
+
+                  {Array.isArray(activity.fotoUrls) && activity.fotoUrls.length > 1 ? (
+                    <div className="grid grid-cols-2 gap-2 max-w-[320px]">
+                      {activity.fotoUrls.map((pUrl, pIdx) => (
+                        <div
+                          key={pIdx}
+                          onClick={() => {
+                            setZoomedPhotoUrl(pUrl);
+                            setPhotoZoom(true);
+                          }}
+                          className="cursor-pointer rounded-xl border border-slate-200 overflow-hidden group relative shadow-2xs hover:shadow-md transition-shadow"
+                        >
+                          <AuthenticatedImage
+                            src={pUrl}
+                            alt={`Dokumentasi Kunjungan #${pIdx + 1}`}
+                            className="w-full h-24 object-cover group-hover:scale-105 transition-transform duration-200"
+                          />
+                          <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 flex items-center justify-center transition-colors">
+                            <span className="bg-black/75 text-white text-[9px] font-bold px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity">
+                              Perbesar #{pIdx + 1}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                  </div>
+                  ) : (
+                    <div
+                      onClick={() => {
+                        setZoomedPhotoUrl(photoToDisplay);
+                        setPhotoZoom(true);
+                      }}
+                      className="cursor-pointer rounded-xl border border-slate-200 overflow-hidden group relative max-w-[260px] shadow-2xs hover:shadow-md transition-shadow"
+                    >
+                      <AuthenticatedImage
+                        src={photoToDisplay}
+                        alt="Dokumentasi Kunjungan"
+                        className="w-full h-36 object-cover group-hover:scale-105 transition-transform duration-200"
+                      />
+                      <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 flex items-center justify-center transition-colors">
+                        <span className="bg-black/75 text-white text-[10px] font-bold px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity">
+                          Klik untuk Perbesar
+                        </span>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
-              {activity.latitude && (
+              {(activity.latitude || activity.lat_petugas) && (
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between text-[11px] font-semibold text-slate-600">
                     <span className="flex items-center gap-1">
                       <Navigation className="w-3.5 h-3.5 text-[#145DA0]" /> Koordinat Lokasi GPS
                     </span>
                     <a
-                      href={`https://www.google.com/maps?q=${activity.latitude},${activity.longitude}`}
+                      href={`https://www.google.com/maps?q=${activity.latitude ?? activity.lat_petugas},${activity.longitude ?? activity.lng_petugas}`}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="inline-flex items-center gap-1 text-[11px] font-bold text-[#145DA0] hover:underline"
@@ -278,15 +304,26 @@ export default function ModalDetailKunjunganReadOnly({
                   </div>
 
                   <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 font-mono text-[11px] space-y-1">
-                    <p>Latitude: <strong>{activity.latitude}</strong></p>
-                    <p>Longitude: <strong>{activity.longitude}</strong></p>
-                    {activity.jarakDariRsMeter !== null && activity.jarakDariRsMeter !== undefined && (
-                      <p className="text-emerald-700 font-sans font-bold">
-                        Jarak ke RS: {activity.jarakDariRsMeter} meter
-                      </p>
+                    <p>Latitude: <strong>{activity.latitude ?? activity.lat_petugas}</strong></p>
+                    <p>Longitude: <strong>{activity.longitude ?? activity.lng_petugas}</strong></p>
+                    {((activity.jarak_dari_rs_meter !== null && activity.jarak_dari_rs_meter !== undefined) ||
+                      (activity.jarakDariRsMeter !== null && activity.jarakDariRsMeter !== undefined)) && (
+                      <div className="pt-0.5">
+                        {((activity.jarak_dari_rs_meter ?? activity.jarakDariRsMeter) > (victim?.hospital_radius || 200) || activity.is_outside_hospital_radius) ? (
+                          <p className="text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1 font-sans font-bold text-[10px] flex items-center gap-1.5">
+                            <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-amber-600" />
+                            <span>Lokasi di Luar Radius RS ({activity.jarak_dari_rs_meter ?? activity.jarakDariRsMeter} m, batas {victim?.hospital_radius || 200} m) - Perlu Verifikasi Manual</span>
+                          </p>
+                        ) : (
+                          <p className="text-emerald-700 font-sans font-bold flex items-center gap-1.5">
+                            <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-600" />
+                            <span>Jarak ke RS: {activity.jarak_dari_rs_meter ?? activity.jarakDariRsMeter} meter (Dalam Radius)</span>
+                          </p>
+                        )}
+                      </div>
                     )}
                     <p className="text-slate-400 font-sans">
-                      Akurasi Lokasi: ±{activity.akurasiLokasi || 10} meter
+                      Akurasi Lokasi: ±{activity.akurasi_lokasi_meter || activity.akurasiLokasi || 10} meter
                     </p>
                   </div>
                 </div>
@@ -319,7 +356,7 @@ export default function ModalDetailKunjunganReadOnly({
               </div>
               <div className="p-3 bg-slate-900 flex items-center justify-center min-h-[300px]">
                 <AuthenticatedImage
-                  src={photoToDisplay}
+                  src={zoomedPhotoUrl || photoToDisplay}
                   alt="Foto Kunjungan Penuh"
                   className="max-h-[75vh] w-auto object-contain rounded"
                 />

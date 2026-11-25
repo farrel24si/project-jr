@@ -1,38 +1,42 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import { storageService } from '../../services/storageService';
-import { 
-  calculateFirstVisitSla, 
+import {
+  calculateFirstVisitSla,
   calculateMonitoringSla,
   getVictimDeadline,
-  compareByDeadlinePriority 
+  compareVictimsBySlaPriority
 } from '../../services/slaService';
+import { isVictimFinished } from '../../utils/monitoringStatus';
+import { formatDateIndo, formatDateTimeIndo } from '../../utils/dateUtils';
+import { getReferralPerspectiveInfo, matchesHospitalFilter } from '../../utils/referralUtils';
 import VictimDetailDrawer from '../../components/kabag/VictimDetailDrawer';
-import { 
-  Search, 
-  Filter, 
-  ChevronLeft, 
-  ChevronRight, 
-  Building2, 
-  Calendar, 
-  Eye, 
+import {
+  Search,
+  Filter,
+  ChevronLeft,
+  ChevronRight,
+  Building2,
+  Calendar,
+  Eye,
   RotateCcw,
   Users,
   Clock,
   HeartPulse,
   UserCheck,
   CheckCircle2,
-  AlertTriangle
+  AlertTriangle,
+  AlertCircle,
+  History,
+  CalendarCheck
 } from 'lucide-react';
 
 function formatDateShort(dateStr) {
-  if (!dateStr) return '—';
-  try {
-    const d = new Date(dateStr);
-    if (isNaN(d.getTime())) return dateStr;
-    return d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' });
-  } catch {
-    return dateStr;
-  }
+  return formatDateIndo(dateStr);
+}
+
+function formatDateTimeShort(dateStr) {
+  return formatDateTimeIndo(dateStr);
 }
 
 function getInitials(name) {
@@ -49,9 +53,8 @@ export default function KabagMonitoringList() {
   const [search, setSearch] = useState('');
   const [officerFilter, setOfficerFilter] = useState('ALL');
   const [hospitalFilter, setHospitalFilter] = useState('ALL');
-  const [conditionFilter, setConditionFilter] = useState('ALL');
   const [slaFilter, setSlaFilter] = useState('ALL');
-  const [sortBy, setSortBy] = useState('TENGGAT_PRIORITAS'); // TENGGAT_PRIORITAS, NEWEST, OLDEST, NAME, SLA_URGENT
+  const [sortBy, setSortBy] = useState('TENGGAT_PRIORITAS'); // TENGGAT_PRIORITAS (Mendekati tenggat teratas), NEWEST, NAME
 
   const [currentPage, setCurrentPage] = useState(1);
   const [selectedVictim, setSelectedVictim] = useState(null);
@@ -64,55 +67,167 @@ export default function KabagMonitoringList() {
     });
   };
 
+  const [officers, setOfficers] = useState(() => filterValidOfficers(storageService.getOfficers()));
+
   const loadData = () => {
     const data = storageService.getVictims();
     setVictims(data);
+    setOfficers(filterValidOfficers(storageService.getOfficers()));
   };
 
   useEffect(() => {
     storageService.syncWithBackend(true).catch(() => {});
     loadData();
     window.addEventListener('jr_victims_updated', loadData);
-    return () => window.removeEventListener('jr_victims_updated', loadData);
+    window.addEventListener('jr_officers_updated', loadData);
+    return () => {
+      window.removeEventListener('jr_victims_updated', loadData);
+      window.removeEventListener('jr_officers_updated', loadData);
+    };
   }, []);
-
-  // Filter lists
-  const officers = useMemo(() => filterValidOfficers(storageService.getOfficers()), []);
   const hospitals = useMemo(() => {
-    const list = Array.from(new Set(victims.map((v) => v.rumahSakit))).filter(Boolean);
-    return list;
+    return Array.from(new Set(victims.map((v) => v.rumahSakit))).filter(Boolean);
   }, [victims]);
 
-  // Top KPI Stats
+  // Statistik Monitoring Kunjungan
   const stats = useMemo(() => {
-    const total = victims.length;
+    let terlambat = 0;
+    let mendekatiTenggat = 0;
+    let tepatWaktu = 0;
     let belumDikunjungi = 0;
-    let pemantauanAktif = 0;
-    let selesai = 0;
+
+    const now = new Date();
 
     victims.forEach((v) => {
-      const isDone =
-        v.kondisiTerakhir === 'Sudah Pulang' ||
-        v.kondisiTerakhir === 'Pulang' ||
-        v.kondisiTerakhir === 'Selesai' ||
-        v.statusPemantauan === 'Selesai Dipantau';
+      const isDone = isVictimFinished(v);
 
-      if (isDone) {
-        selesai++;
-      } else if (!v.kunjunganPertama && (!v.riwayatKunjungan || v.riwayatKunjungan.length === 0)) {
+      if (isDone) return;
+
+      const firstPending = !v.kunjunganPertama && (!v.riwayatKunjungan || v.riwayatKunjungan.length === 0);
+
+      if (firstPending) {
         belumDikunjungi++;
+        const fSla = calculateFirstVisitSla(v.tanggalInformasiDiterima, v.kunjunganPertama, now);
+        if (fSla.isOverdue) terlambat++;
+        else if (fSla.isWarning) mendekatiTenggat++;
+        else tepatWaktu++;
       } else {
-        pemantauanAktif++;
+        const mSla = calculateMonitoringSla(v, now);
+        if (mSla.isOverdue) terlambat++;
+        else if (mSla.isWarning) mendekatiTenggat++;
+        else tepatWaktu++;
       }
     });
 
-    return { total, belumDikunjungi, pemantauanAktif, selesai };
+    return { terlambat, mendekatiTenggat, tepatWaktu, belumDikunjungi };
   }, [victims]);
 
-  // Filtered & Sorted Data
+  // Evaluasi Status Kunjungan & SLA per Korban
+  const evaluateVictimVisitStatus = (v, now = new Date()) => {
+    const isDone = isVictimFinished(v);
+
+    const deadline = getVictimDeadline(v, now);
+    const firstPending = !v.kunjunganPertama && (!v.riwayatKunjungan || v.riwayatKunjungan.length === 0);
+
+    let visitState = 'TEPAT_WAKTU';
+    let statusLabel = 'Tepat Waktu';
+    let badgeClass = 'text-emerald-700 bg-emerald-50 border-emerald-200';
+    let urgencyScore = 4;
+    let sisaWaktuJam = 72;
+
+    if (isDone) {
+      return {
+        isDone: true,
+        visitState: 'SELESAI',
+        statusLabel: 'Selesai Dipantau',
+        badgeClass: 'text-slate-600 bg-slate-50 border-slate-200',
+        deadline: null,
+        urgencyScore: 5,
+        sisaWaktuJam: Infinity
+      };
+    }
+
+    if (firstPending) {
+      const fSla = calculateFirstVisitSla(v.tanggalInformasiDiterima, v.kunjunganPertama, now);
+      if (fSla.isOverdue) {
+        visitState = 'TERLAMBAT';
+        statusLabel = `Terlambat (${Math.abs(fSla.diffHours)} Jam)`;
+        badgeClass = 'text-rose-700 bg-rose-50 border-rose-300 font-bold';
+        urgencyScore = 1; // Prioritas 1: TERLAMBAT / LEWAT PALING ATAS!
+        sisaWaktuJam = -(Math.abs(fSla.diffHours) || 1);
+      } else if (fSla.isWarning) {
+        visitState = 'MENDEKATI_TENGGAT';
+        statusLabel = `Mendekati Tenggat (Sisa ${fSla.diffHours} Jam)`;
+        badgeClass = 'text-amber-800 bg-amber-50 border-amber-300 font-bold';
+        urgencyScore = 2; // Prioritas 2: MENDEKATI TENGGAT
+        sisaWaktuJam = fSla.diffHours || 1;
+      } else {
+        visitState = 'MENUNGGU';
+        statusLabel = 'Menunggu Kunjungan Awal';
+        badgeClass = 'text-blue-700 bg-blue-50 border-blue-200 font-semibold';
+        urgencyScore = 3;
+        sisaWaktuJam = fSla.diffHours || 72;
+      }
+    } else {
+      const mSla = calculateMonitoringSla(v, now);
+      if (mSla.isOverdue) {
+        visitState = 'TERLAMBAT';
+        statusLabel = `Melewati SLA 3 Hari (${mSla.elapsedHours} Jam)`;
+        badgeClass = 'text-rose-700 bg-rose-50 border-rose-300 font-bold';
+        urgencyScore = 1; // Prioritas 1: TERLAMBAT / LEWAT PALING ATAS!
+        sisaWaktuJam = -(mSla.elapsedHours || 1);
+      } else if (mSla.isWarning) {
+        visitState = 'MENDEKATI_TENGGAT';
+        statusLabel = `Batas SLA 3 Hari (< 24 Jam)`;
+        badgeClass = 'text-amber-800 bg-amber-50 border-amber-300 font-bold';
+        urgencyScore = 2; // Prioritas 2: MENDEKATI TENGGAT
+        sisaWaktuJam = mSla.hoursRemaining || 1;
+      } else {
+        visitState = 'TEPAT_WAKTU';
+        statusLabel = 'Sesuai Standar SLA 3 Hari';
+        badgeClass = 'text-emerald-700 bg-emerald-50 border-emerald-200';
+        urgencyScore = 4;
+        sisaWaktuJam = mSla.hoursRemaining || 72;
+      }
+    }
+
+    return {
+      isDone: false,
+      visitState,
+      statusLabel,
+      badgeClass,
+      deadline,
+      urgencyScore,
+      sisaWaktuJam
+    };
+  };
+
+  // Filter & Sort
   const filteredAndSorted = useMemo(() => {
-    let result = victims.filter((v) => {
-      const firstVisitSla = calculateFirstVisitSla(v.tanggalInformasiDiterima, v.kunjunganPertama);
+    const now = new Date();
+
+    let list = victims.map((v) => {
+      const evalStatus = evaluateVictimVisitStatus(v, now);
+      const visits = [
+        ...(v.riwayatAktivitas || []),
+        ...(v.riwayatKunjungan || [])
+      ];
+      const totalKunjungan = v.kunjunganPertama ? Math.max(1, visits.length) : visits.length;
+
+      // Kunjungan terakhir
+      const lastVisit = visits[visits.length - 1] || v.kunjunganPertama || null;
+      const lastVisitDate = lastVisit?.tanggalKunjungan || lastVisit?.tanggal || lastVisit?.waktuAktualKunjungan || lastVisit?.waktuSelesai || null;
+
+      return {
+        ...v,
+        evalStatus,
+        totalKunjungan,
+        lastVisitDate
+      };
+    });
+
+    // Filtering
+    list = list.filter((v) => {
       const matchSearch =
         (v.nama || '').toLowerCase().includes(search.toLowerCase()) ||
         (v.id || '').toLowerCase().includes(search.toLowerCase()) ||
@@ -121,71 +236,45 @@ export default function KabagMonitoringList() {
         (v.namaPetugas || '').toLowerCase().includes(search.toLowerCase());
 
       if (!matchSearch) return false;
+
       if (officerFilter !== 'ALL') {
         const targetOfficer = officers.find((o) => o.id === officerFilter) || officerFilter;
         if (!storageService.isOfficerAssignedToVictim(targetOfficer, v, officers)) return false;
       }
+
       if (hospitalFilter !== 'ALL') {
-        const hLow = hospitalFilter.toLowerCase().trim();
-        const vRsLow = (v.rumahSakit || '').toLowerCase().trim();
-        const matchHospital = vRsLow === hLow || (hLow.length >= 4 && (vRsLow.includes(hLow) || hLow.includes(vRsLow)));
-        if (!matchHospital) return false;
-      }
-      
-      if (conditionFilter !== 'ALL') {
-        if (conditionFilter === 'Pulang' && !(v.kondisiTerakhir === 'Sudah Pulang' || v.kondisiTerakhir === 'Pulang' || v.statusPemantauan === 'Selesai Dipantau')) return false;
-        if (conditionFilter === 'Dirawat' && !(v.kondisiTerakhir === 'Masih Dirawat' || v.kondisiTerakhir === 'Rawat Inap')) return false;
-        if (conditionFilter === 'Dirujuk' && !((v.kondisiTerakhir || '').startsWith('Dirujuk') || v.statusPerawatan === 'Rujukan')) return false;
-        if (conditionFilter === 'Meninggal' && v.kondisiTerakhir !== 'Meninggal Dunia') return false;
+        if (!matchesHospitalFilter(v, hospitalFilter)) return false;
       }
 
       if (slaFilter !== 'ALL') {
-        if (slaFilter === 'OVERDUE' && firstVisitSla.status !== 'TERLAMBAT') return false;
-        if (slaFilter === 'WARNING' && firstVisitSla.status !== 'MENDEKATI_TENGGAT') return false;
-        if (slaFilter === 'ON_TIME' && firstVisitSla.status !== 'TEPAT_WAKTU') return false;
-        if (slaFilter === 'COMPLETED' && !firstVisitSla.isCompleted) return false;
+        if (slaFilter === 'WARNING' && v.evalStatus.visitState !== 'MENDEKATI_TENGGAT') return false;
+        if (slaFilter === 'OVERDUE' && v.evalStatus.visitState !== 'TERLAMBAT') return false;
+        if (slaFilter === 'MENUNGGU' && v.evalStatus.visitState !== 'MENUNGGU') return false;
+        if (slaFilter === 'ON_TIME' && v.evalStatus.visitState !== 'TEPAT_WAKTU') return false;
+        if (slaFilter === 'COMPLETED' && v.evalStatus.visitState !== 'SELESAI') return false;
       }
 
       return true;
     });
 
-    // Sort berdasarkan prioritas tenggat waktu secara default
-    const now = new Date();
-    result.sort((a, b) => {
+    // PENGURUTAN: Default adalah TENGGAT_PRIORITAS (Terlambat paling atas, lalu Mendekati Tenggat)
+    list.sort((a, b) => {
       if (sortBy === 'TENGGAT_PRIORITAS') {
-        const deadA = getVictimDeadline(a, now);
-        const deadB = getVictimDeadline(b, now);
-        return compareByDeadlinePriority(deadA, deadB, now);
+        return compareVictimsBySlaPriority(a, b, now);
       }
       if (sortBy === 'NEWEST') {
         const tA = new Date(a.tanggalMasukRs || a.tanggalInformasiDiterima || 0).getTime();
         const tB = new Date(b.tanggalMasukRs || b.tanggalInformasiDiterima || 0).getTime();
         return tB - tA;
       }
-      if (sortBy === 'OLDEST') {
-        const tA = new Date(a.tanggalMasukRs || a.tanggalInformasiDiterima || 0).getTime();
-        const tB = new Date(b.tanggalMasukRs || b.tanggalInformasiDiterima || 0).getTime();
-        return tA - tB;
-      }
       if (sortBy === 'NAME') {
         return (a.nama || '').localeCompare(b.nama || '');
-      }
-      if (sortBy === 'SLA_URGENT') {
-        const slaA = calculateFirstVisitSla(a.tanggalInformasiDiterima, a.kunjunganPertama);
-        const slaB = calculateFirstVisitSla(b.tanggalInformasiDiterima, b.kunjunganPertama);
-        const score = (sla) => {
-          if (sla.status === 'TERLAMBAT') return 1;
-          if (sla.status === 'MENDEKATI_TENGGAT') return 2;
-          if (sla.status === 'TEPAT_WAKTU') return 3;
-          return 4;
-        };
-        return score(slaA) - score(slaB);
       }
       return 0;
     });
 
-    return result;
-  }, [victims, search, officerFilter, hospitalFilter, conditionFilter, slaFilter, sortBy]);
+    return list;
+  }, [victims, search, officerFilter, hospitalFilter, slaFilter, sortBy]);
 
   // Pagination
   const totalPages = Math.ceil(filteredAndSorted.length / PAGE_SIZE) || 1;
@@ -198,136 +287,55 @@ export default function KabagMonitoringList() {
     setSearch('');
     setOfficerFilter('ALL');
     setHospitalFilter('ALL');
-    setConditionFilter('ALL');
     setSlaFilter('ALL');
     setSortBy('TENGGAT_PRIORITAS');
     setCurrentPage(1);
   };
 
-  // Tampilan status yang bersih dan minimalis tanpa banyak badge tebal/penuh
-  const renderStatusBadge = (v) => {
-    const isDischarged =
-      v.kondisiTerakhir === 'Sudah Pulang' ||
-      v.kondisiTerakhir === 'Pulang' ||
-      v.kondisiTerakhir === 'Selesai' ||
-      v.statusPemantauan === 'Selesai Dipantau';
-
-    const isReferred =
-      (typeof v.kondisiTerakhir === 'string' && v.kondisiTerakhir.startsWith('Dirujuk')) ||
-      (typeof v.statusPemantauan === 'string' && v.statusPemantauan.startsWith('Dirujuk')) ||
-      v.statusPerawatan === 'Rujukan';
-
-    const isNeedAction =
-      v.statusTindakLanjut === 'Masih Perlu Ditindaklanjuti' ||
-      v.kondisiTerakhir === 'Masih Dirawat' ||
-      v.kondisiTerakhir === 'Rawat Inap';
-
-    if (isDischarged) {
-      return (
-        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-          <span>Selesai / Pulang</span>
-        </span>
-      );
-    }
-
-    if (isReferred) {
-      return (
-        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-purple-700">
-          <span className="w-1.5 h-1.5 rounded-full bg-purple-500"></span>
-          <span>Dirujuk</span>
-        </span>
-      );
-    }
-
-    if (v.statusPerawatan === 'Rawat Lanjutan' || v.isRawatLanjutan) {
-      return (
-        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-sky-700">
-          <span className="w-1.5 h-1.5 rounded-full bg-sky-500"></span>
-          <span>Rawatan Lanjutan</span>
-        </span>
-      );
-    }
-
-    if (v.kondisiTerakhir === 'Meninggal Dunia') {
-      return (
-        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-rose-700">
-          <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span>
-          <span>Meninggal</span>
-        </span>
-      );
-    }
-
-    if (isNeedAction) {
-      return (
-        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#145DA0]">
-          <span className="w-1.5 h-1.5 rounded-full bg-[#145DA0]"></span>
-          <span>Masih Dirawat</span>
-        </span>
-      );
-    }
-
-    return (
-      <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-600">
-        <span className="w-1.5 h-1.5 rounded-full bg-slate-400"></span>
-        <span>{v.kondisiTerakhir || v.statusPemantauan || 'Dipantau'}</span>
-      </span>
+  const getOfficerInfo = (v) => {
+    const vRs = (v.rumahSakit || '').toLowerCase().trim();
+    const matchedByPlotting = officers.find((o) =>
+      o.status !== 'Nonaktif' && Array.isArray(o.plottingRs) && o.plottingRs.some((rs) => {
+        const r1 = (rs || '').toLowerCase().trim();
+        return r1 === vRs || (vRs.length >= 4 && (r1.includes(vRs) || vRs.includes(r1)));
+      })
     );
-  };
-
-  // Clean SLA text with subtle icon/dot
-  const renderSlaBadge = (victim) => {
-    const sla = calculateFirstVisitSla(victim.tanggalInformasiDiterima, victim.kunjunganPertama);
-    
-    if (sla.isCompleted) {
-      return (
-        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700">
-          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-          <span>Terkunjungi</span>
-        </span>
-      );
-    }
-
-    if (sla.status === 'TERLAMBAT') {
-      return (
-        <span className="inline-flex items-center gap-1.5 text-xs font-bold text-rose-600">
-          <span className="w-1.5 h-1.5 rounded-full bg-rose-600 animate-pulse"></span>
-          <span>Terlambat</span>
-        </span>
-      );
-    }
-
-    if (sla.status === 'MENDEKATI_TENGGAT') {
-      return (
-        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-amber-700">
-          <Clock className="w-3.5 h-3.5 text-amber-600" />
-          <span>&lt; 24 Jam</span>
-        </span>
-      );
-    }
-
-    return (
-      <span className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-500">
-        <span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
-        <span>Tepat Waktu</span>
-      </span>
+    const assignedOfficer = officers.find((o) =>
+      String(o.id) === String(v.petugasId) ||
+      (o.nama && (o.nama === v.namaPetugas || o.nama === v.petugasNama || o.nama === v.petugas))
     );
+    const officerObj = assignedOfficer || matchedByPlotting;
+    const candidates = [
+      assignedOfficer?.nama,
+      matchedByPlotting?.nama,
+      v.namaPetugas,
+      v.petugasNama,
+      v.petugas
+    ];
+    let name = 'Belum ada Petugas';
+    for (const c of candidates) {
+      if (c && c !== 'Mobile Service' && c !== 'Petugas Lapangan' && c !== 'Belum Ditugaskan' && c !== 'Belum Ada Petugas Penanggung Jawab' && c !== 'Belum ada Petugas') {
+        name = c;
+        break;
+      }
+    }
+    return { name, id: officerObj?.id || (name !== 'Belum ada Petugas' ? v.petugasId : null) };
   };
 
   return (
-    <div className="space-y-6 pb-12">
-      {/* ── 1. PAGE HEADER (IDENTIK DENGAN PETUGAS) ── */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200/80 pb-4">
+    <div className="space-y-6 pb-14">
+      {/* ── 1. HEADER HALAMAN ── */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200/80 pb-4">
         <div>
-          <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
-            Daftar Korban
+          <h1 className="text-2xl font-black text-slate-900 tracking-tight">
+            Monitoring Kunjungan
           </h1>
           <p className="text-xs text-slate-500 mt-1">
-            Data terpadu pemantauan seluruh korban kecelakaan, evaluasi kepatuhan SLA 3 hari, dan supervisi penugasan petugas lapangan.
+            Supervisi jadwal kunjungan pemantauan korban, kepatuhan batas waktu SLA maksimal 3 hari (72 jam), riwayat kunjungan, dan status keterlambatan tugas.
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 self-start sm:self-auto">
           <button
             type="button"
             onClick={loadData}
@@ -339,69 +347,69 @@ export default function KabagMonitoringList() {
         </div>
       </div>
 
-      {/* ── 2. SUMMARY KPI STAT CARDS (BENTUK IDENTIK PETUGAS) ── */}
+      {/* ── 2. SUMMARY KPI STAT CARDS ── */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* Total Korban */}
-        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs space-y-1">
+        {/* Mendekati Tenggat (Prioritas Utama) */}
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-5 shadow-2xs hover:shadow-xs transition-shadow">
           <div className="flex items-center justify-between">
-            <span className="text-[11px] font-semibold text-slate-500">Total Korban</span>
-            <div className="w-8 h-8 rounded-xl bg-blue-50 text-[#145DA0] border border-blue-100 flex items-center justify-center shrink-0">
-              <Users className="w-4 h-4" />
-            </div>
-          </div>
-          <span className="text-2xl font-black text-slate-900 block mt-1">
-            {stats.total}
-          </span>
-          <span className="text-[11px] text-slate-400 block">Total korban terdaftar</span>
-        </div>
-
-        {/* Belum Dikunjungi */}
-        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs space-y-1">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-semibold text-slate-500">Belum Dikunjungi</span>
-            <div className="w-8 h-8 rounded-xl bg-amber-50 text-amber-600 border border-amber-100 flex items-center justify-center shrink-0">
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Mendekati Batas SLA</span>
+            <div className="w-9 h-9 rounded-xl bg-amber-50 text-amber-600 border border-amber-100 flex items-center justify-center shrink-0">
               <Clock className="w-4 h-4" />
             </div>
           </div>
-          <span className="text-2xl font-black text-amber-600 block mt-1">
+          <span className={`text-3xl font-black font-mono tracking-tight block mt-2 ${
+            stats.mendekatiTenggat > 0 ? 'text-amber-600' : 'text-slate-900'
+          }`}>
+            {stats.mendekatiTenggat}
+          </span>
+        </div>
+
+        {/* Kunjungan Terlambat */}
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-5 shadow-2xs hover:shadow-xs transition-shadow">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Kunjungan Terlambat</span>
+            <div className="w-9 h-9 rounded-xl bg-rose-50 text-rose-600 border border-rose-100 flex items-center justify-center shrink-0">
+              <AlertTriangle className="w-4 h-4" />
+            </div>
+          </div>
+          <span className={`text-3xl font-black font-mono tracking-tight block mt-2 ${
+            stats.terlambat > 0 ? 'text-rose-600' : 'text-slate-900'
+          }`}>
+            {stats.terlambat}
+          </span>
+        </div>
+
+        {/* Belum Dikunjungi (Menunggu) */}
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-5 shadow-2xs hover:shadow-xs transition-shadow">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Menunggu Kunjungan</span>
+            <div className="w-9 h-9 rounded-xl bg-blue-50 text-[#145DA0] border border-blue-100 flex items-center justify-center shrink-0">
+              <CalendarCheck className="w-4 h-4" />
+            </div>
+          </div>
+          <span className="text-3xl font-black font-mono tracking-tight text-blue-700 block mt-2">
             {stats.belumDikunjungi}
           </span>
-          <span className="text-[11px] text-slate-400 block">Menunggu respon awal</span>
         </div>
 
-        {/* Pemantauan Aktif */}
-        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs space-y-1">
+        {/* Tepat Waktu (Sesuai SLA) */}
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-5 shadow-2xs hover:shadow-xs transition-shadow">
           <div className="flex items-center justify-between">
-            <span className="text-[11px] font-semibold text-slate-500">Pemantauan Aktif</span>
-            <div className="w-8 h-8 rounded-xl bg-sky-50 text-sky-600 border border-sky-100 flex items-center justify-center shrink-0">
-              <HeartPulse className="w-4 h-4" />
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Sesuai SLA</span>
+            <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-600 border border-emerald-100 flex items-center justify-center shrink-0">
+              <CheckCircle2 className="w-4 h-4" />
             </div>
           </div>
-          <span className="text-2xl font-black text-[#145DA0] block mt-1">
-            {stats.pemantauanAktif}
+          <span className="text-3xl font-black font-mono tracking-tight text-emerald-600 block mt-2">
+            {stats.tepatWaktu}
           </span>
-          <span className="text-[11px] text-slate-400 block">Sedang dirawat di RS</span>
-        </div>
-
-        {/* Selesai Dipantau */}
-        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs space-y-1">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-semibold text-slate-500">Selesai Dipantau</span>
-            <div className="w-8 h-8 rounded-xl bg-emerald-50 text-emerald-600 border border-emerald-100 flex items-center justify-center shrink-0">
-              <UserCheck className="w-4 h-4" />
-            </div>
-          </div>
-          <span className="text-2xl font-black text-emerald-600 block mt-1">
-            {stats.selesai}
-          </span>
-          <span className="text-[11px] text-slate-400 block">Perawatan selesai / tuntas</span>
         </div>
       </div>
 
-      {/* ── 3. FILTER DAN PENCARIAN MODERN ── */}
+      {/* ── 3. FILTER DAN PENCARIAN ── */}
       <div className="bg-white rounded-2xl border border-slate-200/90 shadow-2xs p-4 sm:p-5 space-y-3">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 text-xs">
-          {/* 1. Search */}
+          {/* Pencarian */}
           <div className="relative">
             <label className="block text-[11px] font-semibold text-slate-500 mb-1">
               Pencarian Korban / Petugas
@@ -421,7 +429,29 @@ export default function KabagMonitoringList() {
             </div>
           </div>
 
-          {/* 2. Filter Petugas JR */}
+          {/* Filter Status SLA */}
+          <div>
+            <label className="block text-[11px] font-semibold text-slate-500 mb-1">
+              Status Kunjungan &amp; SLA
+            </label>
+            <select
+              value={slaFilter}
+              onChange={(e) => {
+                setSlaFilter(e.target.value);
+                setCurrentPage(1);
+              }}
+              className="w-full px-2.5 py-1.5 rounded-xl border border-slate-200 bg-slate-50/70 text-slate-700 font-semibold focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#145DA0]"
+            >
+              <option value="ALL">Semua Status Kunjungan</option>
+              <option value="WARNING">Mendekati Batas SLA (&lt; 24 Jam)</option>
+              <option value="OVERDUE">Kunjungan Terlambat (&gt; 3 Hari)</option>
+              <option value="MENUNGGU">Menunggu Kunjungan Awal</option>
+              <option value="ON_TIME">Tepat Waktu (Sesuai SLA)</option>
+              <option value="COMPLETED">Selesai Dipantau</option>
+            </select>
+          </div>
+
+          {/* Filter Petugas */}
           <div>
             <label className="block text-[11px] font-semibold text-slate-500 mb-1">
               Petugas Penanggung Jawab
@@ -441,7 +471,7 @@ export default function KabagMonitoringList() {
             </select>
           </div>
 
-          {/* 3. Filter Rumah Sakit */}
+          {/* Filter RS */}
           <div>
             <label className="block text-[11px] font-semibold text-slate-500 mb-1">
               Rumah Sakit
@@ -461,45 +491,22 @@ export default function KabagMonitoringList() {
             </select>
           </div>
 
-          {/* 4. Filter Kondisi Pasien */}
+          {/* Urutan */}
           <div>
             <label className="block text-[11px] font-semibold text-slate-500 mb-1">
-              Kondisi Pasien
+              Urutan Prioritas
             </label>
             <select
-              value={conditionFilter}
+              value={sortBy}
               onChange={(e) => {
-                setConditionFilter(e.target.value);
+                setSortBy(e.target.value);
                 setCurrentPage(1);
               }}
-              className="w-full px-2.5 py-1.5 rounded-xl border border-slate-200 bg-slate-50/70 text-slate-700 focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#145DA0]"
+              className="w-full px-2.5 py-1.5 rounded-xl border border-slate-200 bg-slate-50/70 text-slate-700 font-semibold focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#145DA0]"
             >
-              <option value="ALL">Semua Kondisi</option>
-              <option value="Dirawat">Masih Dirawat</option>
-              <option value="Pulang">Sudah Pulang / Selesai</option>
-              <option value="Dirujuk">Dirujuk</option>
-              <option value="Meninggal">Meninggal Dunia</option>
-            </select>
-          </div>
-
-          {/* 5. Filter Kepatuhan SLA */}
-          <div>
-            <label className="block text-[11px] font-semibold text-slate-500 mb-1">
-              Status Kepatuhan SLA
-            </label>
-            <select
-              value={slaFilter}
-              onChange={(e) => {
-                setSlaFilter(e.target.value);
-                setCurrentPage(1);
-              }}
-              className="w-full px-2.5 py-1.5 rounded-xl border border-slate-200 bg-slate-50/70 text-slate-700 focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#145DA0]"
-            >
-              <option value="ALL">Semua Status SLA</option>
-              <option value="OVERDUE">Terlambat (&gt; 3 Hari)</option>
-              <option value="WARNING">Mendekati Tenggat (&lt;= 24 Jam)</option>
-              <option value="ON_TIME">Tepat Waktu (Aktif)</option>
-              <option value="COMPLETED">Selesai Dikunjungi</option>
+              <option value="TENGGAT_PRIORITAS">Mendekati Tenggat SLA Teratas</option>
+              <option value="NEWEST">Korban Masuk Terbaru</option>
+              <option value="NAME">Nama Korban (A-Z)</option>
             </select>
           </div>
         </div>
@@ -507,9 +514,9 @@ export default function KabagMonitoringList() {
         {/* Filter Summary & Reset */}
         <div className="flex items-center justify-between text-xs text-slate-500 pt-2 border-t border-slate-100">
           <span>
-            Menampilkan <strong>{filteredAndSorted.length}</strong> dari <strong>{victims.length}</strong> data korban
+            Menampilkan <strong>{filteredAndSorted.length}</strong> data monitoring kunjungan
           </span>
-          {(search || officerFilter !== 'ALL' || hospitalFilter !== 'ALL' || conditionFilter !== 'ALL' || slaFilter !== 'ALL' || sortBy !== 'NEWEST') && (
+          {(search || officerFilter !== 'ALL' || hospitalFilter !== 'ALL' || slaFilter !== 'ALL' || sortBy !== 'TENGGAT_PRIORITAS') && (
             <button
               type="button"
               onClick={handleResetFilters}
@@ -521,21 +528,20 @@ export default function KabagMonitoringList() {
         </div>
       </div>
 
-      {/* ── 4. TABEL UTAMA MONITORING KORBAN (DUAL RESPONSIVE) ──
-          Kolom: NO. | KORBAN / ID BERKAS | RUMAH SAKIT | PETUGAS JR | TANGGAL MASUK RS | STATUS PASIEN | KEPATUHAN SLA | AKSI */}
+      {/* ── 4. TABEL MONITORING KUNJUNGAN ── */}
       <div className="bg-white rounded-2xl border border-slate-200/90 shadow-2xs overflow-hidden">
-        {/* DESKTOP TABLE VIEW */}
+        {/* DESKTOP TABLE */}
         <div className="hidden md:block overflow-x-auto">
           <table className="w-full text-left border-collapse text-xs">
             <thead>
               <tr className="bg-slate-50/80 border-b border-slate-200/90 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
                 <th className="py-3.5 px-4 w-12 text-center">NO.</th>
-                <th className="py-3.5 px-4">KORBAN / ID BERKAS</th>
-                <th className="py-3.5 px-4">RUMAH SAKIT</th>
+                <th className="py-3.5 px-4">KORBAN &amp; RS</th>
                 <th className="py-3.5 px-4">PETUGAS JR</th>
-                <th className="py-3.5 px-4">TANGGAL MASUK RS</th>
-                <th className="py-3.5 px-4">STATUS PASIEN</th>
-                <th className="py-3.5 px-4">KEPATUHAN SLA</th>
+                <th className="py-3.5 px-4">BATAS JADWAL / BERIKUTNYA</th>
+                <th className="py-3.5 px-4">KUNJUNGAN TERAKHIR</th>
+                <th className="py-3.5 px-4 text-center">TOTAL KUNJUNGAN</th>
+                <th className="py-3.5 px-4">STATUS KEPATUHAN SLA</th>
                 <th className="py-3.5 px-4 text-right">AKSI</th>
               </tr>
             </thead>
@@ -543,119 +549,126 @@ export default function KabagMonitoringList() {
               {paginatedData.length === 0 ? (
                 <tr>
                   <td colSpan={8} className="py-16 text-center text-slate-400">
-                    <Users className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-                    <p className="font-semibold text-slate-600">Tidak ada korban yang sesuai dengan kriteria filter.</p>
-                    <p className="text-[11px] text-slate-400 mt-0.5">Coba ubah kata kunci atau reset filter pencarian di atas.</p>
+                    <CalendarCheck className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                    <p className="font-semibold text-slate-600">Tidak ada jadwal kunjungan yang sesuai.</p>
+                    <p className="text-[11px] text-slate-400 mt-0.5">Ubah filter pencarian atau segarkan data di atas.</p>
                   </td>
                 </tr>
               ) : (
                 paginatedData.map((v, idx) => {
                   const number = String((currentPage - 1) * PAGE_SIZE + idx + 1).padStart(2, '0');
                   const initials = getInitials(v.nama);
+                  const officerInfo = getOfficerInfo(v);
+                  const deadlineStr = v.evalStatus.deadline ? formatDateTimeShort(v.evalStatus.deadline) : '—';
+                  const isUrgentApproaching = v.evalStatus.visitState === 'MENDEKATI_TENGGAT';
+                  const refInfo = getReferralPerspectiveInfo(v, hospitalFilter);
 
                   return (
-                    <tr key={v.id} className="hover:bg-slate-50/70 transition-colors">
-                      {/* NO. */}
+                    <tr
+                      key={v.id}
+                      className={`transition-colors ${
+                        isUrgentApproaching
+                          ? 'bg-amber-50/30 hover:bg-amber-50/60'
+                          : 'hover:bg-slate-50/70'
+                      }`}
+                    >
+                      {/* NO */}
                       <td className="py-3.5 px-4 font-mono text-slate-400 text-center font-medium">
                         {number}
                       </td>
 
-                      {/* KORBAN / ID BERKAS */}
+                      {/* KORBAN & RS */}
                       <td className="py-3.5 px-4 font-bold text-slate-900 whitespace-nowrap">
-                        <div className="flex items-center gap-3">
-                          <div className="w-8 h-8 rounded-full bg-blue-50 text-[#145DA0] font-bold text-xs flex items-center justify-center shrink-0 border border-blue-100">
-                            {initials}
-                          </div>
-                          <div>
-                            <button
-                              type="button"
-                              onClick={() => setSelectedVictim(v)}
-                              className="font-bold text-slate-900 hover:text-[#145DA0] hover:underline block text-xs text-left cursor-pointer"
-                            >
-                              {v.nama}
-                            </button>
-                            <span className="text-[10px] text-slate-400 font-mono font-normal block">
-                              {v.nomorLaporan || (v.nik ? `NIK: ${v.nik}` : `ID: ${v.id}`)}
-                            </span>
-                          </div>
+                        <div>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedVictim(v)}
+                            className="font-bold text-slate-900 hover:text-[#145DA0] hover:underline block text-xs text-left cursor-pointer"
+                          >
+                            {v.nama}
+                          </button>
+                          <span className="text-[10px] text-slate-500 font-normal flex items-center gap-1 mt-0.5">
+                            <Building2 className="w-3 h-3 text-slate-400" />
+                            <span>{refInfo.displayHospital}</span>
+                          </span>
                         </div>
                       </td>
 
-                      {/* RUMAH SAKIT */}
-                      <td className="py-3.5 px-4 font-semibold text-slate-800 whitespace-nowrap">
-                        <div className="flex items-center gap-1.5">
-                          <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                          <span>{v.rumahSakit || '—'}</span>
-                        </div>
-                        {v.rumahSakitAsal && v.rumahSakitAsal !== v.rumahSakit && (
-                          <span className="text-[10px] text-slate-400 block mt-0.5">
-                            Rujukan dari {v.rumahSakitAsal}
+                      {/* PETUGAS JR -> Clickable Link ke Kinerja Petugas */}
+                      <td className="py-3.5 px-4 whitespace-nowrap">
+                        {officerInfo.name === 'Belum ada Petugas' ? (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                            <AlertCircle className="w-3 h-3 text-amber-600 shrink-0" />
+                            <span>Belum ada Petugas</span>
+                          </span>
+                        ) : officerInfo.id ? (
+                          <Link
+                            to={`/kabag/kinerja?tab=detail&officerId=${officerInfo.id}`}
+                            className="font-semibold text-slate-800 hover:text-[#145DA0] hover:underline block text-xs"
+                            title="Buka Evaluasi Kinerja Petugas Ini"
+                          >
+                            {officerInfo.name}
+                          </Link>
+                        ) : (
+                          <span className="font-semibold text-slate-800 block text-xs">
+                            {officerInfo.name}
+                          </span>
+                        )}
+                        {officerInfo.name !== 'Belum ada Petugas' && (
+                          <span className="text-[10px] text-slate-400 block">
+                            Petugas Lapangan
                           </span>
                         )}
                       </td>
 
-                      {/* PETUGAS JR (Nama petugas saja) */}
+                      {/* BATAS JADWAL BERIKUTNYA */}
                       <td className="py-3.5 px-4 whitespace-nowrap">
-                        <span className="font-semibold text-slate-800 block text-xs">
-                          {(() => {
-                            const vRs = (v.rumahSakit || '').toLowerCase().trim();
-                            const matchedByPlotting = officers.find((o) => 
-                              o.status !== 'Nonaktif' && Array.isArray(o.plottingRs) && o.plottingRs.some((rs) => {
-                                const r1 = (rs || '').toLowerCase().trim();
-                                return r1 === vRs || (vRs.length >= 4 && (r1.includes(vRs) || vRs.includes(r1)));
-                              })
-                            );
-                            const assignedOfficer = officers.find((o) => 
-                              String(o.id) === String(v.petugasId) || 
-                              (o.nama && (o.nama === v.namaPetugas || o.nama === v.petugasNama || o.nama === v.petugas))
-                            );
-                            const candidates = [
-                              assignedOfficer?.nama,
-                              matchedByPlotting?.nama,
-                              v.namaPetugas,
-                              v.petugasNama,
-                              v.petugas
-                            ];
-                            for (const c of candidates) {
-                              if (c && c !== 'Mobile Service' && c !== 'Petugas Lapangan' && c !== 'Belum Ditugaskan' && c !== 'Belum Ada Petugas Penanggung Jawab') {
-                                return c;
-                              }
-                            }
-                            return matchedByPlotting?.nama || (v.petugasId ? `Petugas ${String(v.petugasId).replace(/[^0-9]/g, '') || v.petugasId}` : 'Petugas 1');
-                          })()}
+                        <div className="flex items-center gap-1.5 font-semibold text-slate-800">
+                          <Clock className={`w-3.5 h-3.5 ${
+                            isUrgentApproaching ? 'text-amber-600' : 'text-slate-400'
+                          }`} />
+                          <span className={isUrgentApproaching ? 'text-amber-800 font-bold' : ''}>
+                            {deadlineStr}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-slate-400 block mt-0.5">
+                          Standar SLA maks. 3 hari
                         </span>
                       </td>
 
-                      {/* TANGGAL MASUK RS */}
+                      {/* KUNJUNGAN TERAKHIR */}
                       <td className="py-3.5 px-4 whitespace-nowrap text-slate-600">
                         <div className="flex items-center gap-1.5">
-                          <Calendar className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                          <span>{formatDateShort(v.tanggalMasukRs || v.tanggalInformasiDiterima)}</span>
+                          <History className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                          <span>{v.lastVisitDate ? formatDateTimeShort(v.lastVisitDate) : 'Belum Pernah'}</span>
                         </div>
                       </td>
 
-                      {/* STATUS PASIEN */}
-                      <td className="py-3.5 px-4 whitespace-nowrap">
-                        {renderStatusBadge(v)}
+                      {/* TOTAL KUNJUNGAN */}
+                      <td className="py-3.5 px-4 text-center whitespace-nowrap">
+                        <span className="font-mono font-bold text-xs bg-slate-100 text-slate-800 px-2 py-0.5 rounded-lg border border-slate-200">
+                          {v.totalKunjungan}x Kunjungan
+                        </span>
                       </td>
 
-                      {/* KEPATUHAN SLA */}
+                      {/* STATUS KEPATUHAN SLA */}
                       <td className="py-3.5 px-4 whitespace-nowrap">
-                        {renderSlaBadge(v)}
+                        <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] border ${v.evalStatus.badgeClass}`}>
+                          {isUrgentApproaching && <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>}
+                          <span>{v.evalStatus.statusLabel}</span>
+                        </span>
                       </td>
 
                       {/* AKSI */}
                       <td className="py-3.5 px-4 text-right whitespace-nowrap">
-                        <div className="flex items-center justify-end gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => setSelectedVictim(v)}
-                            className="w-8 h-8 rounded-xl bg-blue-50 text-[#145DA0] border border-blue-100 flex items-center justify-center hover:bg-blue-100 transition-colors shadow-2xs cursor-pointer"
-                            title="Audit & Detail Korban"
-                          >
-                            <Eye className="w-4 h-4" />
-                          </button>
-                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedVictim(v)}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-[#145DA0] bg-blue-50/80 hover:bg-blue-100 hover:text-[#0A3981] transition-colors cursor-pointer"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>Detail</span>
+                        </button>
                       </td>
                     </tr>
                   );
@@ -665,123 +678,126 @@ export default function KabagMonitoringList() {
           </table>
         </div>
 
-        {/* MOBILE CARD VIEW (< md) */}
+        {/* MOBILE CARD VIEW */}
         <div className="md:hidden divide-y divide-slate-100">
           {paginatedData.length === 0 ? (
-            <div className="p-8 text-center text-slate-400">
-              <Users className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-              <p className="font-semibold text-slate-600 text-xs">Tidak ada korban yang sesuai kriteria filter.</p>
+            <div className="py-12 text-center text-slate-400 px-4">
+              <CalendarCheck className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+              <p className="font-semibold text-slate-600 text-xs">Tidak ada data jadwal monitoring.</p>
             </div>
           ) : (
             paginatedData.map((v, idx) => {
               const number = String((currentPage - 1) * PAGE_SIZE + idx + 1).padStart(2, '0');
               const initials = getInitials(v.nama);
-              const vRs = (v.rumahSakit || '').toLowerCase().trim();
-              const matchedByPlotting = officers.find((o) => 
-                o.status !== 'Nonaktif' && Array.isArray(o.plottingRs) && o.plottingRs.some((rs) => {
-                  const r1 = (rs || '').toLowerCase().trim();
-                  return r1 === vRs || (vRs.length >= 4 && (r1.includes(vRs) || vRs.includes(r1)));
-                })
-              );
-              const officerName = v.namaPetugas || matchedByPlotting?.nama || 'Petugas 1';
+              const officerInfo = getOfficerInfo(v);
+              const isUrgentApproaching = v.evalStatus.visitState === 'MENDEKATI_TENGGAT';
+              const refInfo = getReferralPerspectiveInfo(v, hospitalFilter);
 
               return (
-                <div key={v.id} className="p-4 space-y-3">
-                  <div className="flex items-start justify-between gap-2.5">
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <div className="w-9 h-9 rounded-full bg-blue-50 text-[#145DA0] font-bold text-xs flex items-center justify-center shrink-0 border border-blue-100">
-                        {initials}
-                      </div>
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-[10px] font-mono text-slate-400 font-bold">#{number}</span>
-                          <button
-                            type="button"
-                            onClick={() => setSelectedVictim(v)}
-                            className="font-bold text-slate-900 text-xs hover:text-[#145DA0] truncate block text-left"
-                          >
-                            {v.nama}
-                          </button>
-                        </div>
-                        <span className="text-[10px] text-slate-400 font-mono block">
-                          {v.nomorLaporan || (v.nik ? `NIK: ${v.nik}` : `ID: ${v.id}`)}
-                        </span>
-                      </div>
+                <div
+                  key={v.id}
+                  className={`p-4 space-y-3 transition-colors ${
+                    isUrgentApproaching ? 'bg-amber-50/20' : 'hover:bg-slate-50/50'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <span className="text-[10px] font-mono text-slate-400">#{number}</span>
+                      <h4 className="font-bold text-slate-900 text-xs leading-tight">
+                        {v.nama}
+                      </h4>
+                      <span className="text-[10px] text-slate-500 flex items-center gap-1 mt-0.5">
+                        <Building2 className="w-3 h-3 text-slate-400" />
+                        <span>{refInfo.displayHospital}</span>
+                      </span>
                     </div>
-                    <div className="shrink-0">
-                      {renderStatusBadge(v)}
+
+                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] border ${v.evalStatus.badgeClass}`}>
+                      {v.evalStatus.statusLabel}
+                    </span>
+                  </div>
+
+                  <div className="bg-slate-50 rounded-xl p-2.5 space-y-1.5 text-[11px] border border-slate-100">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-400">Petugas JR:</span>
+                      {officerInfo.id ? (
+                        <Link
+                          to={`/kabag/kinerja?tab=detail&officerId=${officerInfo.id}`}
+                          className="font-bold text-[#145DA0] hover:underline"
+                        >
+                          {officerInfo.name}
+                        </Link>
+                      ) : (
+                        <strong className="text-slate-800">{officerInfo.name}</strong>
+                      )}
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-400">Tenggat Jadwal:</span>
+                      <span className="font-bold text-slate-700">
+                        {v.evalStatus.deadline ? formatDateTimeShort(v.evalStatus.deadline) : '—'}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-400">Total Kunjungan:</span>
+                      <span className="font-mono font-bold text-slate-800">{v.totalKunjungan}x kunjungan</span>
                     </div>
                   </div>
 
-                  <div className="bg-slate-50 rounded-xl p-2.5 text-[11px] text-slate-600 space-y-1.5 border border-slate-100">
-                    <div className="flex items-center gap-1.5 font-medium text-slate-800">
-                      <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                      <span className="truncate">{v.rumahSakit || '—'}</span>
-                    </div>
-                    <div className="flex items-center justify-between text-[10px] text-slate-500 pt-0.5">
-                      <span>Petugas: <strong className="text-slate-800">{officerName}</strong></span>
-                      <span>Masuk RS: {formatDateShort(v.tanggalMasukRs || v.tanggalInformasiDiterima)}</span>
-                    </div>
-                    <div className="pt-1 border-t border-slate-200/60 flex items-center justify-between">
-                      <span className="text-[10px] text-slate-400">Kepatuhan SLA:</span>
-                      {renderSlaBadge(v)}
-                    </div>
+                  <div className="flex items-center justify-end pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedVictim(v)}
+                      className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-[#145DA0] bg-blue-50 hover:bg-blue-100 transition-colors"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>Lihat Riwayat &amp; Detail Kunjungan</span>
+                    </button>
                   </div>
-
-                  <button
-                    type="button"
-                    onClick={() => setSelectedVictim(v)}
-                    className="w-full py-2 px-3 rounded-lg text-xs font-bold bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 flex items-center justify-center gap-1.5 shadow-2xs cursor-pointer"
-                  >
-                    <Eye className="w-3.5 h-3.5 text-slate-500" />
-                    <span>Audit Lengkap Pasien</span>
-                  </button>
                 </div>
               );
             })
           )}
         </div>
 
-        {/* ── 5. PAGINATION FOOTER ── */}
-        <div className="p-4 border-t border-slate-100 bg-slate-50/50 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-500">
-          <div>
-            Menampilkan data <strong>{filteredAndSorted.length > 0 ? (currentPage - 1) * PAGE_SIZE + 1 : 0}</strong> - <strong>{Math.min(currentPage * PAGE_SIZE, filteredAndSorted.length)}</strong> dari <strong>{filteredAndSorted.length}</strong> total korban
-          </div>
+        {/* PAGINATION */}
+        <div className="p-4 border-t border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs bg-slate-50/50">
+          <span className="text-slate-500 text-[11px]">
+            Halaman <strong>{currentPage}</strong> dari <strong>{totalPages}</strong> ({filteredAndSorted.length} data kunjungan)
+          </span>
 
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1">
             <button
               type="button"
               disabled={currentPage <= 1}
-              onClick={() => setCurrentPage((p) => p - 1)}
-              className="p-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-30 disabled:pointer-events-none transition-colors shadow-2xs cursor-pointer"
+              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+              className="p-1.5 rounded-lg border border-slate-200 bg-white text-slate-600 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 transition-colors cursor-pointer"
               title="Halaman Sebelumnya"
             >
-              <ChevronLeft className="w-4 h-4 text-slate-600" />
+              <ChevronLeft className="w-4 h-4" />
             </button>
-
-            <span className="px-3 py-1 text-xs font-bold text-slate-700 bg-white border border-slate-200 rounded-xl shadow-2xs">
+            <span className="px-3 py-1 font-mono font-bold text-slate-700 text-xs">
               {currentPage} / {totalPages}
             </span>
-
             <button
               type="button"
               disabled={currentPage >= totalPages}
-              onClick={() => setCurrentPage((p) => p + 1)}
-              className="p-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-30 disabled:pointer-events-none transition-colors shadow-2xs cursor-pointer"
+              onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+              className="p-1.5 rounded-lg border border-slate-200 bg-white text-slate-600 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 transition-colors cursor-pointer"
               title="Halaman Berikutnya"
             >
-              <ChevronRight className="w-4 h-4 text-slate-600" />
+              <ChevronRight className="w-4 h-4" />
             </button>
           </div>
         </div>
       </div>
 
-      {/* Drawer Detail Korban */}
+      {/* ── 5. DRAWER DETAIL KORBAN ── */}
       {selectedVictim && (
         <VictimDetailDrawer
-          isOpen={!!selectedVictim}
-          onClose={() => setSelectedVictim(null)}
           victim={selectedVictim}
+          isOpen={Boolean(selectedVictim)}
+          onClose={() => setSelectedVictim(null)}
+          onUpdate={loadData}
         />
       )}
     </div>
