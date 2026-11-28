@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import {
   Users,
@@ -17,7 +17,6 @@ import {
   Filter,
   UserCheck,
   ShieldCheck,
-  BarChart3,
   Award,
   AlertCircle
 } from 'lucide-react';
@@ -26,6 +25,10 @@ import {
   Line,
   BarChart,
   Bar,
+  PieChart,
+  Pie,
+  Cell,
+  LabelList,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -35,40 +38,20 @@ import {
   Legend
 } from 'recharts';
 import VictimDetailDrawer from '../../components/kabag/VictimDetailDrawer';
-import { storageService } from '../../services/storageService';
+import { storageService, isDummyVictim } from '../../services/storageService';
 import {
   calculateFirstVisitSla,
   calculateMonitoringSla,
   getVictimDeadline,
-  compareByDeadlinePriority,
-  evaluateOfficerKpi,
-  calculateOfficerFinalScore,
-  calculateSlaByTotalVisits,
-  calculateSlaByTotalPatients
+  evaluateOfficerKpi
 } from '../../services/slaService';
 import { isVictimFinished } from '../../utils/monitoringStatus';
-import { formatDateIndo, formatDateTimeIndo } from '../../utils/dateUtils';
-
-// Format Tanggal Indonesia Seragam
-const formatDate = (dateStr) => {
-  return formatDateIndo(dateStr);
-};
-
-const formatDateTime = (dateStr) => {
-  return formatDateTimeIndo(dateStr);
-};
+import { formatDateTimeIndo as formatDateTime } from '../../utils/dateUtils';
 
 const MONTH_NAMES_INDO = [
   'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
   'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'
 ];
-
-const getInitials = (name) => {
-  if (!name) return '??';
-  const parts = name.trim().split(/\s+/);
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[1][0]).toUpperCase();
-};
 
 export default function KabagDashboard() {
   const navigate = useNavigate();
@@ -84,7 +67,6 @@ export default function KabagDashboard() {
   const [customStartDate, setCustomStartDate] = useState('');
   const [customEndDate, setCustomEndDate] = useState('');
   const [selectedOfficerFilter, setSelectedOfficerFilter] = useState('ALL');
-  const [barMetricMode, setBarMetricMode] = useState('visits'); // 'visits' (Tepat vs Terlambat) | 'sla' (% Kepatuhan)
   const [actionSearch, setActionSearch] = useState('');
 
   // Tahun tersedia secara dinamis dari database korban
@@ -117,23 +99,19 @@ export default function KabagDashboard() {
   // Drawer Detail Korban
   const [selectedVictimForDrawer, setSelectedVictimForDrawer] = useState(null);
 
-  // Filter petugas riil yang terdaftar
+  // Filter petugas riil yang terdaftar (selalu kecualikan data dummy)
   const filterValidOfficers = (list) => {
-    const DUMMY_FILTER = ['citra dewi', 'budi santoso', 'eko prasetyo', 'doni setiawan', 'maya anggraini', 'hendra pratama', 'siti nurhaliza', 'dimas anggara', 'ahmad fauzi', 'adi putra'];
+    const DUMMY_FILTER = ['citra dewi', 'budi santoso', 'eko prasetyo', 'doni setiawan', 'maya anggraini', 'hendra pratama', 'siti nurhaliza', 'dimas anggara', 'ahmad fauzi', 'adi putra', 'andi pratama', 'rina kusuma', 'dedi saputra', 'sari wulandari', 'bagus santoso', 'lestari dewi'];
     return (list || []).filter((o) => {
-      // Petugas resmi sistem yang memiliki ID (PET-*) atau backendOfficerId selalu valid dan tidak boleh difilter
-      if (o.id && (String(o.id).startsWith('PET-') || o.backendOfficerId || o.backendId)) {
-        return true;
-      }
       const lower = (o.nama || '').toLowerCase();
-      return !DUMMY_FILTER.some((d) => lower.includes(d));
+      return lower && !DUMMY_FILTER.some((d) => lower.includes(d));
     });
   };
 
   const [officers, setOfficers] = useState(() => filterValidOfficers(storageService.getOfficers()));
 
   const loadData = () => {
-    setVictims(storageService.getVictims());
+    setVictims((storageService.getVictims() || []).filter((v) => !isDummyVictim(v)));
     setOfficers(filterValidOfficers(storageService.getOfficers()));
   };
 
@@ -219,8 +197,12 @@ export default function KabagDashboard() {
     const nowRef = new Date();
 
     periodFilteredVictims.forEach((v) => {
+      if (v.statusPemantauan === 'Diarsipkan' || v.status_pemantauan === 'Diarsipkan') return;
+
+      const hasFirstDone = Boolean(v.kunjunganPertama && v.kunjunganPertama.statusKunjungan !== 'Menunggu');
+
       // 1. Kunjungan awal yang sudah selesai dilaksanakan
-      if (v.kunjunganPertama && v.kunjunganPertama.statusKunjungan !== 'Menunggu') {
+      if (hasFirstDone) {
         const rawDate = v.kunjunganPertama.tanggalKunjungan || v.kunjunganPertama.waktuAktualKunjungan || v.tanggalKunjunganTerakhir;
         if (rawDate) {
           const d = new Date(rawDate);
@@ -278,6 +260,19 @@ export default function KabagDashboard() {
           }
         }
       });
+      // 3. Tugas aktif yang sedang terlambat (belum dikunjungi / lanjutan lewat 72 jam)
+      if (!isVictimFinished(v)) {
+        const fSla = calculateFirstVisitSla(v.tanggalInformasiDiterima, hasFirstDone ? v.kunjunganPertama : null, nowRef);
+        const mSla = hasFirstDone ? calculateMonitoringSla(v, nowRef) : null;
+        const isPendingOverdue =
+          (!hasFirstDone && fSla.isOverdue) ||
+          (hasFirstDone && mSla?.isOverdue) ||
+          Boolean(v.isOverdue) ||
+          Boolean(v.activePendingVisit?.isOverdue3Days);
+        if (isPendingOverdue) {
+          totalTerlambat++;
+        }
+      }
     });
 
     const totalEvaluasi = totalTepat + totalTerlambat;
@@ -289,19 +284,21 @@ export default function KabagDashboard() {
       totalKorban: periodFilteredVictims.length,
       totalPetugas: officers.length,
       kepatuhanSla: kepatuhanSlaPct,
+      totalTepat,
       kunjunganTerlambat: totalTerlambat
     };
   }, [periodFilteredVictims, officers, filterPeriod, selectedYear]);
 
   // ── 4. SECTION 2: GRAFIK PERBANDINGAN KINERJA PETUGAS ──
   const officerComparisonData = useMemo(() => {
-    return officers.map((off) => {
-      const assigned = storageService.getVictimsByOfficer(off);
-      const filtered = filterPeriod === 'ALL'
-        ? assigned
-        : assigned.filter((v) => periodFilteredVictims.some((pv) => pv.id === v.id));
+    const targetOfficers = selectedOfficerFilter === 'ALL'
+      ? officers
+      : officers.filter((o) => o.id === selectedOfficerFilter);
 
-      const victimsToCount = filtered;
+    return targetOfficers.map((off) => {
+      const victimsToCount = periodFilteredVictims.filter((v) =>
+        storageService.isOfficerAssignedToVictim(off, v, officers)
+      );
       // Gunakan rumus evaluasi resmi (Aturan 3 hari, Rumus Kunjungan, Rumus Pasien, Skor Rapor)
       const kpi = evaluateOfficerKpi(victimsToCount, new Date(), 90, 30, off);
 
@@ -328,7 +325,117 @@ export default function KabagDashboard() {
       if (valB !== valA) return valB - valA;
       return a.kunjunganTerlambat - b.kunjunganTerlambat;
     });
-  }, [officers, periodFilteredVictims, filterPeriod, barMetricMode]);
+  }, [officers, periodFilteredVictims, selectedOfficerFilter]);
+
+  // ── 4B. DATA GRAFIK PRODUKTIVITAS PETUGAS, KEPATUHAN SLA (DONUT), & DISTRIBUSI BEBAN KERJA (100% AKTUAL) ──
+  const productivityData = useMemo(() => {
+    const bluePalette = ['#0B4B9C', '#1D5CA8', '#3B72B8', '#5B8AC7', '#78A0D4', '#8FB0DC'];
+    const sorted = [...officerComparisonData].sort((a, b) => b.totalKunjungan - a.totalKunjungan);
+    const totalKunjungan = sorted.reduce((acc, item) => acc + (item.totalKunjungan || 0), 0);
+
+    const chartRows = sorted.map((item, idx) => {
+      const parts = (item.nama || '').trim().split(/\s+/);
+      const shortLabel = parts.length >= 2 ? `${parts[0]}\n${parts[1]}` : (item.namaSingkat || item.nama);
+      return {
+        ...item,
+        shortLabel,
+        fillColor: bluePalette[Math.min(idx, bluePalette.length - 1)]
+      };
+    });
+
+    return { rows: chartRows, totalKunjungan };
+  }, [officerComparisonData]);
+
+  // Sinkron 100% dengan summaryKpis (Tepat Waktu & Terlambat aktual periode terpilih)
+  const slaDonutSummary = useMemo(() => {
+    const tepat = summaryKpis.totalTepat || 0;
+    const terlambat = summaryKpis.kunjunganTerlambat || 0;
+    const total = tepat + terlambat;
+    const pctNum = total > 0 ? (tepat / total) * 100 : 100;
+    const pctFormatted = total > 0 ? pctNum.toFixed(1).replace('.', ',') : '0,0';
+
+    const pieData = total > 0
+      ? [
+          { name: 'Tepat Waktu', value: tepat, color: '#0B4B9C' },
+          { name: 'Terlambat', value: terlambat, color: '#B45309' }
+        ]
+      : [{ name: 'Belum Ada Data', value: 1, color: '#E2E8F0' }];
+
+    return { tepat, terlambat, total, pctFormatted, pieData };
+  }, [summaryKpis]);
+
+  const workloadDistribution = useMemo(() => {
+    let totalSelesai = 0;
+    let totalDalamProses = 0;
+    let totalTertunda = 0;
+
+    const targetOfficers = selectedOfficerFilter === 'ALL'
+      ? officers
+      : officers.filter((o) => o.id === selectedOfficerFilter);
+
+    const rows = targetOfficers.map((off) => {
+      const filtered = periodFilteredVictims.filter((v) =>
+        storageService.isOfficerAssignedToVictim(off, v, officers)
+      );
+
+      let selesai = 0;
+      let dalamProses = 0;
+      let tertunda = 0;
+
+      filtered.forEach((v) => {
+        const cond = (v.kondisiTerakhir || '').toLowerCase();
+        const st = (v.statusPemantauan || '').toLowerCase();
+        const finished =
+          isVictimFinished(v) ||
+          cond.includes('pulang') ||
+          cond.includes('meninggal') ||
+          cond.includes('selesai') ||
+          st.includes('selesai');
+
+        if (finished) {
+          selesai++;
+          return;
+        }
+
+        const firstSla = calculateFirstVisitSla(v.tanggalInformasiDiterima, v.kunjunganPertama);
+        const monSla = calculateMonitoringSla(v);
+        const isLate =
+          (!v.kunjunganPertama && firstSla.isOverdue) ||
+          monSla.isOverdue ||
+          Boolean(v.isOverdue) ||
+          v.slaStatus === 'TERLAMBAT';
+
+        if (isLate) {
+          tertunda++;
+        } else {
+          dalamProses++;
+        }
+      });
+
+      totalSelesai += selesai;
+      totalDalamProses += dalamProses;
+      totalTertunda += tertunda;
+
+      return {
+        id: off.id,
+        nama: off.nama || `Petugas ${off.id}`,
+        selesai,
+        dalamProses,
+        tertunda,
+        totalTugas: selesai + dalamProses + tertunda
+      };
+    }).sort((a, b) => b.totalTugas - a.totalTugas);
+
+    const maxTugas = rows.reduce((max, r) => Math.max(max, r.totalTugas), 0);
+
+    return {
+      rows,
+      maxTugas,
+      totalSelesai,
+      totalDalamProses,
+      totalTertunda
+    };
+  }, [officers, periodFilteredVictims, filterPeriod]);
 
   // ── 5. SECTION 3: GRAFIK TREN KINERJA BULAN KE BULAN (LINE CHART 100% AKTUAL DARI DATABASE) ──
   const monthlyTrends = useMemo(() => {
@@ -337,6 +444,15 @@ export default function KabagDashboard() {
     const currentYear = nowRef.getFullYear();
     const currentMonth = nowRef.getMonth();
     const targetYearNum = Number(selectedYear);
+
+    const trendVictims = selectedOfficerFilter === 'ALL'
+      ? victims
+      : (() => {
+          const selectedOff = officers.find((o) => o.id === selectedOfficerFilter);
+          return selectedOff
+            ? victims.filter((v) => storageService.isOfficerAssignedToVictim(selectedOff, v, officers))
+            : victims;
+        })();
 
     return months.map((bulan, mIdx) => {
       // Periode masa depan pada tahun berjalan
@@ -348,7 +464,7 @@ export default function KabagDashboard() {
       let terlambat = 0;
       const seenVisitIds = new Set();
 
-      victims.forEach((v) => {
+      trendVictims.forEach((v) => {
         // Kunjungan pertama
         if (v.kunjunganPertama && v.kunjunganPertama.statusKunjungan !== 'Menunggu') {
           const rawDate = v.kunjunganPertama.tanggalKunjungan || v.kunjunganPertama.waktuAktualKunjungan || v.tanggalKunjunganTerakhir;
@@ -402,7 +518,7 @@ export default function KabagDashboard() {
         isFuture: false
       };
     });
-  }, [victims, selectedYear]);
+  }, [victims, selectedYear, selectedOfficerFilter, officers]);
 
   // Cek apakah seluruh bulan pada tahun yang dipilih belum memiliki data kunjungan
   const hasAnyYearData = useMemo(() => {
@@ -516,6 +632,19 @@ export default function KabagDashboard() {
       return a.deadlineTime - b.deadlineTime;
     });
   }, [periodFilteredVictims, actionSearch]);
+
+  const formattedHeaderDate = useMemo(() => {
+    try {
+      return new Date().toLocaleDateString('id-ID', {
+        weekday: 'long',
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric'
+      }).toUpperCase();
+    } catch {
+      return 'HARI INI';
+    }
+  }, []);
 
   return (
     <div className="space-y-6 pb-14">
@@ -715,276 +844,401 @@ export default function KabagDashboard() {
         </Link>
       </div>
 
-      {/* ── ROW DUA GRAFIK UTAMA: TREN KINERJA BULANAN (60% KIRI) & PERBANDINGAN KINERJA (40% KANAN) ── */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
-        {/* 2. GRAFIK TREN KINERJA BULAN KE BULAN (LINE CHART - POSISI KIRI ~60%) */}
-        <div className="lg:col-span-7 bg-white rounded-2xl border border-slate-200/90 shadow-2xs p-5 flex flex-col justify-between">
-          <div>
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-              <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                <TrendingUp className="w-4 h-4 text-[#145DA0]" />
-                <span>Tren Kepatuhan SLA Petugas</span>
-              </h2>
-              <span className="text-[11px] font-semibold text-slate-500 bg-slate-50 px-2 py-0.5 rounded-lg border border-slate-200">
-                {selectedYear}
-              </span>
-            </div>
-
-            {/* Line Chart Container */}
-            <div className="h-[210px] w-full pt-2 relative">
-              {!hasAnyYearData && (
-                <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-white/85 backdrop-blur-2xs text-center p-4">
-                  <Clock className="w-8 h-8 text-slate-300 mb-1.5" />
-                  <p className="text-xs font-bold text-slate-700">Belum Ada Aktivitas Kunjungan</p>
-                  <p className="text-[11px] text-slate-400">Tidak ada riwayat kunjungan yang tercatat untuk tahun {selectedYear}</p>
-                </div>
-              )}
-              <ResponsiveContainer width="100%" height={200} minHeight={200} minWidth={0}>
-                <LineChart
-                  data={monthlyTrends}
-                  margin={{ top: 8, right: 15, left: -18, bottom: 0 }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F1F5F9" />
-                  <XAxis
-                    dataKey="bulan"
-                    interval={0}
-                    tick={{ fontSize: 11, fill: '#64748B' }}
-                    axisLine={{ stroke: '#CBD5E1' }}
-                    tickLine={{ stroke: '#CBD5E1' }}
-                  />
-                  <YAxis
-                    domain={[0, 100]}
-                    ticks={[0, 20, 40, 60, 80, 100]}
-                    unit="%"
-                    tick={{ fontSize: 11, fill: '#64748B' }}
-                    axisLine={{ stroke: '#CBD5E1' }}
-                    tickLine={{ stroke: '#CBD5E1' }}
-                  />
-                  <ReferenceLine
-                    y={90}
-                    stroke="#10B981"
-                    strokeDasharray="4 4"
-                    label={{ value: 'Target 90%', fill: '#059669', fontSize: 10, position: 'insideTopRight' }}
-                  />
-                  <Tooltip
-                    content={({ active, payload, label }) => {
-                      if (active && payload && payload.length) {
-                        const d = payload[0].payload;
-                        return (
-                          <div className="bg-slate-900 text-white p-2.5 rounded-xl shadow-xl text-xs space-y-1 border border-slate-700 min-w-[160px]">
-                            <p className="font-bold border-b border-slate-700 pb-1 text-slate-200">
-                              Bulan {label} {selectedYear}
-                            </p>
-                            {d.isFuture ? (
-                              <p className="text-[11px] text-slate-400 pt-0.5">Periode belum berjalan</p>
-                            ) : d.total > 0 ? (
-                              <>
-                                <div className="flex items-center justify-between text-[11px] pt-0.5">
-                                  <span className="text-slate-400">Kepatuhan SLA:</span>
-                                  <span className="font-bold text-white font-mono">{d.kepatuhanSla}%</span>
-                                </div>
-                                <div className="flex items-center justify-between text-[11px]">
-                                  <span className="text-slate-400">Tepat Waktu:</span>
-                                  <span className="font-semibold text-emerald-400 font-mono">{d.tepat}</span>
-                                </div>
-                                <div className="flex items-center justify-between text-[11px]">
-                                  <span className="text-slate-400">Terlambat:</span>
-                                  <span className="font-semibold text-rose-400 font-mono">{d.terlambat}</span>
-                                </div>
-                              </>
-                            ) : (
-                              <p className="text-[11px] text-slate-400 pt-0.5">Belum ada aktivitas kunjungan</p>
-                            )}
-                          </div>
-                        );
-                      }
-                      return null;
-                    }}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="kepatuhanSla"
-                    name="Kepatuhan SLA (%)"
-                    stroke="#145DA0"
-                    strokeWidth={3}
-                    dot={{ r: 4, stroke: '#145DA0', strokeWidth: 2, fill: '#FFFFFF' }}
-                    activeDot={{ r: 6, stroke: '#0A3981', strokeWidth: 2.5, fill: '#FFFFFF' }}
-                    connectNulls={false}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
+      {/* ── 2. GRAFIK GARIS: TREN KEPATUHAN SLA PETUGAS (TETAP ADA) ── */}
+      <div className="bg-white rounded-2xl border border-slate-200/90 shadow-2xs p-4 sm:p-5 flex flex-col justify-between">
+        <div>
+          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+            <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+              <TrendingUp className="w-4 h-4 text-[#145DA0]" />
+              <span>Tren Kepatuhan SLA Petugas</span>
+            </h2>
+            <span className="text-[11px] font-semibold text-slate-500 bg-slate-50 px-2 py-0.5 rounded-lg border border-slate-200">
+              {selectedYear}
+            </span>
           </div>
 
-          <div className="border-t border-slate-100 pt-2 flex items-center justify-end text-[11px] text-slate-400">
-            <span>Standar SLA: Maksimal 3 Hari (72 Jam)</span>
+          {/* Line Chart Container */}
+          <div className="h-[210px] w-full pt-2 relative">
+            {!hasAnyYearData && (
+              <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-white/85 backdrop-blur-2xs text-center p-4">
+                <Clock className="w-8 h-8 text-slate-300 mb-1.5" />
+                <p className="text-xs font-bold text-slate-700">Belum Ada Aktivitas Kunjungan</p>
+                <p className="text-[11px] text-slate-400">Tidak ada riwayat kunjungan yang tercatat untuk tahun {selectedYear}</p>
+              </div>
+            )}
+            <ResponsiveContainer width="100%" height={200} minHeight={200} minWidth={0}>
+              <LineChart
+                data={monthlyTrends}
+                margin={{ top: 8, right: 15, left: -18, bottom: 0 }}
+              >
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F1F5F9" />
+                <XAxis
+                  dataKey="bulan"
+                  interval={0}
+                  tick={{ fontSize: 11, fill: '#64748B' }}
+                  axisLine={{ stroke: '#CBD5E1' }}
+                  tickLine={{ stroke: '#CBD5E1' }}
+                />
+                <YAxis
+                  domain={[0, 100]}
+                  ticks={[0, 20, 40, 60, 80, 100]}
+                  unit="%"
+                  tick={{ fontSize: 11, fill: '#64748B' }}
+                  axisLine={{ stroke: '#CBD5E1' }}
+                  tickLine={{ stroke: '#CBD5E1' }}
+                />
+                <ReferenceLine
+                  y={90}
+                  stroke="#10B981"
+                  strokeDasharray="4 4"
+                  label={{ value: 'Target 90%', fill: '#059669', fontSize: 10, position: 'insideTopRight' }}
+                />
+                <Tooltip
+                  content={({ active, payload, label }) => {
+                    if (active && payload && payload.length) {
+                      const d = payload[0].payload;
+                      return (
+                        <div className="bg-slate-900 text-white p-2.5 rounded-xl shadow-xl text-xs space-y-1 border border-slate-700 min-w-[160px]">
+                          <p className="font-bold border-b border-slate-700 pb-1 text-slate-200">
+                            Bulan {label} {selectedYear}
+                          </p>
+                          {d.isFuture ? (
+                            <p className="text-[11px] text-slate-400 pt-0.5">Periode belum berjalan</p>
+                          ) : d.total > 0 ? (
+                            <>
+                              <div className="flex items-center justify-between text-[11px] pt-0.5">
+                                <span className="text-slate-400">Kepatuhan SLA:</span>
+                                <span className="font-bold text-white font-mono">{d.kepatuhanSla}%</span>
+                              </div>
+                              <div className="flex items-center justify-between text-[11px]">
+                                <span className="text-slate-400">Tepat Waktu:</span>
+                                <span className="font-semibold text-emerald-400 font-mono">{d.tepat}</span>
+                              </div>
+                              <div className="flex items-center justify-between text-[11px]">
+                                <span className="text-slate-400">Terlambat:</span>
+                                <span className="font-semibold text-rose-400 font-mono">{d.terlambat}</span>
+                              </div>
+                            </>
+                          ) : (
+                            <p className="text-[11px] text-slate-400 pt-0.5">Belum ada aktivitas kunjungan</p>
+                          )}
+                        </div>
+                      );
+                    }
+                    return null;
+                  }}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="kepatuhanSla"
+                  name="Kepatuhan SLA (%)"
+                  stroke="#145DA0"
+                  strokeWidth={3}
+                  dot={{ r: 4, stroke: '#145DA0', strokeWidth: 2, fill: '#FFFFFF' }}
+                  activeDot={{ r: 6, stroke: '#0A3981', strokeWidth: 2.5, fill: '#FFFFFF' }}
+                  connectNulls={false}
+                />
+              </LineChart>
+            </ResponsiveContainer>
           </div>
         </div>
 
-        {/* 3. GRAFIK PERBANDINGAN KINERJA PETUGAS (BAR CHART - POSISI KANAN ~40%) */}
-        <div className="lg:col-span-5 bg-white rounded-2xl border border-slate-200/90 shadow-2xs p-5 flex flex-col justify-between">
-          <div>
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 border-b border-slate-100 pb-3">
-              <div>
-                <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                  <BarChart3 className="w-4 h-4 text-[#145DA0]" />
-                  <span>Perbandingan Kinerja Petugas</span>
-                </h2>
-              </div>
+        <div className="border-t border-slate-100 pt-2 flex items-center justify-end text-[11px] text-slate-400">
+          <span>Standar SLA: Maksimal 3 Hari (72 Jam)</span>
+        </div>
+      </div>
 
-              {/* Toggle Indikator Kunjungan vs Persentase SLA */}
-              <div className="flex items-center bg-slate-100 p-0.5 rounded-xl border border-slate-200 text-[11px] font-semibold self-start sm:self-auto">
-                <button
-                  type="button"
-                  onClick={() => setBarMetricMode('visits')}
-                  className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
-                    barMetricMode === 'visits'
-                      ? 'bg-white text-[#145DA0] font-bold shadow-2xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  Kunjungan
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setBarMetricMode('sla')}
-                  className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
-                    barMetricMode === 'sla'
-                      ? 'bg-white text-[#145DA0] font-bold shadow-2xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  SLA (%)
-                </button>
-              </div>
+      {/* ── 3. ROW GRAFIK: PRODUKTIVITAS PETUGAS (KIRI) & KEPATUHAN SLA DONUT (KANAN) ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
+        {/* Produktivitas Petugas (Vertical Blue Bar Chart) */}
+        <div className="lg:col-span-7 bg-white rounded-2xl border border-slate-200/90 shadow-2xs p-4 sm:p-5 flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between gap-2 pb-3">
+              <h2 className="text-sm font-bold text-slate-900">
+                Produktivitas Petugas
+              </h2>
+              <span className="text-xs font-medium text-slate-500">
+                Total: {productivityData.totalKunjungan} kunjungan
+              </span>
             </div>
 
-            {/* Horizontal Bar Chart Container */}
-            <div className="h-[210px] w-full pt-2">
-              <ResponsiveContainer width="100%" height={200} minHeight={200} minWidth={0}>
-                <BarChart
-                  layout="vertical"
-                  data={officerComparisonData}
-                  margin={{ top: 8, right: 15, left: 5, bottom: 0 }}
-                  barSize={18}
-                >
-                  <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#F1F5F9" />
-                  <XAxis
-                    type="number"
-                    domain={barMetricMode === 'sla' ? [0, 100] : [0, 'dataMax + 2']}
-                    unit={barMetricMode === 'sla' ? '%' : ''}
-                    tick={{ fontSize: 11, fill: '#64748B' }}
-                    axisLine={{ stroke: '#CBD5E1' }}
-                    tickLine={{ stroke: '#CBD5E1' }}
-                  />
-                  <YAxis
-                    type="category"
-                    dataKey="namaSingkat"
-                    width={110}
-                    tick={{ fontSize: 11, fill: '#334155', fontWeight: 600 }}
-                    axisLine={{ stroke: '#CBD5E1' }}
-                    tickLine={{ stroke: '#CBD5E1' }}
-                  />
-                  <Tooltip
-                    content={({ active, payload }) => {
-                      if (active && payload && payload.length) {
-                        const data = payload[0].payload;
-                        return (
-                          <div className="bg-slate-900 text-white p-3 rounded-xl shadow-xl text-xs space-y-1.5 border border-slate-700 min-w-[200px]">
-                            <p className="font-bold border-b border-slate-700 pb-1 text-slate-200">
-                              {data.nama}
-                            </p>
-                            <div className="flex items-center justify-between text-[11px]">
-                              <span className="text-slate-400">Tepat Waktu:</span>
-                              <span className="font-bold text-emerald-400 font-mono">{data.kunjunganTepat}</span>
+            <div className="h-[225px] w-full pt-2">
+              {productivityData.rows.length === 0 ? (
+                <div className="h-full flex items-center justify-center text-xs text-slate-400">
+                  Belum ada data petugas.
+                </div>
+              ) : (
+                <ResponsiveContainer width="100%" height={215} minHeight={215} minWidth={0}>
+                  <BarChart
+                    data={productivityData.rows}
+                    margin={{ top: 20, right: 12, left: -18, bottom: 14 }}
+                    barCategoryGap="26%"
+                  >
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F1F5F9" />
+                    <XAxis
+                      dataKey="namaSingkat"
+                      interval={0}
+                      tick={{ fontSize: 11, fill: '#475569', fontWeight: 500 }}
+                      axisLine={false}
+                      tickLine={false}
+                      dy={6}
+                    />
+                    <YAxis
+                      allowDecimals={false}
+                      tick={{ fontSize: 11, fill: '#94A3B8' }}
+                      axisLine={false}
+                      tickLine={false}
+                    />
+                    <Tooltip
+                      cursor={{ fill: '#F8FAFC' }}
+                      content={({ active, payload }) => {
+                        if (active && payload && payload.length) {
+                          const data = payload[0].payload;
+                          return (
+                            <div className="bg-slate-900 text-white p-2.5 rounded-xl shadow-xl text-xs space-y-1 border border-slate-700 min-w-[175px]">
+                              <p className="font-bold border-b border-slate-700 pb-1 text-slate-200">
+                                {data.nama}
+                              </p>
+                              <div className="flex items-center justify-between text-[11px]">
+                                <span className="text-slate-400">Total Kunjungan:</span>
+                                <span className="font-bold text-white font-mono">{data.totalKunjungan}</span>
+                              </div>
+                              <div className="flex items-center justify-between text-[11px]">
+                                <span className="text-slate-400">Tepat Waktu:</span>
+                                <span className="font-bold text-emerald-400 font-mono">{data.kunjunganTepat}</span>
+                              </div>
+                              <div className="flex items-center justify-between text-[11px]">
+                                <span className="text-slate-400">Terlambat:</span>
+                                <span className="font-bold text-rose-400 font-mono">{data.kunjunganTerlambat}</span>
+                              </div>
+                              <p className="text-[10px] text-blue-300 italic pt-0.5">
+                                Klik untuk detail petugas
+                              </p>
                             </div>
-                            <div className="flex items-center justify-between text-[11px]">
-                              <span className="text-slate-400">Terlambat:</span>
-                              <span className="font-bold text-rose-400 font-mono">{data.kunjunganTerlambat}</span>
-                            </div>
-                            <div className="flex items-center justify-between text-[11px] pt-1 border-t border-slate-800">
-                              <span className="text-slate-400">SLA Kunjungan (Rumus 1):</span>
-                              <span className="font-bold text-white font-mono">
-                                {data.isZeroCase || data.persentaseSla === null ? 'N/A' : `${data.persentaseSla}%`}
-                              </span>
-                            </div>
-                            <div className="flex items-center justify-between text-[11px]">
-                              <span className="text-slate-400">SLA Pasien (Rumus 2):</span>
-                              <span className="font-bold text-sky-400 font-mono">
-                                {data.isZeroCase || data.persentaseSlaPasien === null ? 'N/A' : `${data.persentaseSlaPasien}%`}
-                              </span>
-                            </div>
-                            <div className="flex items-center justify-between text-[11px]">
-                              <span className="text-slate-400">Skor Rapor (Bobot 30):</span>
-                              <span className="font-bold text-emerald-400 font-mono">
-                                {data.isZeroCase || data.skorAkhir === null ? 'N/A' : `${data.skorAkhir} Poin`}
-                              </span>
-                            </div>
-                            <p className="text-[10px] text-blue-300 italic pt-0.5">
-                              Klik untuk membuka detail kinerja
-                            </p>
-                          </div>
-                        );
-                      }
-                      return null;
-                    }}
-                  />
-                  {barMetricMode === 'visits' ? (
-                    <>
-                      <Legend
-                        verticalAlign="top"
-                        align="right"
-                        iconSize={8}
-                        wrapperStyle={{ fontSize: '11px', paddingBottom: '6px' }}
-                      />
-                      <Bar
-                        dataKey="kunjunganTepat"
-                        name="Tepat Waktu"
-                        stackId="a"
-                        fill="#10B981"
-                        cursor="pointer"
-                        onClick={(data) => {
-                          if (data && data.id) navigate(`/kabag/kinerja?tab=detail&officerId=${data.id}`);
-                        }}
-                      />
-                      <Bar
-                        dataKey="kunjunganTerlambat"
-                        name="Terlambat"
-                        stackId="a"
-                        fill="#EF4444"
-                        radius={[0, 4, 4, 0]}
-                        cursor="pointer"
-                        onClick={(data) => {
-                          if (data && data.id) navigate(`/kabag/kinerja?tab=detail&officerId=${data.id}`);
-                        }}
-                      />
-                    </>
-                  ) : (
+                          );
+                        }
+                        return null;
+                      }}
+                    />
                     <Bar
-                      dataKey="persentaseSla"
-                      name="Kepatuhan SLA (%)"
-                      fill="#145DA0"
-                      radius={[0, 4, 4, 0]}
+                      dataKey="totalKunjungan"
+                      radius={[6, 6, 0, 0]}
+                      maxBarSize={42}
                       cursor="pointer"
                       onClick={(data) => {
                         if (data && data.id) navigate(`/kabag/kinerja?tab=detail&officerId=${data.id}`);
                       }}
+                    >
+                      {productivityData.rows.map((entry) => (
+                        <Cell key={entry.id} fill={entry.fillColor} />
+                      ))}
+                      <LabelList
+                        dataKey="totalKunjungan"
+                        position="top"
+                        style={{ fill: '#0F172A', fontSize: 11, fontWeight: 700 }}
+                      />
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Kepatuhan SLA (Donut Chart) */}
+        <div className="lg:col-span-5 bg-white rounded-2xl border border-slate-200/90 shadow-2xs p-4 sm:p-5 flex flex-col justify-between">
+          <div>
+            <h2 className="text-sm font-bold text-slate-900 pb-3">
+              Kepatuhan SLA
+            </h2>
+
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-4 py-2">
+              {/* Donut Container */}
+              <div className="relative w-[170px] h-[170px] shrink-0">
+                <ResponsiveContainer width="100%" height={170} minHeight={170} minWidth={0}>
+                  <PieChart>
+                    <Pie
+                      data={slaDonutSummary.pieData}
+                      dataKey="value"
+                      nameKey="name"
+                      cx="50%"
+                      cy="50%"
+                      innerRadius={54}
+                      outerRadius={74}
+                      startAngle={90}
+                      endAngle={-270}
+                      stroke="none"
+                    >
+                      {slaDonutSummary.pieData.map((entry, idx) => (
+                        <Cell key={idx} fill={entry.color} />
+                      ))}
+                    </Pie>
+                    <Tooltip
+                      content={({ active, payload }) => {
+                        if (active && payload && payload.length && slaDonutSummary.total > 0) {
+                          const p = payload[0];
+                          return (
+                            <div className="bg-slate-900 text-white px-2.5 py-1.5 rounded-lg text-[11px] font-semibold shadow-lg">
+                              {p.name}: <span className="font-mono font-bold">{p.value}</span>
+                            </div>
+                          );
+                        }
+                        return null;
+                      }}
                     />
-                  )}
-                </BarChart>
-              </ResponsiveContainer>
+                  </PieChart>
+                </ResponsiveContainer>
+
+                {/* Center Percentage */}
+                <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                  <span className="text-xl font-extrabold text-slate-900 tracking-tight">
+                    {slaDonutSummary.total > 0 ? `${slaDonutSummary.pctFormatted}%` : '—'}
+                  </span>
+                  <span className="text-[11px] font-medium text-slate-500">
+                    Tepat Waktu
+                  </span>
+                </div>
+              </div>
+
+              {/* Right Legend Summary */}
+              <div className="flex-1 w-full space-y-2.5 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="flex items-center gap-2 text-slate-600 font-medium">
+                    <span className="w-2.5 h-2.5 rounded-full bg-[#0B4B9C] shrink-0" />
+                    <span>Tepat Waktu</span>
+                  </span>
+                  <span className="font-bold font-mono text-slate-900">
+                    {slaDonutSummary.tepat}
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <span className="flex items-center gap-2 text-slate-600 font-medium">
+                    <span className="w-2.5 h-2.5 rounded-full bg-[#B45309] shrink-0" />
+                    <span>Terlambat</span>
+                  </span>
+                  <span className="font-bold font-mono text-[#B45309]">
+                    {slaDonutSummary.terlambat}
+                  </span>
+                </div>
+
+                <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
+                  <span className="text-slate-500 font-medium">Total Dievaluasi</span>
+                  <span className="font-bold font-mono text-slate-900">
+                    {slaDonutSummary.total}
+                  </span>
+                </div>
+              </div>
             </div>
           </div>
 
-          <div className="border-t border-slate-100 pt-2 flex items-center justify-end">
+          <div className="border-t border-slate-100 pt-2.5 mt-2 flex items-center justify-between text-[11px]">
+            <span className="text-slate-400 font-medium">Target minimum 85%</span>
             <Link
-              to="/kabag/petugas"
-              className="text-xs font-bold text-[#145DA0] hover:text-[#0A3981] inline-flex items-center gap-1"
+              to="/kabag/kinerja"
+              className="font-bold text-[#145DA0] hover:text-[#0A3981] inline-flex items-center gap-0.5"
             >
-              <span>Daftar Petugas Lengkap</span>
+              <span>Detail SLA</span>
               <ChevronRight className="w-3.5 h-3.5" />
             </Link>
           </div>
+        </div>
+      </div>
+
+      {/* ── 4. DISTRIBUSI BEBAN KERJA PETUGAS (HORIZONTAL STACKED BAR) ── */}
+      <div className="bg-white rounded-2xl border border-slate-200/90 shadow-2xs p-4 sm:p-5 space-y-4">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-bold text-slate-900">
+              Distribusi Beban Kerja Petugas
+            </h2>
+            <p className="text-[11px] text-slate-500 mt-0.5">
+              Komposisi pekerjaan selesai, dalam proses, dan tertunda/overdue per Petugas.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px] font-semibold text-slate-700">
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-full bg-[#0B4B9C]" />
+              <span>Selesai ( {workloadDistribution.totalSelesai} )</span>
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-full bg-[#9DB8DF]" />
+              <span>Dalam Proses ( {workloadDistribution.totalDalamProses} )</span>
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-full bg-[#B45309]" />
+              <span>Tertunda / Overdue ( {workloadDistribution.totalTertunda} )</span>
+            </span>
+          </div>
+        </div>
+
+        <div className="space-y-3 pt-1">
+          {workloadDistribution.rows.length === 0 ? (
+            <div className="py-6 text-center text-xs text-slate-400">
+              Belum ada data beban kerja petugas pada periode ini.
+            </div>
+          ) : (
+            workloadDistribution.rows.map((row) => {
+              const denom = workloadDistribution.maxTugas > 0 ? workloadDistribution.maxTugas : 1;
+              const selesaiPct = (row.selesai / denom) * 100;
+              const prosesPct = (row.dalamProses / denom) * 100;
+              const tertundaPct = (row.tertunda / denom) * 100;
+
+              return (
+                <div
+                  key={row.id}
+                  onClick={() => navigate(`/kabag/kinerja?tab=detail&officerId=${row.id}`)}
+                  className="flex items-center gap-3 group cursor-pointer"
+                  title="Klik untuk membuka detail kinerja petugas"
+                >
+                  <div className="w-28 sm:w-40 shrink-0 text-xs font-medium text-slate-700 group-hover:text-[#145DA0] truncate transition-colors">
+                    {row.nama}
+                  </div>
+
+                  <div className="flex-1 flex items-center h-6 bg-slate-50 rounded-md overflow-hidden">
+                    {row.totalTugas > 0 ? (
+                      <div className="flex h-full w-full items-center">
+                        {row.selesai > 0 && (
+                          <div
+                            style={{ width: `${selesaiPct}%` }}
+                            className="h-full bg-[#0B4B9C] text-white text-[11px] font-bold flex items-center justify-center first:rounded-l-md last:rounded-r-md transition-all"
+                            title={`Selesai: ${row.selesai}`}
+                          >
+                            {row.selesai}
+                          </div>
+                        )}
+                        {row.dalamProses > 0 && (
+                          <div
+                            style={{ width: `${prosesPct}%` }}
+                            className="h-full bg-[#9DB8DF] text-slate-800 text-[11px] font-bold flex items-center justify-center first:rounded-l-md last:rounded-r-md transition-all"
+                            title={`Dalam Proses: ${row.dalamProses}`}
+                          >
+                            {row.dalamProses}
+                          </div>
+                        )}
+                        {row.tertunda > 0 && (
+                          <div
+                            style={{ width: `${tertundaPct}%` }}
+                            className="h-full bg-[#B45309] text-white text-[11px] font-bold flex items-center justify-center first:rounded-l-md last:rounded-r-md transition-all"
+                            title={`Tertunda / Overdue: ${row.tertunda}`}
+                          >
+                            {row.tertunda}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <span className="text-[10px] text-slate-400 px-2 italic">0 tugas</span>
+                    )}
+                  </div>
+
+                  <div className="w-16 shrink-0 text-right text-xs font-medium text-slate-500 font-mono">
+                    {row.totalTugas} tugas
+                  </div>
+                </div>
+              );
+            })
+          )}
         </div>
       </div>
 

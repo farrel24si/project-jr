@@ -225,12 +225,14 @@ export function stampPhotoWatermark(
         const dateStr = actualTime.toLocaleDateString('id-ID', {
           day: '2-digit',
           month: 'short',
-          year: 'numeric'
+          year: 'numeric',
+          timeZone: 'Asia/Jakarta'
         });
         const timeStr = actualTime.toLocaleTimeString('id-ID', {
           hour: '2-digit',
           minute: '2-digit',
-          second: '2-digit'
+          second: '2-digit',
+          timeZone: 'Asia/Jakarta'
         }).replace(/:/g, '.') + ' WIB';
 
         // ── 4. BANNER WATERMARK FORENSIK DI BAGIAN BAWAH ──
@@ -266,7 +268,12 @@ export function stampPhotoWatermark(
         const petugasTextWidth = ctx.measureText('Petugas: ').width;
         ctx.font = `${fontSize}px sans-serif`;
         ctx.fillStyle = '#FFFFFF';
-        ctx.fillText(`${petugasNama}${korbanNama ? ` | Pasien: ${korbanNama}` : ''}`, paddingLeft + petugasTextWidth, currentY);
+        ctx.fillText(
+          `${petugasNama}${korbanNama ? ` | Pasien: ${korbanNama}` : ''}`,
+          paddingLeft + petugasTextWidth,
+          currentY,
+          width - paddingLeft * 2 - petugasTextWidth
+        );
 
         // 3. Waktu Foto (Waktu Realtime Aktual)
         currentY += fontSize + 4;
@@ -286,7 +293,7 @@ export function stampPhotoWatermark(
         const lokasiTextWidth = ctx.measureText('Lokasi: ').width;
         ctx.font = `${fontSize}px sans-serif`;
         ctx.fillStyle = '#FFFFFF';
-        ctx.fillText(`${lokasi}`, paddingLeft + lokasiTextWidth, currentY);
+        ctx.fillText(`${lokasi}`, paddingLeft + lokasiTextWidth, currentY, width - paddingLeft * 2 - lokasiTextWidth);
 
         // 5. Titik Koordinat GPS
         currentY += fontSize + 4;

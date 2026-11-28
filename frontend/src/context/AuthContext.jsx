@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
+import { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import { storageService } from '../services/storageService';
 import { api, clearAuthToken } from '../services/api';
 
@@ -223,7 +223,7 @@ export function AuthProvider({ children }) {
     if (!companyDomainRegex.test(emailLower)) {
       return {
         success: false,
-        message: 'Email harus menggunakan domain resmi perusahaan (@jasaraharja.co.id).'
+        message: 'Email harus menggunakan domain resmi perusahaan.'
       };
     }
 
@@ -251,16 +251,25 @@ export function AuthProvider({ children }) {
     }
 
     // 2. Cari petugas yang saat ini memegang email aktif ini (ID petugas sebagai Primary Key)
-    const matchedOfficer = allOfficers.find((o) => {
-      const oEmail = (o.email || '').toLowerCase().trim();
-      return oEmail && oEmail !== '—' && oEmail === emailLower;
-    });
+    // Jika belum sinkron di perangkat baru (mis. HP), cocokkan juga berdasarkan nama depan / awalan email petugas
+    const matchedOfficer =
+      allOfficers.find((o) => {
+        const oEmail = (o.email || '').toLowerCase().trim();
+        return oEmail && oEmail !== '—' && oEmail === emailLower;
+      }) ||
+      allOfficers.find((o) => {
+        const oEmail = (o.email || '').toLowerCase().trim();
+        const oNama = (o.nama || '').toLowerCase().trim();
+        const firstWord = oNama.split(/\s+/)[0];
+        const emailFirstPart = oEmail.split('@')[0].split('.')[0];
+        return (firstWord && userPrefix === firstWord) || (emailFirstPart && userPrefix === emailFirstPart);
+      });
 
     let candidates = [];
     if (matchedOfficer) {
       const targetUsername = matchedOfficer.username ||
         (matchedOfficer.backendOfficerId === 1 ? 'petugas' : (matchedOfficer.backendOfficerId ? `petugas${matchedOfficer.backendOfficerId}` : 'petugas'));
-      candidates = [targetUsername, emailLower];
+      candidates = Array.from(new Set([targetUsername, emailLower, userPrefix].filter(Boolean)));
     } else if (emailLower.includes('kabag') || emailLower.includes('admin') || userPrefix === 'kabag') {
       candidates = ['kabag', emailLower, userPrefix];
     } else {
@@ -398,32 +407,6 @@ export function AuthProvider({ children }) {
     };
   };
 
-  const updateProfilePhoto = (newPhotoDataUrl) => {
-    if (!currentUser) return;
-    const updatedUser = {
-      ...currentUser,
-      profile: {
-        ...currentUser.profile,
-        avatar: newPhotoDataUrl,
-        fotoUrl: newPhotoDataUrl
-      }
-    };
-    setCurrentUser(updatedUser);
-    storageService.setCurrentUser(updatedUser);
-
-    if (currentUser.role === 'petugas') {
-      const officerId = currentUser.profile?.id || 'PET-01';
-      storageService.updateOfficer(officerId, {
-        avatar: newPhotoDataUrl,
-        fotoUrl: newPhotoDataUrl
-      });
-    }
-
-    if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
-      window.dispatchEvent(new Event('jr_officers_updated'));
-    }
-  };
-
   /**
    * Mengubah nomor telepon kontak akun (Kabag maupun Petugas)
    * Menyimpan ke state, penyimpanan profil lokal, dan backend officers
@@ -533,7 +516,6 @@ export function AuthProvider({ children }) {
         logout,
         authNotice,
         clearAuthNotice,
-        updateProfilePhoto,
         updatePhoneNumber,
         updatePassword,
         isAuthenticated: !!currentUser,

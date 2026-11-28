@@ -25,7 +25,7 @@ export default function MobileNav() {
   const tabs = isKabag ? kabagTabs : petugasTabs;
 
   return (
-    <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white border-t border-slate-200 shadow-lg">
+    <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white border-t border-slate-200 shadow-lg print:hidden">
       <div className={`grid ${tabs.length === 5 ? 'grid-cols-5' : (tabs.length === 4 ? 'grid-cols-4' : 'grid-cols-3')} max-w-md mx-auto`}>
         {tabs.map((tab) => {
           const Icon = tab.icon;

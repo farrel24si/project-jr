@@ -6,7 +6,8 @@ import ModalDetailKunjunganReadOnly from '../petugas/ModalDetailKunjunganReadOnl
 import { calculateFirstVisitSla, calculateMonitoringSla } from '../../services/slaService';
 import { cleanPhoneNumber, cleanSumberInformasi } from '../../services/backendMapper';
 import { formatDateTimeIndo } from '../../utils/dateUtils';
-import { isVictimFinished } from '../../utils/monitoringStatus';
+import { isVictimFinished, isPenolakanJaminanVictim, getCompletionReason } from '../../utils/monitoringStatus';
+import MonitoringStatusBadge from '../common/MonitoringStatusBadge';
 import { 
   Building2, 
   MapPin, 
@@ -124,6 +125,15 @@ export default function VictimDetailDrawer({ isOpen, onClose, victim }) {
       );
     }
 
+    if (isPenolakanJaminanVictim(victim)) {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-stone-100 text-stone-800 border border-stone-300">
+          <span className="w-2 h-2 rounded-full bg-stone-500"></span>
+          <span>Tidak Bersedia Menggunakan Jaminan Jasa Raharja</span>
+        </span>
+      );
+    }
+
     if (victim.kondisiTerakhir === 'Meninggal Dunia') {
       return (
         <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-red-50 text-red-700 border border-red-200">
@@ -151,6 +161,22 @@ export default function VictimDetailDrawer({ isOpen, onClose, victim }) {
     >
       <div className="space-y-4 text-xs">
         {/* Victim & SLA Overview Header (Gaya Bersih Tanpa Penumpukan Badge) */}
+        {(() => {
+          const completion = getCompletionReason(victim);
+          if (!completion) return null;
+          return (
+            <div className="p-3.5 rounded-xl bg-slate-100 border border-slate-300 text-slate-900 space-y-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <MonitoringStatusBadge victim={victim} size="xs" />
+                <span className="font-bold text-xs">Alasan Berakhir: {completion.label}</span>
+              </div>
+              <div className="text-[11px] text-slate-700">
+                {completion.detail}
+              </div>
+            </div>
+          );
+        })()}
+
         <div className="bg-slate-50/80 border border-slate-200/90 rounded-2xl p-4.5 flex flex-col md:flex-row md:items-center justify-between gap-3">
           <div>
             <div className="flex items-center gap-2.5 flex-wrap">
@@ -331,10 +357,6 @@ export default function VictimDetailDrawer({ isOpen, onClose, victim }) {
               <div className="py-2 flex flex-col sm:flex-row sm:items-start justify-between gap-1 sm:gap-3">
                 <span className="text-slate-500 font-medium shrink-0">Tempat Kejadian (TKP)</span>
                 <span className="font-semibold text-slate-800 text-left sm:text-right leading-relaxed">{victim.lokasiKejadian || '—'}</span>
-              </div>
-              <div className="py-2 flex items-center justify-between gap-3">
-                <span className="text-slate-500 font-medium">Sumber Informasi</span>
-                <span className="font-semibold text-slate-800 text-right">{cleanSumberInformasi(victim.sumberInformasi)}</span>
               </div>
             </div>
           </div>

@@ -17,10 +17,14 @@ import {
   Eye,
   Lock,
   List,
-  GitCommit
+  GitCommit,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
-import { parseCatatanKondisi, parseDateToTimestamp } from '../../services/backendMapper';
+import { parseCatatanKondisi, parseDateToTimestamp, isNoteDuplicateOfActions } from '../../services/backendMapper';
 import { groupCareEpisodes } from '../../services/careHistoryService';
+import { isVictimFinished } from '../../utils/monitoringStatus';
+import MonitoringStatusBadge from './MonitoringStatusBadge';
 import { formatDateIndo, formatTimeIndo, formatDateTimeIndo } from '../../utils/dateUtils';
 import { storageService } from '../../services/storageService';
 import { isSameHospital } from '../../utils/referralUtils';
@@ -63,17 +67,12 @@ export function resolveReferralHospitals(victim) {
     const rsAsalVal = originEp.rumahSakit || victim.rumahSakitAsal;
     const rsSaatIniVal = currentEp.rumahSakit || victim.rumahSakit;
 
-    // Rujukan HANYA valid jika memang ada aksi rujukan resmi dan BUKAN rawat lanjutan
+    // Rujukan valid jika ada riwayat rujukan resmi (tetap dipertahankan meski pasien kemudian pulang & rawat lanjutan)
     const isExplicitReferred = Boolean(
-      !victim.isRawatLanjutan &&
-      !victim.rawatLanjutanDariPulang &&
-      victim.statusPerawatan !== 'Rawat Lanjutan' &&
-      (
-        victim.careEpisodes.some((ep) => ep.tipePerawatan === 'Rujukan' || ep.status === 'Dirujuk') ||
-        victim.statusPerawatan === 'Rujukan' ||
-        (Array.isArray(victim.riwayatRujukan) && victim.riwayatRujukan.length > 0) ||
-        (Array.isArray(victim.referrals) && victim.referrals.length > 0)
-      )
+      victim.careEpisodes.some((ep) => ep.tipePerawatan === 'Rujukan' || ep.status === 'Dirujuk') ||
+      victim.statusPerawatan === 'Rujukan' ||
+      (Array.isArray(victim.riwayatRujukan) && victim.riwayatRujukan.length > 0) ||
+      (Array.isArray(victim.referrals) && victim.referrals.length > 0)
     );
 
     return {
@@ -184,18 +183,13 @@ export function resolveReferralHospitals(victim) {
   }
 
   const isExplicitReferral = Boolean(
-    !victim.isRawatLanjutan &&
-    !victim.rawatLanjutanDariPulang &&
-    victim.statusPerawatan !== 'Rawat Lanjutan' &&
-    (
-      (Array.isArray(victim.riwayatRujukan) && victim.riwayatRujukan.length > 0) ||
-      (Array.isArray(victim.referrals) && victim.referrals.length > 0) ||
-      victim.statusPerawatan === 'Rujukan' ||
-      victim.statusPerawatan === 'Rujukan Diterima' ||
-      Boolean(victim.isRujukanMasuk) ||
-      (typeof victim.kondisiTerakhir === 'string' && victim.kondisiTerakhir.startsWith('Dirujuk ke')) ||
-      (typeof victim.statusPemantauan === 'string' && victim.statusPemantauan.startsWith('Dirujuk ke'))
-    )
+    (Array.isArray(victim.riwayatRujukan) && victim.riwayatRujukan.length > 0) ||
+    (Array.isArray(victim.referrals) && victim.referrals.length > 0) ||
+    victim.statusPerawatan === 'Rujukan' ||
+    victim.statusPerawatan === 'Rujukan Diterima' ||
+    Boolean(victim.isRujukanMasuk) ||
+    (typeof victim.kondisiTerakhir === 'string' && victim.kondisiTerakhir.startsWith('Dirujuk ke')) ||
+    (typeof victim.statusPemantauan === 'string' && victim.statusPemantauan.startsWith('Dirujuk ke'))
   );
 
   // Jika pasien berstatus rujukan tapi salah satu nama belum terisi:
@@ -287,17 +281,26 @@ export function buildPatientJourney(victim) {
             ? act.checklistTindakan
             : parsed.tindakanList;
 
-          const visitStatus = isEpDischarged
-            ? 'Pulang'
-            : (act.kondisiKorban && act.kondisiKorban !== 'Pulang' ? act.kondisiKorban : (ep.status || 'Sedang Dipantau'));
+          const isReactivate = Boolean(act.isReactivationLog || String(act.jenisAktivitas || '').includes('Aktivasi Pemantauan Kembali'));
+          const isNonVisit = Boolean(act.isNonVisitConfirmation && !isReactivate);
 
-          const judul = isFirstInEp
-            ? (isFirstEpisode ? `Kunjungan Awal di ${epHospital}` : `Kunjungan Perawatan di ${epHospital}`)
-            : `Pemantauan Berkala di ${epHospital}`;
+          const visitStatus = isReactivate
+            ? 'Rawat Lanjutan'
+            : (act.kondisiKorban || (isEpDischarged ? 'Pulang' : (ep.status || 'Sedang Dipantau')));
 
-          const type = visitStatus === 'Pulang'
-            ? 'discharge'
-            : (isFirstEpisode && isFirstInEp ? 'initial' : (isFirstInEp ? 'readmit' : 'visit'));
+          const judul = isReactivate
+            ? `Aktivasi Pemantauan Kembali (Rawat Lanjutan) di ${epHospital}`
+            : isNonVisit
+              ? `Konfirmasi Kondisi Tanpa Kunjungan di ${epHospital}`
+              : isFirstInEp
+                ? (isFirstEpisode ? `Kunjungan Awal di ${epHospital}` : `Kunjungan Perawatan di ${epHospital}`)
+                : `Pemantauan Berkala di ${epHospital}`;
+
+          const type = isReactivate
+            ? 'readmit'
+            : (visitStatus === 'Pulang' || visitStatus === 'Sudah Pulang')
+              ? 'discharge'
+              : (isFirstEpisode && isFirstInEp ? 'initial' : (isFirstInEp ? 'readmit' : 'visit'));
 
           episodeJourney.push({
             id: act.id || `JOURNEY-EP${epIdx}-V${vIdx}`,
@@ -593,8 +596,11 @@ export function buildPatientJourney(victim) {
 
     // 2. TAHAPAN RS KEDUA / RS TUJUAN (Misal: RS Tabrani Rab) -> NO. 2 dst.
     const isSecondEpisodeDischarged = Boolean(
-      ['Sudah Pulang', 'Pulang', 'Selesai'].includes(victim.kondisiTerakhir) ||
-      ['Sudah Pulang', 'Pulang', 'Selesai'].includes(victim.status_kondisi)
+      !victim.isReactivated &&
+      (
+        ['Sudah Pulang', 'Pulang', 'Selesai'].includes(victim.kondisiTerakhir) ||
+        ['Sudah Pulang', 'Pulang', 'Selesai'].includes(victim.status_kondisi)
+      )
     );
 
     const currentHospitalStatus = isSecondEpisodeDischarged
@@ -604,27 +610,37 @@ export function buildPatientJourney(victim) {
     if (currentVisits.length > 0) {
       currentVisits.forEach((act, idx) => {
         const isFirstInCurrent = idx === 0;
+        const isReactivate = Boolean(act.isReactivationLog || String(act.jenisAktivitas || '').includes('Aktivasi Pemantauan Kembali'));
+        const isNonVisit = Boolean(act.isNonVisitConfirmation && !isReactivate);
         const actDate = act.waktuAktualKunjungan || act.tanggal || act.tanggalKunjungan || (victim.tanggalMasukTerbaru || new Date().toISOString());
         const parsed = parseCatatanKondisi(act.catatan_kondisi || act.hasilKomunikasi || act.hasilKunjungan || act.hasilPemantauan);
         const tindakanList = (act.checklistTindakan && act.checklistTindakan.length > 0)
           ? act.checklistTindakan
           : parsed.tindakanList;
 
-        const visitStatus = isSecondEpisodeDischarged
-          ? 'Pulang'
-          : (act.kondisiKorban && act.kondisiKorban !== 'Pulang' ? act.kondisiKorban : currentHospitalStatus);
+        const visitStatus = isReactivate
+          ? 'Rawat Lanjutan'
+          : (act.kondisiKorban || currentHospitalStatus);
 
         journey.push({
           id: act.id || `JOURNEY-CURRENT-${idx}`,
           tanggal: actDate,
           rumahSakit: currentRs,
-          judul: isFirstInCurrent
-            ? (isReferred ? `Kunjungan Lanjutan di ${currentRs}` : `Kunjungan Perawatan di ${currentRs}`)
-            : `Pemantauan Berkala di ${currentRs}`,
-          jenis: isFirstInCurrent
-            ? (isReferred ? 'Kunjungan Lanjutan di RS Rujukan' : 'Kunjungan Perawatan Lanjutan')
-            : 'Pemantauan Berkala',
-          type: visitStatus === 'Pulang' ? 'discharge' : (isFirstInCurrent ? (isReferred ? 'visit' : 'readmit') : 'visit'),
+          judul: isReactivate
+            ? `Aktivasi Pemantauan Kembali (Rawat Lanjutan) di ${currentRs}`
+            : isNonVisit
+              ? `Konfirmasi Kondisi Tanpa Kunjungan di ${currentRs}`
+              : isFirstInCurrent
+                ? (isReferred ? `Kunjungan Lanjutan di ${currentRs}` : `Kunjungan Perawatan di ${currentRs}`)
+                : `Pemantauan Berkala di ${currentRs}`,
+          jenis: isReactivate
+            ? 'Rawat Lanjutan'
+            : isNonVisit
+              ? 'Konfirmasi Non-Kunjungan'
+              : isFirstInCurrent
+                ? (isReferred ? 'Kunjungan Lanjutan di RS Rujukan' : 'Kunjungan Perawatan Lanjutan')
+                : 'Pemantauan Berkala',
+          type: isReactivate ? 'readmit' : ((visitStatus === 'Pulang' || visitStatus === 'Sudah Pulang') ? 'discharge' : (isFirstInCurrent ? (isReferred ? 'visit' : 'readmit') : 'visit')),
           status: visitStatus,
           petugasNama: act.petugasNama || refTargetOfficer,
           catatan: parsed.cleanRingkasan || act.catatanTambahan || act.hasilKomunikasi || act.hasilKunjungan || (isReferred
@@ -729,8 +745,11 @@ export function buildPatientJourney(victim) {
         }
       });
     } else {
+      let physicalVisitIdx = 0;
       validVisits.forEach((act, idx) => {
-        const isFirst = idx === 0;
+        const isReactivate = Boolean(act.isReactivationLog || String(act.jenisAktivitas || '').includes('Aktivasi Pemantauan Kembali'));
+        const isNonVisit = Boolean(act.isNonVisitConfirmation && !isReactivate);
+        const isFirst = !isReactivate && !isNonVisit && (physicalVisitIdx++ === 0);
         const actDate = act.waktuAktualKunjungan || act.tanggal || act.tanggalKunjungan || initialDate;
         const parsed = parseCatatanKondisi(act.catatan_kondisi || act.hasilKomunikasi || act.hasilKunjungan || act.hasilPemantauan);
         const tindakanList = (act.checklistTindakan && act.checklistTindakan.length > 0)
@@ -738,14 +757,18 @@ export function buildPatientJourney(victim) {
           : parsed.tindakanList;
 
         let hospitalName = singleHospital;
-        let judul = isFirst
-          ? `Kunjungan Awal di ${hospitalName}`
-          : `Pemantauan Berkala di ${hospitalName}`;
+        let judul = isReactivate
+          ? `Aktivasi Pemantauan Kembali (Rawat Lanjutan) di ${hospitalName}`
+          : isNonVisit
+            ? `Konfirmasi Kondisi Tanpa Kunjungan di ${hospitalName}`
+            : isFirst
+              ? `Kunjungan Awal di ${hospitalName}`
+              : `Pemantauan Berkala di ${hospitalName}`;
 
-        let type = isFirst ? 'initial' : 'visit';
-        let status = act.kondisiKorban || (isFirst ? 'Masih Dirawat' : 'Sedang Dipantau');
+        let type = isReactivate ? 'readmit' : (isFirst ? 'initial' : 'visit');
+        let status = isReactivate ? 'Rawat Lanjutan' : (act.kondisiKorban || (isFirst ? 'Masih Dirawat' : 'Sedang Dipantau'));
 
-        if (act.kondisiKorban === 'Sudah Pulang' || act.kondisiKorban === 'Pulang' || act.kondisiKorban === 'Selesai' || isSingleDischarged) {
+        if (!isReactivate && (act.kondisiKorban === 'Sudah Pulang' || act.kondisiKorban === 'Pulang' || act.kondisiKorban === 'Selesai')) {
           status = 'Pulang';
           type = 'discharge';
         } else if (typeof act.kondisiKorban === 'string' && act.kondisiKorban.startsWith('Dirujuk')) {
@@ -761,7 +784,7 @@ export function buildPatientJourney(victim) {
           tanggal: actDate,
           rumahSakit: hospitalName,
           judul,
-          jenis: isFirst ? 'Kunjungan Awal' : 'Pemantauan Berkala',
+          jenis: isReactivate ? 'Rawat Lanjutan' : (isNonVisit ? 'Konfirmasi Non-Kunjungan' : (isFirst ? 'Kunjungan Awal' : 'Pemantauan Berkala')),
           type,
           status,
           petugasNama: act.petugasNama || resolvedSingleOfficer,
@@ -773,8 +796,8 @@ export function buildPatientJourney(victim) {
     }
   }
 
-  // 3. Gabungkan tahapan riwayat rujukan jika ada (Hanya untuk rujukan resmi aktif, BUKAN untuk rawatan lanjutan pasca pulang)
-  if (isReferred && !isMultiHospital && !victim.isRawatLanjutan && !victim.rawatLanjutanDariPulang && !journey.some((j) => j.type === 'referral' || j.status?.includes('Dirujuk'))) {
+  // 3. Gabungkan tahapan riwayat rujukan jika ada
+  if (isReferred && !isMultiHospital && !journey.some((j) => j.type === 'referral' || j.status?.includes('Dirujuk'))) {
     if (victim.rumahSakitTujuan && victim.rumahSakitTujuan !== originRs) {
       journey.push({
         id: `JOURNEY-REF-GEN-${victim.id}`,
@@ -837,7 +860,7 @@ export function buildPatientJourney(victim) {
   if (isMultiHospital) {
     const originItems = journey.filter((j) => j.rumahSakit && j.rumahSakit.toLowerCase().trim() === (originRs || '').toLowerCase().trim());
     const currentItems = journey.filter((j) => j.rumahSakit && j.rumahSakit.toLowerCase().trim() === (currentRs || '').toLowerCase().trim());
-    
+
     if (originItems.length > 0 && currentItems.length > 0) {
       const latestOriginTime = Math.max(...originItems.map((o) => new Date(o.tanggal).getTime()));
       currentItems.forEach((c, cIdx) => {
@@ -910,43 +933,29 @@ export default function RiwayatPerawatanTimeline({
   monitoringSla
 }) {
   const [viewMode, setViewMode] = useState('timeline'); // 'timeline' | 'table'
+  const [expandedEpisodes, setExpandedEpisodes] = useState({});
 
   if (!victim) return null;
 
   const journey = buildPatientJourney(victim);
+  const episodesAsc = groupCareEpisodes(victim);
+  const episodesDesc = [...episodesAsc].reverse();
   const { isReferred, rsAsal, rsTujuan, rsSaatIni } = resolveReferralHospitals(victim);
 
-  const activeEpisode = Array.isArray(victim.careEpisodes) && victim.careEpisodes.length > 0
-    ? victim.careEpisodes[victim.careEpisodes.length - 1]
-    : null;
+  const isEpisodeExpanded = (ep, idx) => {
+    if (Object.prototype.hasOwnProperty.call(expandedEpisodes, ep.id)) {
+      return expandedEpisodes[ep.id];
+    }
+    return idx === 0; // Episode terbaru terbuka otomatis, episode sebelumnya dapat dibuka
+  };
 
-  const lastJourneyItem = journey.length > 0 ? journey[journey.length - 1] : null;
-  const isLastJourneyDischarged = Boolean(
-    lastJourneyItem && (
-      lastJourneyItem.status === 'Pulang' ||
-      lastJourneyItem.status === 'Sudah Pulang' ||
-      lastJourneyItem.status === 'Selesai' ||
-      lastJourneyItem.type === 'discharge'
-    )
-  );
+  const toggleEpisode = (epId, currentlyExpanded) => {
+    setExpandedEpisodes((prev) => ({ ...prev, [epId]: !currentlyExpanded }));
+  };
 
-  const isDischarged = activeEpisode
-    ? Boolean(
-        activeEpisode.status === 'Pulang' ||
-        activeEpisode.kondisiTerakhir === 'Pulang' ||
-        activeEpisode.kondisiTerakhir === 'Sudah Pulang'
-      )
-    : Boolean(
-        isLastJourneyDischarged ||
-        victim.kondisiTerakhir === 'Sudah Pulang' ||
-        victim.kondisiTerakhir === 'Pulang' ||
-        victim.kondisiTerakhir === 'Selesai' ||
-        victim.statusPemantauan === 'Selesai Dipantau' ||
-        victim.status_kondisi === 'Selesai' ||
-        victim.status_kondisi === 'Sudah Pulang' ||
-        victim.status_kondisi === 'Pulang'
-      );
-
+  const activeEpisode = episodesAsc.length > 0 ? episodesAsc[episodesAsc.length - 1] : null;
+  const isFinishedNow = isVictimFinished(victim);
+  const isDischarged = !isFinishedNow ? false : (activeEpisode?.statusEpisode === 'Selesai Pulang');
   const isDeceased = Boolean(
     victim.tanggalMeninggal ||
     victim.kondisiTerakhir === 'Meninggal Dunia' ||
@@ -979,11 +988,10 @@ export default function RiwayatPerawatanTimeline({
             <button
               type="button"
               onClick={() => setViewMode('timeline')}
-              className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
-                viewMode === 'timeline'
-                  ? 'bg-white text-[#145DA0] shadow-2xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
+              className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${viewMode === 'timeline'
+                ? 'bg-white text-[#145DA0] shadow-2xs'
+                : 'text-slate-600 hover:text-slate-900'
+                }`}
             >
               <GitCommit className="w-3.5 h-3.5" />
               <span>Timeline (Bead Line)</span>
@@ -991,11 +999,10 @@ export default function RiwayatPerawatanTimeline({
             <button
               type="button"
               onClick={() => setViewMode('table')}
-              className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${
-                viewMode === 'table'
-                  ? 'bg-white text-[#145DA0] shadow-2xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
+              className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap ${viewMode === 'table'
+                ? 'bg-white text-[#145DA0] shadow-2xs'
+                : 'text-slate-600 hover:text-slate-900'
+                }`}
             >
               <List className="w-3.5 h-3.5" />
               <span>Tabel Kunjungan</span>
@@ -1061,57 +1068,146 @@ export default function RiwayatPerawatanTimeline({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {journey.map((item, idx) => {
-                  const theme = BEAD_THEMES[item.type] || BEAD_THEMES.initial;
+                {episodesDesc.map((ep, epIdx) => {
+                  const expanded = isEpisodeExpanded(ep, epIdx);
+                  const epEvents = [
+                    ...(ep.kunjunganList || []).map((vis) => ({
+                      id: vis.id || vis.visitId,
+                      judul: `Kunjungan ke-${vis.nomorKunjunganEpisode}`,
+                      petugasNama: vis.petugasNama || ep.petugasNama,
+                      rumahSakit: vis.rumahSakit || ep.rumahSakit,
+                      tanggal: vis.waktuAktualKunjungan || vis.tanggalKunjungan || vis.tanggal,
+                      status: vis.kondisiKorban || 'Masih Dirawat',
+                      type: (vis.kondisiKorban === 'Sudah Pulang' || vis.kondisiKorban === 'Pulang' || vis.kondisiKorban === 'Selesai')
+                        ? 'discharge'
+                        : vis.kondisiKorban === 'Meninggal Dunia'
+                          ? 'deceased'
+                          : (vis.nomorKunjunganEpisode === 1 ? 'initial' : 'visit'),
+                      rawActivity: vis,
+                      _ts: parseDateToTimestamp(vis.waktuAktualKunjungan || vis.tanggalKunjungan || vis.tanggal)
+                    })),
+                    ...(ep.rujukanList || []).map((ref, rIdx) => ({
+                      id: `REF-${ep.id}-${rIdx}`,
+                      judul: `Rujukan ke ${ref.keRs}`,
+                      petugasNama: ref.petugasAsalNama || ep.petugasNama,
+                      rumahSakit: `${ref.dariRs} → ${ref.keRs}`,
+                      tanggal: ref.tanggal,
+                      status: `Dirujuk ke ${ref.keRs}`,
+                      type: 'referral',
+                      rawActivity: null,
+                      _ts: parseDateToTimestamp(ref.tanggal)
+                    })),
+                    ...(ep.nonVisitLogs || []).map((log, lIdx) => ({
+                      id: log.id || `LOG-${ep.id}-${lIdx}`,
+                      judul: log.jenisAktivitas || 'Catatan Status',
+                      petugasNama: log.petugasNama || ep.petugasNama,
+                      rumahSakit: log.rumahSakit || ep.rumahSakit,
+                      tanggal: log.tanggal,
+                      status: log.kondisiKorban || ep.statusEpisode,
+                      type: log.isReactivationLog ? 'readmit' : 'visit',
+                      rawActivity: null,
+                      _ts: parseDateToTimestamp(log.tanggal)
+                    }))
+                  ].sort((a, b) => b._ts - a._ts);
+
                   return (
-                    <tr key={item.id || idx} className="hover:bg-slate-50/70 transition-colors">
-                      <td className="py-3.5 px-4 font-mono text-slate-400 text-center font-medium">
-                        {String(item.nomor).padStart(2, '0')}
-                      </td>
-                      <td className="py-3.5 px-4 font-bold text-slate-900 whitespace-nowrap">
-                        <div>
-                          <span className="text-xs font-bold text-slate-900 block">{item.judul}</span>
-                          <span className="text-[10px] text-slate-400 font-normal block mt-0.5">
-                            {item.petugasNama ? `Petugas: ${item.petugasNama}` : 'Sistem Jasa Raharja'}
+                    <React.Fragment key={ep.id}>
+                      {/* Baris Header Episode dengan Panah Lipat di Kolom NO. */}
+                      <tr
+                        onClick={() => toggleEpisode(ep.id, expanded)}
+                        className={`cursor-pointer transition-colors ${ep.isAktif ? 'bg-sky-50/70 hover:bg-sky-50' : 'bg-slate-100/80 hover:bg-slate-100'}`}
+                      >
+                        <td className="py-3 px-4 text-center">
+                          <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-white border border-slate-200 text-slate-600 shadow-2xs">
+                            {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5 rotate-90" />}
                           </span>
-                        </div>
-                      </td>
-                      <td className="py-3.5 px-4 text-slate-800 font-medium whitespace-nowrap">
-                        <div className="flex items-center gap-1.5">
-                          <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                          <span>{item.rumahSakit}</span>
-                        </div>
-                      </td>
-                      <td className="py-3.5 px-4 text-slate-700 whitespace-nowrap">
-                        <span className="font-semibold text-slate-800 block text-xs">
-                          {formatDate(item.tanggal)}
-                        </span>
-                        <span className="text-[10px] text-slate-400 font-medium block">
-                          {formatTime(item.tanggal)}
-                        </span>
-                      </td>
-                      <td className="py-3.5 px-4 whitespace-nowrap">
-                        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-700">
-                          <span className={`w-2 h-2 rounded-full ${theme.dot}`} />
-                          <span>{item.status}</span>
-                        </span>
-                      </td>
-                      <td className="py-3.5 px-4 text-right whitespace-nowrap">
-                        {item.rawActivity && onSelectVisit ? (
-                          <button
-                            type="button"
-                            onClick={() => onSelectVisit(item.rawActivity)}
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors cursor-pointer"
-                            title="Buka rincian lengkap kunjungan ini (Read-Only)"
-                          >
-                            <Eye className="w-3.5 h-3.5" />
-                            <span>Detail</span>
-                          </button>
-                        ) : (
-                          <span className="text-[11px] text-slate-400 italic">Arsip Sistem</span>
-                        )}
-                      </td>
-                    </tr>
+                        </td>
+                        <td colSpan={2} className="py-3 px-4">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className={`text-[10px] font-extrabold uppercase tracking-wider px-2 py-0.5 rounded-full ${ep.isAktif ? 'bg-[#145DA0] text-white' : 'bg-slate-200 text-slate-700'}`}>
+                              {ep.labelPeriode}
+                            </span>
+                            <span className="text-xs font-bold text-slate-800">
+                              {ep.rumahSakitList.length > 1 ? ep.rumahSakitList.join(' → ') : ep.rumahSakit}
+                            </span>
+                            <span className="text-[11px] text-slate-500 font-medium">
+                              • {ep.totalKunjungan} Kunjungan
+                            </span>
+                          </div>
+                        </td>
+                        <td className="py-3 px-4 text-[11px] text-slate-600 whitespace-nowrap">
+                          Mulai: <strong>{formatDate(ep.tanggalMulai)}</strong>
+                          {!ep.isAktif && ep.tanggalSelesai ? ` · Selesai: ${formatDate(ep.tanggalSelesai)}` : ''}
+                        </td>
+                        <td className="py-3 px-4 whitespace-nowrap">
+                          <MonitoringStatusBadge status={ep.statusEpisode} size="xs" />
+                        </td>
+                        <td className="py-3 px-4 text-right text-[11px] font-semibold text-[#145DA0] whitespace-nowrap">
+                          {expanded ? 'Tutup' : 'Buka'}
+                        </td>
+                      </tr>
+
+                      {/* Baris Kunjungan di dalam Episode */}
+                      {expanded && (epEvents.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} className="py-4 px-4 text-center text-xs text-slate-500 italic bg-white">
+                            Belum ada kunjungan fisik tercatat pada episode ini.
+                          </td>
+                        </tr>
+                      ) : epEvents.map((item, idx) => {
+                        const theme = BEAD_THEMES[item.type] || BEAD_THEMES.initial;
+                        return (
+                          <tr key={item.id || idx} className="hover:bg-slate-50/70 transition-colors bg-white">
+                            <td className="py-3.5 px-4 font-mono text-slate-400 text-center font-medium">
+                              {String(idx + 1).padStart(2, '0')}
+                            </td>
+                            <td className="py-3.5 px-4 font-bold text-slate-900 whitespace-nowrap">
+                              <div>
+                                <span className="text-xs font-bold text-slate-900 block">{item.judul}</span>
+                                <span className="text-[10px] text-slate-400 font-normal block mt-0.5">
+                                  {item.petugasNama ? `Petugas: ${item.petugasNama}` : 'Sistem Jasa Raharja'}
+                                </span>
+                              </div>
+                            </td>
+                            <td className="py-3.5 px-4 text-slate-800 font-medium whitespace-nowrap">
+                              <div className="flex items-center gap-1.5">
+                                <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                                <span>{item.rumahSakit}</span>
+                              </div>
+                            </td>
+                            <td className="py-3.5 px-4 text-slate-700 whitespace-nowrap">
+                              <span className="font-semibold text-slate-800 block text-xs">
+                                {formatDate(item.tanggal)}
+                              </span>
+                              <span className="text-[10px] text-slate-400 font-medium block">
+                                {formatTime(item.tanggal)}
+                              </span>
+                            </td>
+                            <td className="py-3.5 px-4 whitespace-nowrap">
+                              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-700">
+                                <span className={`w-2 h-2 rounded-full ${theme.dot}`} />
+                                <span>{item.status}</span>
+                              </span>
+                            </td>
+                            <td className="py-3.5 px-4 text-right whitespace-nowrap">
+                              {item.rawActivity && onSelectVisit ? (
+                                <button
+                                  type="button"
+                                  onClick={() => onSelectVisit(item.rawActivity)}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors cursor-pointer"
+                                  title="Buka rincian lengkap kunjungan ini (Read-Only)"
+                                >
+                                  <Eye className="w-3.5 h-3.5" />
+                                  <span>Detail</span>
+                                </button>
+                              ) : (
+                                <span className="text-[11px] text-slate-400 italic">Arsip Sistem</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      }))}
+                    </React.Fragment>
                   );
                 })}
               </tbody>
@@ -1119,188 +1215,249 @@ export default function RiwayatPerawatanTimeline({
           </div>
         </div>
       ) : (
-        /* TAMPILAN BEAD LINE (TIMELINE DENGAN MANIK-MANIK BULAT) */
-        <div className="relative pl-11 sm:pl-14 space-y-5 pt-1">
-          {/* Continuous Vertical Spine Line (Garis penghubung manik-manik) */}
-          <div className="absolute left-[17px] sm:left-[21px] top-4 bottom-4 w-0.5 bg-slate-200" />
-
-          {journey.map((item) => {
-            const theme = BEAD_THEMES[item.type] || BEAD_THEMES.initial;
-
+        /* TAMPILAN KRONOLOGIS BERDASARKAN EPISODE PERAWATAN (TERBARU PALING ATAS) */
+        <div className="space-y-4">
+          {episodesDesc.map((ep, epIdx) => {
+            const expanded = isEpisodeExpanded(ep, epIdx);
+            const visitsDesc = [...(ep.kunjunganList || [])].reverse();
             return (
-              <div key={item.id} className="relative group">
-                {/* Bead (Manik-manik Bulat dengan Nomor Urut) */}
-                <div
-                  className={`absolute -left-11 sm:-left-14 top-1.5 w-9 h-9 sm:w-10 sm:h-10 rounded-full border-2 bg-white flex items-center justify-center font-black text-xs sm:text-sm z-10 transition-transform group-hover:scale-105 ${theme.bead}`}
+              <div
+                key={ep.id}
+                className={`rounded-2xl border overflow-hidden transition-all ${ep.isAktif
+                  ? 'border-sky-300 bg-white shadow-2xs'
+                  : 'border-slate-200 bg-slate-50/40'
+                  }`}
+              >
+                {/* Header Episode (Klik untuk buka/tutup riwayat episode sebelumnya) */}
+                <button
+                  type="button"
+                  onClick={() => toggleEpisode(ep.id, expanded)}
+                  className={`w-full text-left p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-colors cursor-pointer ${ep.isAktif ? 'bg-sky-50/50 hover:bg-sky-50/80' : 'bg-slate-100/70 hover:bg-slate-100'
+                    }`}
                 >
-                  {item.nomor}
-                </div>
-
-                {/* Card Konten Milestone */}
-                <div
-                  className={`rounded-xl border p-4 sm:p-4.5 shadow-2xs transition-all space-y-2.5 ${theme.card}`}
-                >
-                  {/* Baris 1: Judul Milestone, Status Ringkas, & Tombol Lihat Detail */}
-                  <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-2 border-b border-slate-100 pb-2.5">
-                    <div>
-                      <h3 className="text-sm font-bold text-slate-900 leading-snug">
-                        {item.judul}
-                      </h3>
-                      <div className="flex items-center gap-2 mt-1 text-xs text-slate-500 flex-wrap">
-                        <span className="font-semibold text-slate-700">{formatDateTime(item.tanggal)}</span>
-                        <span className="text-slate-300">•</span>
-                        <span className="flex items-center gap-1 text-slate-600">
-                          <Building2 className="w-3.5 h-3.5 text-slate-400" />
-                          <span>{item.rumahSakit}</span>
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className={`text-[11px] font-extrabold uppercase tracking-wider px-2.5 py-0.5 rounded-full ${ep.isAktif ? 'bg-[#145DA0] text-white' : 'bg-slate-200 text-slate-700'
+                        }`}>
+                        {ep.labelPeriode}
+                      </span>
+                      <MonitoringStatusBadge status={ep.statusEpisode} size="xs" />
+                      {ep.rujukanList.length > 0 && (
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-100 text-purple-800 border border-purple-200">
+                          Rujukan Antar-RS
                         </span>
-                        {item.petugasNama && (
-                          <>
-                            <span className="text-slate-300">•</span>
-                            <span className="flex items-center gap-1 text-slate-600">
-                              <User className="w-3.5 h-3.5 text-slate-400" />
-                              <span>{item.petugasNama}</span>
-                            </span>
-                          </>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 text-xs text-slate-700 font-semibold flex-wrap pt-0.5">
+                      <Building2 className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                      <span>{ep.rumahSakitList.length > 1 ? ep.rumahSakitList.join(' → ') : ep.rumahSakit}</span>
+                      <span className="text-slate-300">•</span>
+                      <User className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                      <span>{ep.petugasNama}</span>
+                      <span className="text-slate-300">•</span>
+                      <span>{ep.totalKunjungan} Kunjungan</span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3 self-start sm:self-center shrink-0">
+                    <div className="text-[11px] text-slate-600 text-left sm:text-right">
+                      <div>Mulai: <strong className="text-slate-800">{formatDate(ep.tanggalMulai)}</strong></div>
+                      <div>
+                        {ep.isAktif ? (
+                          <span className="text-sky-700 font-semibold">Masih Berlangsung</span>
+                        ) : (
+                          <span>Selesai: <strong className="text-slate-800">{formatDate(ep.tanggalSelesai)}</strong></span>
                         )}
                       </div>
                     </div>
-
-                    <div className="flex items-center gap-2.5 shrink-0 self-start sm:self-auto">
-                      {/* Status Ringkas Tanpa Badge Berlebihan */}
-                      <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-700">
-                        <span className={`w-2 h-2 rounded-full ${theme.dot}`} />
-                        <span>{item.status}</span>
-                      </span>
-
-                      {/* Tombol Lihat Detail (jika ada data kunjungan) */}
-                      {item.rawActivity && onSelectVisit && (
-                        <button
-                          type="button"
-                          onClick={() => onSelectVisit(item.rawActivity)}
-                          className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#145DA0] hover:text-[#0f497e] bg-slate-50 hover:bg-blue-50 border border-slate-200 px-2.5 py-1 rounded-lg transition-colors cursor-pointer"
-                          title="Buka rincian lengkap kunjungan ini (Read-Only)"
-                        >
-                          <Eye className="w-3.5 h-3.5" />
-                          <span>Lihat Detail</span>
-                        </button>
-                      )}
+                    <div className="p-1.5 rounded-lg bg-white border border-slate-200 text-slate-500">
+                      {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
                     </div>
                   </div>
+                </button>
 
-                  {/* Baris 2: Catatan / Keterangan Kejadian */}
-                  <p className="text-xs text-slate-600 leading-relaxed">
-                    {item.catatan}
-                  </p>
+                {expanded && (
+                  <div className="p-4 sm:p-5 space-y-4 border-t border-slate-200/80 bg-white">
+                    {/* Riwayat Rujukan dalam Episode Ini */}
+                    {ep.rujukanList.length > 0 && (
+                      <div className="space-y-2">
+                        {ep.rujukanList.map((ref, rIdx) => (
+                          <div key={rIdx} className="p-3 rounded-xl bg-purple-50/70 border border-purple-200 text-xs flex items-start gap-2.5">
+                            <ArrowUpRight className="w-4 h-4 text-purple-700 shrink-0 mt-0.5" />
+                            <div>
+                              <div className="font-bold text-purple-950">
+                                Rujukan: {ref.dariRs} → {ref.keRs}
+                              </div>
+                              <div className="text-[11px] text-purple-800 mt-0.5">
+                                {formatDateTime(ref.tanggal)}
+                                {ref.petugasAsalNama ? ` • Petugas Asal: ${ref.petugasAsalNama}` : ''}
+                                {ref.petugasTujuanNama ? ` • Petugas Tujuan: ${ref.petugasTujuanNama}` : ''}
+                              </div>
+                              {ref.catatan && <p className="text-[11px] text-purple-900 mt-1">{ref.catatan}</p>}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
 
-                  {/* Checklist Tindakan Ringkas (jika ada) */}
-                  {Array.isArray(item.tindakanList) && item.tindakanList.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5 pt-1">
-                      {item.tindakanList.map((action, i) => (
-                        <span
-                          key={i}
-                          className="inline-flex items-center gap-1 text-[11px] bg-slate-50 text-slate-600 border border-slate-200/80 px-2 py-0.5 rounded-md"
-                        >
-                          <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
-                          <span>{action}</span>
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                    {/* Log Non-Kunjungan (Aktivasi Ulang / Konfirmasi Tanpa Kunjungan) */}
+                    {ep.nonVisitLogs && ep.nonVisitLogs.length > 0 && (
+                      <div className="space-y-2">
+                        {ep.nonVisitLogs.map((log, lIdx) => (
+                          <div key={log.id || lIdx} className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs flex items-start justify-between gap-3">
+                            <div>
+                              <span className="font-bold text-slate-800 block">{log.jenisAktivitas || 'Catatan Status'}</span>
+                              <span className="text-[11px] text-slate-500 block">{formatDateTime(log.tanggal)} • {log.petugasNama}</span>
+                              {log.hasilKomunikasi && <p className="text-[11px] text-slate-700 mt-1">{log.hasilKomunikasi}</p>}
+                            </div>
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-200 text-slate-700 shrink-0">
+                              {log.kondisiKorban || 'Terkonfirmasi'}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Daftar Kunjungan Petugas dalam Episode Ini */}
+                    {visitsDesc.length === 0 ? (
+                      <div className="p-4 rounded-xl border border-dashed border-slate-200 bg-slate-50/50 text-center text-xs text-slate-500">
+                        Belum ada kunjungan fisik tercatat pada episode ini.
+                      </div>
+                    ) : (
+                      <div className="relative pl-10 sm:pl-12 space-y-4">
+                        <div className="absolute left-[15px] sm:left-[19px] top-3 bottom-3 w-0.5 bg-slate-200" />
+                        {visitsDesc.map((vis, vIdx) => {
+                          const visCond = vis.kondisiKorban || 'Masih Dirawat';
+                          const isDisch = visCond === 'Sudah Pulang' || visCond === 'Pulang' || visCond === 'Selesai';
+                          const isMd = visCond === 'Meninggal Dunia';
+                          const theme = isMd ? BEAD_THEMES.deceased : isDisch ? BEAD_THEMES.discharge : (vis.nomorKunjunganEpisode === 1 ? BEAD_THEMES.initial : BEAD_THEMES.visit);
+                          const visDate = vis.waktuAktualKunjungan || vis.tanggalKunjungan || vis.tanggal;
+
+                          return (
+                            <div key={vis.id || vis.visitId || vIdx} className="relative group">
+                              <div className={`absolute -left-10 sm:-left-12 top-1.5 w-8 h-8 sm:w-9 sm:h-9 rounded-full border-2 bg-white flex items-center justify-center font-black text-xs z-10 ${theme.bead}`}>
+                                {vis.nomorKunjunganEpisode}
+                              </div>
+                              <div className={`rounded-xl border p-3.5 sm:p-4 shadow-2xs space-y-2 ${theme.card}`}>
+                                <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-2 border-b border-slate-100 pb-2">
+                                  <div>
+                                    <h4 className="text-xs sm:text-sm font-bold text-slate-900">
+                                      Kunjungan ke-{vis.nomorKunjunganEpisode} di {vis.rumahSakit || ep.rumahSakit}
+                                    </h4>
+                                    <div className="flex items-center gap-2 mt-0.5 text-[11px] text-slate-500 flex-wrap">
+                                      <span className="font-semibold text-slate-700">{formatDateTime(visDate)}</span>
+                                      <span className="text-slate-300">•</span>
+                                      <span className="inline-flex items-center gap-1 text-slate-600">
+                                        <Building2 className="w-3 h-3 text-slate-400" />
+                                        <span>{vis.rumahSakit || ep.rumahSakit}</span>
+                                      </span>
+                                      <span className="text-slate-300">•</span>
+                                      <span className="inline-flex items-center gap-1 text-slate-600">
+                                        <User className="w-3 h-3 text-slate-400" />
+                                        <span>{vis.petugasNama || ep.petugasNama}</span>
+                                      </span>
+                                    </div>
+                                  </div>
+                                  <div className="flex items-center gap-2 shrink-0">
+                                    <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-700">
+                                      <span className={`w-2 h-2 rounded-full ${theme.dot}`} />
+                                      <span>{visCond}</span>
+                                    </span>
+                                    {onSelectVisit && (
+                                      <button
+                                        type="button"
+                                        onClick={() => onSelectVisit(vis)}
+                                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#145DA0] hover:text-[#0f497e] bg-slate-50 hover:bg-blue-50 border border-slate-200 px-2.5 py-1 rounded-lg transition-colors cursor-pointer"
+                                      >
+                                        <Eye className="w-3.5 h-3.5" />
+                                        <span>Lihat Detail</span>
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+
+                                {vis.cleanCatatan && !isNoteDuplicateOfActions(vis.cleanCatatan, vis.tindakanList) && (
+                                  <p className="text-xs text-slate-600 leading-relaxed">{vis.cleanCatatan}</p>
+                                )}
+
+                                {Array.isArray(vis.tindakanList) && vis.tindakanList.length > 0 && (
+                                  <div className="flex flex-wrap gap-1.5 pt-0.5">
+                                    {vis.tindakanList.map((action, i) => (
+                                      <span key={i} className="inline-flex items-center gap-1 text-[11px] bg-slate-50 text-slate-600 border border-slate-200/80 px-2 py-0.5 rounded-md">
+                                        <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
+                                        <span>{action}</span>
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* Banner Jadwal Berikutnya hanya pada Episode Aktif */}
+                    {ep.isAktif && !isFinishedNow && monitoringSla && !monitoringSla.isCompleted && monitoringSla.needed !== false && (
+                      <div className="rounded-xl border border-blue-200 bg-blue-50/30 p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="text-xs">
+                          <span className="font-bold text-slate-900">Jadwal Pemantauan Berkala Berikutnya</span>
+                          <p className="text-slate-600 mt-0.5">
+                            Batas waktu 3 hari:{' '}
+                            <strong className={monitoringSla.isOverdue ? 'text-rose-600' : 'text-slate-800'}>
+                              {formatDateTime(monitoringSla.dueDate)}
+                            </strong>{' '}
+                            ({monitoringSla.description || 'Dalam batas waktu'})
+                          </p>
+                        </div>
+                        {onOpenMonitoringModal && (
+                          <button
+                            type="button"
+                            onClick={onOpenMonitoringModal}
+                            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-[#145DA0] hover:bg-[#0f497e] text-white shadow-2xs transition-colors shrink-0 cursor-pointer"
+                          >
+                            <Activity className="w-3.5 h-3.5" />
+                            <span>+ Catat Kunjungan ke-{ep.totalKunjungan + 1}</span>
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Ringkasan Penutupan Episode (Pulang / MD / Tolak JR) */}
+                    {!ep.isAktif && (
+                      <div className={`rounded-xl border p-3.5 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${ep.statusEpisode === 'Selesai MD'
+                        ? 'bg-rose-50/60 border-rose-200 text-rose-900'
+                        : ep.statusEpisode === 'Selesai Tidak Bersedia'
+                          ? 'bg-stone-100 border-stone-300 text-stone-800'
+                          : 'bg-emerald-50/50 border-emerald-200 text-emerald-900'
+                        }`}>
+                        <div>
+                          <span className="font-bold block">
+                            {ep.statusEpisode === 'Selesai MD'
+                              ? `Episode Berakhir: Meninggal Dunia (${formatDate(ep.tanggalSelesai)}${ep.jamMeninggal ? `, ${ep.jamMeninggal} WIB` : ''})`
+                              : ep.statusEpisode === 'Selesai Tidak Bersedia'
+                                ? `Episode Berakhir: Tidak Bersedia Jaminan JR (${formatDate(ep.tanggalSelesai)})`
+                                : `Episode Berakhir: Selesai Pulang (${formatDate(ep.tanggalSelesai)})`}
+                          </span>
+                          {ep.keteranganSelesai && <p className="text-[11px] mt-0.5 opacity-90">{ep.keteranganSelesai}</p>}
+                        </div>
+                        {ep.statusEpisode === 'Selesai Pulang' && epIdx === 0 && onOpenTransitionModal && (
+                          <button
+                            type="button"
+                            onClick={() => onOpenTransitionModal('RAWAT_LANJUTAN')}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold bg-sky-600 hover:bg-sky-700 text-white shadow-2xs transition-colors shrink-0 cursor-pointer self-start sm:self-center"
+                          >
+                            <PlusCircle className="w-3.5 h-3.5" />
+                            <span>Kembali Berobat (Buat Episode Baru)</span>
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             );
           })}
-
-          {/* Kondisi 1: Pasien Masih Dalam Perawatan Aktif (Tampilkan Jadwal Pemantauan Berikutnya) */}
-          {!isDischarged && !isDeceased && !victim.statusPemantauan?.startsWith('Dirujuk') && monitoringSla && !monitoringSla.isCompleted && monitoringSla.needed !== false && (
-            <div className="relative group pt-1">
-              {/* Bead Berikutnya (Garis Putus-Putus) */}
-              <div className="absolute -left-11 sm:-left-14 top-2 w-9 h-9 sm:w-10 sm:h-10 rounded-full border-2 border-dashed border-[#145DA0] bg-blue-50/70 text-[#145DA0] flex items-center justify-center font-bold text-xs sm:text-sm z-10 shadow-xs">
-                {journey.length + 1}
-              </div>
-
-              <div className="rounded-xl border border-blue-200 bg-blue-50/30 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h4 className="text-xs font-bold text-slate-900">
-                      Jadwal Pemantauan Berkala di {rsSaatIni}
-                    </h4>
-                    <span className="text-[10px] font-semibold text-[#145DA0] bg-blue-100/70 px-2 py-0.5 rounded-full">
-                      Menunggu Pelaksanaan
-                    </span>
-                  </div>
-                  <p className="text-xs text-slate-600 mt-1">
-                    Batas waktu kunjungan 3 hari:{' '}
-                    <strong className={monitoringSla.isOverdue ? 'text-rose-600 font-bold' : 'text-slate-800'}>
-                      {formatDateTime(monitoringSla.dueDate)}
-                    </strong>{' '}
-                    ({monitoringSla.description || 'Dalam batas waktu'}).
-                  </p>
-                </div>
-
-                {onOpenMonitoringModal && (
-                  <button
-                    type="button"
-                    onClick={onOpenMonitoringModal}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-[#145DA0] hover:bg-[#0f497e] text-white shadow-2xs transition-colors shrink-0 cursor-pointer self-start sm:self-auto"
-                  >
-                    <Activity className="w-3.5 h-3.5" />
-                    <span>+ Catat Pemantauan Hari Ini</span>
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* Kondisi 2: Pasien Sudah Pulang (Pemantauan Selesai, Tidak Ada Jadwal Lanjutan, Menunggu Berkas) */}
-          {isDischarged && (
-            <div className="relative group pt-1">
-              <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
-                <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
-                    <CheckCircle2 className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-slate-900">
-                      Proses Pemantauan di Rumah Sakit Telah Selesai
-                    </h4>
-                    <p className="text-xs text-slate-600 mt-0.5">
-                      Pasien telah dinyatakan pulang. Petugas hanya menunggu kelengkapan berkas dari rumah sakit apabila masih ada dokumen yang belum diterima.
-                    </p>
-                  </div>
-                </div>
-                <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-800 bg-white border border-emerald-200 px-3 py-1.5 rounded-full shrink-0 self-start sm:self-auto">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-                  <span>Selesai / Menunggu Berkas</span>
-                </span>
-              </div>
-            </div>
-          )}
-
-          {/* Kondisi 3: Korban Meninggal Dunia (Pemantauan Selesai Secara Permanen) */}
-          {isDeceased && (
-            <div className="relative group pt-1">
-              <div className="rounded-xl border border-red-200 bg-red-50/50 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
-                <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 rounded-full bg-red-100 text-red-700 flex items-center justify-center shrink-0">
-                    <AlertOctagon className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-red-950">
-                      Pemantauan Klinis Berakhir (Korban Meninggal Dunia)
-                    </h4>
-                    <p className="text-xs text-red-800 mt-0.5">
-                      Status akhir korban telah tercatat sebagai Meninggal Dunia. Seluruh riwayat kunjungan tersimpan permanen dan pemantauan aktif dihentikan.
-                    </p>
-                  </div>
-                </div>
-                <span className="inline-flex items-center gap-1.5 text-xs font-bold text-red-800 bg-white border border-red-200 px-3 py-1.5 rounded-full shrink-0 self-start sm:self-auto">
-                  <span className="w-2 h-2 rounded-full bg-red-500"></span>
-                  <span>MD / Selesai Dipantau</span>
-                </span>
-              </div>
-            </div>
-          )}
         </div>
       )}
     </div>

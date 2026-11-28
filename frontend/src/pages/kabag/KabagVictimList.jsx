@@ -1,19 +1,27 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useState, useEffect, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import { storageService } from '../../services/storageService';
 import {
   calculateFirstVisitSla,
   calculateMonitoringSla,
-  getVictimDeadline,
   compareVictimsBySlaPriority
 } from '../../services/slaService';
-import { isVictimFinished } from '../../utils/monitoringStatus';
-import { formatDateIndo } from '../../utils/dateUtils';
+import {
+  MONITORING_STATUS,
+  getMonitoringStatus,
+  getCompletionReason,
+  isVictimFinished,
+  isPenolakanJaminanVictim,
+  isPulangVictim,
+  isDeceasedVictim
+} from '../../utils/monitoringStatus';
+import MonitoringStatusBadge from '../../components/common/MonitoringStatusBadge';
+import { formatDateIndo as formatDateShort } from '../../utils/dateUtils';
 import { getReferralPerspectiveInfo, matchesHospitalFilter } from '../../utils/referralUtils';
+import { exportVictimsExcelByOfficer } from '../../services/excelReportService';
 import VictimDetailDrawer from '../../components/kabag/VictimDetailDrawer';
 import {
   Search,
-  Filter,
   ChevronLeft,
   ChevronRight,
   Building2,
@@ -28,19 +36,8 @@ import {
   AlertTriangle,
   AlertCircle,
   User,
-  ArrowUpDown
+  FileSpreadsheet
 } from 'lucide-react';
-
-function formatDateShort(dateStr) {
-  return formatDateIndo(dateStr);
-}
-
-function getInitials(name) {
-  if (!name) return '??';
-  const parts = name.trim().split(/\s+/);
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[1][0]).toUpperCase();
-}
 
 const PAGE_SIZE = 8;
 
@@ -120,34 +117,6 @@ export default function KabagVictimList() {
     return { total, masihDirawat, selesaiPulang, rujukan, meninggal };
   }, [victims]);
 
-  // Helper evaluasi urgensi SLA: Terlambat = Tier 1 (Paling Atas), Mendekati = Tier 2
-  const getSlaUrgencyTier = (v, now = new Date()) => {
-    const isDone = isVictimFinished(v);
-
-    if (isDone) return { tier: 5, hoursRemaining: Infinity };
-
-    const firstVisitPending = !v.kunjunganPertama && (!v.riwayatKunjungan || v.riwayatKunjungan.length === 0);
-    if (firstVisitPending) {
-      const fSla = calculateFirstVisitSla(v.tanggalInformasiDiterima, v.kunjunganPertama, now);
-      if (fSla.isOverdue) {
-        return { tier: 1, hoursRemaining: -(Math.abs(fSla.diffHours) || 1) }; // Terlambat -> Tier 1 (PALING ATAS)
-      }
-      if (fSla.isWarning) {
-        return { tier: 2, hoursRemaining: fSla.diffHours || 1 }; // Mendekati tenggat -> Tier 2
-      }
-      return { tier: 3, hoursRemaining: fSla.diffHours || 72 };
-    }
-
-    const mSla = calculateMonitoringSla(v, now);
-    if (mSla.isOverdue) {
-      return { tier: 1, hoursRemaining: -(mSla.elapsedHours || 1) }; // Terlambat -> Tier 1 (PALING ATAS)
-    }
-    if (mSla.isWarning) {
-      return { tier: 2, hoursRemaining: mSla.hoursRemaining || 1 }; // Mendekati tenggat -> Tier 2
-    }
-    return { tier: 4, hoursRemaining: mSla.hoursRemaining || 72 };
-  };
-
   // Filtered & Sorted
   const filteredAndSorted = useMemo(() => {
     const now = new Date();
@@ -180,16 +149,16 @@ export default function KabagVictimList() {
       }
 
       if (monitoringStatusFilter !== 'ALL') {
-        const isDone =
-          v.kondisiTerakhir === 'Sudah Pulang' ||
-          v.kondisiTerakhir === 'Pulang' ||
-          v.kondisiTerakhir === 'Selesai' ||
-          v.statusPemantauan === 'Selesai Dipantau';
-        const isPending = !v.kunjunganPertama && (!v.riwayatKunjungan || v.riwayatKunjungan.length === 0);
-
-        if (monitoringStatusFilter === 'SELESAI' && !isDone) return false;
-        if (monitoringStatusFilter === 'BELUM' && !isPending) return false;
-        if (monitoringStatusFilter === 'AKTIF' && (isDone || isPending)) return false;
+        const stOfficial = getMonitoringStatus(v);
+        if (monitoringStatusFilter === 'SELESAI') {
+          if (!isVictimFinished(v)) return false;
+        } else if (monitoringStatusFilter === 'BELUM') {
+          if (stOfficial !== MONITORING_STATUS.BELUM_DIPANTAU) return false;
+        } else if (monitoringStatusFilter === 'AKTIF') {
+          if (stOfficial !== MONITORING_STATUS.DALAM_PEMANTAUAN) return false;
+        } else if (stOfficial !== monitoringStatusFilter) {
+          return false;
+        }
       }
 
       return true;
@@ -267,6 +236,15 @@ export default function KabagVictimList() {
   };
 
   const renderStatusBadge = (v) => {
+    if (isPenolakanJaminanVictim(v)) {
+      return (
+        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-stone-800 bg-stone-100 px-2.5 py-1 rounded-full border border-stone-300">
+          <span className="w-1.5 h-1.5 rounded-full bg-stone-500"></span>
+          <span>Tidak Bersedia Jaminan JR</span>
+        </span>
+      );
+    }
+
     const isDischarged =
       v.kondisiTerakhir === 'Sudah Pulang' ||
       v.kondisiTerakhir === 'Pulang' ||
@@ -318,59 +296,30 @@ export default function KabagVictimList() {
   };
 
   const renderMonitoringStatus = (v) => {
-    const isDone =
-      v.kondisiTerakhir === 'Sudah Pulang' ||
-      v.kondisiTerakhir === 'Pulang' ||
-      v.kondisiTerakhir === 'Selesai' ||
-      v.kondisiTerakhir === 'Meninggal Dunia' ||
-      v.statusPemantauan === 'Selesai Dipantau';
-    const isPending = !v.kunjunganPertama && (!v.riwayatKunjungan || v.riwayatKunjungan.length === 0);
-
     const now = new Date();
+    const completionReason = getCompletionReason(v);
     const fSla = calculateFirstVisitSla(v.tanggalInformasiDiterima, v.kunjunganPertama, now);
     const mSla = calculateMonitoringSla(v, now);
 
-    if (isDone) {
-      return (
-        <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-500">
-          <CheckCircle2 className="w-3.5 h-3.5 text-slate-400" />
-          <span>Selesai Dipantau</span>
-        </span>
-      );
-    }
-
-    if (fSla.isWarning || mSla.isWarning) {
-      return (
-        <span className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200">
-          <Clock className="w-3.5 h-3.5 text-amber-600 animate-pulse" />
-          <span>Mendekati Tenggat SLA</span>
-        </span>
-      );
-    }
-
-    if (fSla.isOverdue || mSla.isOverdue) {
-      return (
-        <span className="inline-flex items-center gap-1 text-[11px] font-bold text-rose-700 bg-rose-50 px-2 py-0.5 rounded-md border border-rose-200">
-          <AlertTriangle className="w-3.5 h-3.5 text-rose-600" />
-          <span>Melewati Batas SLA</span>
-        </span>
-      );
-    }
-
-    if (isPending) {
-      return (
-        <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-blue-700">
-          <Clock className="w-3.5 h-3.5 text-blue-500" />
-          <span>Menunggu Kunjungan Awal</span>
-        </span>
-      );
-    }
-
     return (
-      <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700">
-        <HeartPulse className="w-3.5 h-3.5 text-emerald-600" />
-        <span>Pemantauan Rutin Aktif</span>
-      </span>
+      <div className="space-y-1">
+        <MonitoringStatusBadge victim={v} size="xs" />
+        {completionReason ? (
+          <span className="block text-[10px] text-slate-500 max-w-[200px] whitespace-normal leading-snug">
+            {completionReason.detail}
+          </span>
+        ) : (fSla.isOverdue || mSla.isOverdue) ? (
+          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-rose-700">
+            <AlertTriangle className="w-3 h-3 text-rose-600" />
+            <span>SLA Terlambat</span>
+          </span>
+        ) : (fSla.isWarning || mSla.isWarning) ? (
+          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-700">
+            <Clock className="w-3 h-3 text-amber-600" />
+            <span>Mendekati Tenggat SLA</span>
+          </span>
+        ) : null}
+      </div>
     );
   };
 
@@ -388,6 +337,29 @@ export default function KabagVictimList() {
         </div>
 
         <div className="flex items-center gap-2 self-start sm:self-auto">
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                await exportVictimsExcelByOfficer({
+                  victims: filteredAndSorted,
+                  officers:
+                    officerFilter === 'ALL'
+                      ? officers
+                      : officers.filter((o) => String(o.id) === String(officerFilter)),
+                  fileNamePrefix: 'Laporan_Daftar_Korban_Kabag'
+                });
+              } catch (err) {
+                console.error('Gagal download Excel Kabag:', err);
+                alert(err?.message || 'Gagal mengunduh laporan Excel.');
+              }
+            }}
+            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-2xs transition-colors cursor-pointer"
+          >
+            <FileSpreadsheet className="w-3.5 h-3.5" />
+            <span>Download Excel</span>
+          </button>
+
           <button
             type="button"
             onClick={loadData}
@@ -609,7 +581,6 @@ export default function KabagVictimList() {
               ) : (
                 paginatedData.map((v, idx) => {
                   const number = String((currentPage - 1) * PAGE_SIZE + idx + 1).padStart(2, '0');
-                  const initials = getInitials(v.nama);
                   const officerInfo = getOfficerInfo(v);
                   const refInfo = getReferralPerspectiveInfo(v, hospitalFilter);
 
@@ -645,7 +616,7 @@ export default function KabagVictimList() {
                       <td className="py-3.5 px-4 font-semibold text-slate-800 whitespace-nowrap">
                         <div className="flex items-center gap-1.5">
                           <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                          <span>{refInfo.displayHospital}</span>
+                          <span>{v.rumahSakit || refInfo.displayHospital}</span>
                         </div>
                         {v.alamatRs && (
                           <span className="text-[10px] text-slate-400 block truncate max-w-[180px] mt-0.5">
@@ -728,7 +699,6 @@ export default function KabagVictimList() {
           ) : (
             paginatedData.map((v, idx) => {
               const number = String((currentPage - 1) * PAGE_SIZE + idx + 1).padStart(2, '0');
-              const initials = getInitials(v.nama);
               const officerInfo = getOfficerInfo(v);
               const refInfo = getReferralPerspectiveInfo(v, hospitalFilter);
 

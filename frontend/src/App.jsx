@@ -166,6 +166,14 @@ export default function App() {
                 }
               />
               <Route
+                path="/kabag/korban/:id"
+                element={
+                  <ProtectedRoute requiredRole="kabag">
+                    <PetugasVictimDetail />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
                 path="/kabag/monitoring"
                 element={
                   <ProtectedRoute requiredRole="kabag">
@@ -219,5 +227,3 @@ export default function App() {
     </ErrorBoundary>
   );
 }
-
-

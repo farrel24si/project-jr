@@ -3,11 +3,11 @@ import {
   mapBackendCaseToVictim,
   normalizeStatusToBackend,
   dataUrlToFile,
-  parseDateToTimestamp
+  parseDateToTimestamp,
+  resolvePhotoUrl
 } from './backendMapper.js';
 import { cachePhoto, getCachedPhoto } from './photoService.js';
 import { getMonitoringStatus, isVictimFinished as isVictimFinishedUtil, MONITORING_STATUS } from '../utils/monitoringStatus.js';
-import { getRealVisitPhoto } from '../utils/realPhotos.js';
 import {
   INITIAL_OFFICERS,
   INITIAL_VICTIMS,
@@ -179,10 +179,10 @@ function safeRemoveItem(key) {
 /**
  * Sanitize photo URL: ensure external broken/blocked CDN URLs fallback to local verified assets
  */
-function sanitizePhotoUrl(url, seed = 0) {
+function sanitizePhotoUrl(url) {
   if (!url) return null;
-  if (typeof url === 'string' && (url.includes('images.unsplash.com') || url.includes('unsplash.com') || url.includes('default-visit-photo') || url.includes('.svg'))) {
-    return getRealVisitPhoto(seed || url);
+  if (typeof url === 'string' && (url.includes('images.unsplash.com') || url.includes('unsplash.com') || url.includes('default-visit-photo') || url.includes('.svg') || url.includes('/img/visits/'))) {
+    return null;
   }
   return url;
 }
@@ -332,13 +332,12 @@ function normalizeVictim(rawVictim) {
     v.tanggalMasukRs = v.tanggalInformasiDiterima || v.tanggalKecelakaan || new Date().toISOString();
   }
 
-  // Evaluasi 4 Kategori Status Pemantauan Resmi secara otomatis
+  // Evaluasi 5 Kategori Status Pemantauan Resmi secara otomatis
   v.statusPemantauan = getMonitoringStatus(v);
 
   const isVictimFinished = isVictimFinishedUtil(v);
 
   if (isVictimFinished) {
-    v.statusPemantauan = MONITORING_STATUS.SELESAI;
     v.jadwalPemantauanBerikutnya = null;
     v.activePendingVisit = null;
     v.activeVisitId = null;
@@ -518,22 +517,6 @@ function normalizeVictim(rawVictim) {
     }
   }
 
-  // Sanitasi rujukan: pastikan RS Asal dan RS Tujuan akurat (contoh: pasien dari RS Tabrani dipindahkan ke RS Syafira)
-  const vNotes = `${v.nama || ''} ${v.catatanKondisi || ''} ${v.keterangan || ''}`.toLowerCase();
-  if (vNotes.includes('yui') || (v.rumahSakitAsal && v.rumahSakitAsal.toLowerCase().includes('syafira') && (v.rumahSakit || '').toLowerCase().includes('tabrani'))) {
-    v.rumahSakitAsal = 'RS Tabrani Rab';
-    v.rumahSakitTujuan = 'RS Syafira Pekanbaru';
-    v.rumahSakit = 'RS Syafira Pekanbaru';
-    if (Array.isArray(v.riwayatRujukan) && v.riwayatRujukan.length > 0) {
-      v.riwayatRujukan = v.riwayatRujukan.map((r) => ({
-        ...r,
-        dariRs: 'RS Tabrani Rab',
-        keRs: 'RS Syafira Pekanbaru',
-        status: 'Dirujuk ke RS Syafira Pekanbaru'
-      }));
-    }
-  }
-
   const readmissionThreshold = v.tanggalMasukTerbaru
     ? parseDateToTimestamp(v.tanggalMasukTerbaru)
     : (v.tanggalPulangSebelumnya ? parseDateToTimestamp(v.tanggalPulangSebelumnya) : 0);
@@ -668,26 +651,10 @@ export function linkAndDeduplicateVictims(victimList) {
         return true;
       }
 
-      // 2. Kecocokan NIK Sah (1 NIK = 1 Warga Negara / 1 Korban)
+      // 2. Kecocokan NIK Sah (1 NIK = 1 Warga Negara / 1 Korban — lintas RS baik rujukan maupun rawat ulang mandiri)
       const existingNik = (existing.nik || '').replace(/\D/g, '');
       if (cleanNik.length >= 6 && existingNik.length >= 6 && cleanNik === existingNik) {
-        const sameHospital = normalizeHospitalName(existing.rumahSakit) === normalizeHospitalName(item.rumahSakit);
-        const hasReferral = Boolean(
-          (Array.isArray(item.riwayatRujukan) && item.riwayatRujukan.length > 0) ||
-          (Array.isArray(existing.riwayatRujukan) && existing.riwayatRujukan.length > 0) ||
-          (Array.isArray(item.referrals) && item.referrals.length > 0) ||
-          (Array.isArray(existing.referrals) && existing.referrals.length > 0) ||
-          item.status_kondisi?.startsWith('Dirujuk') ||
-          existing.status_kondisi?.startsWith('Dirujuk') ||
-          item.statusPerawatan === 'Rujukan' ||
-          existing.statusPerawatan === 'Rujukan' ||
-          item.statusPerawatan === 'Rujukan Diterima' ||
-          existing.statusPerawatan === 'Rujukan Diterima'
-        );
-        // HANYA satukan jika di rumah sakit yang sama ATAU ada rujukan resmi
-        if (sameHospital || hasReferral) {
-          return true;
-        }
+        return true;
       }
 
       // 3. Kecocokan Nama Lengkap (Harus Sama Persis)
@@ -809,6 +776,7 @@ export function linkAndDeduplicateVictims(victimList) {
 
       target.statusPerawatan = 'Rawat Lanjutan';
       target.isRawatLanjutan = true;
+      target.isReactivated = !isItemDischarged;
       target.rawatLanjutanDariPulang = isEarlierDischarged;
       target.isRujukanMasuk = false;
       target.rujukanAccepted = false;
@@ -843,7 +811,9 @@ export function linkAndDeduplicateVictims(victimList) {
       } else {
         target.kondisiTerakhir = item.kondisiTerakhir || item.status_kondisi || 'Sedang Dirawat';
         target.status_kondisi = item.status_kondisi || item.kondisiTerakhir || 'Sedang Dirawat';
-        target.statusPemantauan = (item.tugasMenunggu > 0 || item.activePendingVisit) ? 'Pemantauan Aktif' : (item.statusPemantauan || 'Pemantauan Aktif');
+        target.statusPemantauan = (item.riwayatKunjungan && item.riwayatKunjungan.length > 0)
+          ? MONITORING_STATUS.DALAM_PEMANTAUAN
+          : MONITORING_STATUS.BELUM_DIPANTAU;
         target.statusTindakLanjut = 'Masih Perlu Ditindaklanjuti';
         target.tindakLanjut = item.tindakLanjut || 'Pemantauan berkala pasien rawat lanjutan';
         target.activePendingVisit = item.activePendingVisit || null;
@@ -956,17 +926,49 @@ export function linkAndDeduplicateVictims(victimList) {
 
       const earlierActs = (target.riwayatAktivitas || []).map((a) => ({
         ...a,
+        episodeNumber: a.episodeNumber || 1,
         rumahSakit: a.rumahSakit || hospitalEarlier,
-        kondisiKorban: isEarlierDischarged ? 'Pulang' : a.kondisiKorban,
+        kondisiKorban: a.kondisiKorban || (isEarlierDischarged ? 'Pulang' : undefined),
         isReadOnly: true
       }));
+
+      const maxEarlierTs = earlierActs.reduce((mx, a) => {
+        const ts = parseDateToTimestamp(a.waktuAktualKunjungan || a.tanggalKunjungan || a.tanggal || 0);
+        return ts > mx ? ts : mx;
+      }, 0);
+      const rawLaterStart = item.waktu_lapor_wa || item.tanggalInformasiDiterima || admissionDate;
+      const rawLaterTs = parseDateToTimestamp(rawLaterStart);
+      const effectiveReactivateIso = (maxEarlierTs > 0 && rawLaterTs <= maxEarlierTs)
+        ? new Date(maxEarlierTs + 1000).toISOString()
+        : (rawLaterTs > 0 ? new Date(rawLaterTs).toISOString() : new Date().toISOString());
+
+      const nextEpNum = earlierActs.reduce((mx, a) => Math.max(mx, Number(a.episodeNumber) || 1), 1) + 1;
+      const reactivateLogId = `ACT-REACTIVATE-${item.caseId || item.id}`;
+      const reactivateBoundaryLog = {
+        id: reactivateLogId,
+        victimId: target.id,
+        episodeNumber: nextEpNum,
+        jenisAktivitas: 'Aktivasi Pemantauan Kembali (Rawat Lanjutan)',
+        isNonVisitConfirmation: true,
+        isReactivationLog: true,
+        tanggal: effectiveReactivateIso,
+        tanggalKunjungan: effectiveReactivateIso,
+        waktuAktualKunjungan: effectiveReactivateIso,
+        rumahSakit: hospitalLater,
+        kondisiKorban: item.kondisiTerakhir || item.status_kondisi || 'Rawat Inap',
+        petugasId: item.petugasId,
+        petugasNama: item.namaPetugas,
+        hasilKomunikasi: target.catatanRawatLanjutan
+      };
+
       const laterActs = (item.riwayatAktivitas || []).map((a) => ({
         ...a,
+        episodeNumber: nextEpNum,
         rumahSakit: a.rumahSakit || hospitalLater,
         kondisiKorban: isItemDischarged ? 'Pulang' : (a.kondisiKorban || target.kondisiTerakhir)
       }));
 
-      const combinedActivities = [...laterActs, ...earlierActs];
+      const combinedActivities = [...laterActs, reactivateBoundaryLog, ...earlierActs];
       const actMap = new Map();
       combinedActivities.forEach((act) => {
         if (act && (act.id || act.visitId) && !actMap.has(act.id || act.visitId)) {
@@ -1107,7 +1109,7 @@ export const storageService = {
           if (existing) {
             // Jika backend memiliki foto bukti resmi, SELALU utamakan foto resmi backend!
             if (mapped.kunjunganPertama?.foto_bukti_url) {
-              mapped.kunjunganPertama.fotoUrl = mapped.kunjunganPertama.foto_bukti_url;
+              mapped.kunjunganPertama.fotoUrl = resolvePhotoUrl(mapped.kunjunganPertama.foto_bukti_url);
             } else if (existing.kunjunganPertama?.fotoUrl && (existing.kunjunganPertama.fotoUrl.startsWith('data:') || existing.kunjunganPertama.fotoUrl.startsWith('blob:'))) {
               mapped.kunjunganPertama.fotoUrl = existing.kunjunganPertama.fotoUrl;
             }
@@ -1117,7 +1119,7 @@ export const storageService = {
                 const eAct = existing.riwayatAktivitas.find((a) => a.id === mAct.id || a.visitId === mAct.visitId);
                 // Jika backend memiliki foto bukti resmi, SELALU gunakan foto resmi backend!
                 if (mAct.foto_bukti_url) {
-                  mAct.fotoUrl = mAct.foto_bukti_url;
+                  mAct.fotoUrl = resolvePhotoUrl(mAct.foto_bukti_url);
                 } else if (eAct && eAct.fotoUrl && (eAct.fotoUrl.startsWith('data:') || eAct.fotoUrl.startsWith('blob:'))) {
                   mAct.fotoUrl = eAct.fotoUrl;
                 }
@@ -1147,7 +1149,7 @@ export const storageService = {
               mapped.waktuPencatatanMD = existing.waktuPencatatanMD || mapped.waktuPencatatanMD || new Date().toISOString();
               mapped.kondisiTerakhir = 'Meninggal Dunia';
               mapped.status_kondisi = 'Meninggal Dunia';
-              mapped.statusPemantauan = 'Selesai Dipantau';
+              mapped.statusPemantauan = MONITORING_STATUS.SELESAI_MD;
               mapped.statusPerawatan = 'Meninggal Dunia';
               mapped.jadwalPemantauanBerikutnya = null;
 
@@ -1171,6 +1173,49 @@ export const storageService = {
                 mapped.jamMeninggal = '12:00';
               }
             }
+
+            // Selalu pertahankan aktivitas/kunjungan lokal yang belum ada di backend (MON-, ACT-, CONF-, aktivasi ulang)
+            const localOnlyActs = (existing.riwayatAktivitas || []).filter((a) =>
+              a?.isReactivationLog ||
+              a?.isNonVisitConfirmation ||
+              String(a?.id || '').startsWith('MON-') ||
+              String(a?.id || '').startsWith('ACT-') ||
+              String(a?.id || '').startsWith('CONF-')
+            );
+            if (localOnlyActs.length > 0) {
+              const existingIds = new Set((mapped.riwayatAktivitas || []).map((a) => a.id));
+              mapped.riwayatAktivitas = [
+                ...localOnlyActs.filter((a) => !existingIds.has(a.id)),
+                ...(mapped.riwayatAktivitas || [])
+              ];
+            }
+
+            // Pertahankan konfirmasi kondisi non-kunjungan (Pulang / Tolak Jaminan JR) atau aktivasi ulang Rawat Lanjutan lokal
+            if (existing.isNonVisitConfirmation && !hasMdStatus) {
+              mapped.isNonVisitConfirmation = true;
+              mapped.kondisiTerakhir = existing.kondisiTerakhir;
+              mapped.status_kondisi = existing.status_kondisi;
+              mapped.statusPemantauan = existing.statusPemantauan;
+              mapped.status_pemantauan = existing.status_pemantauan;
+              mapped.statusPerawatan = existing.statusPerawatan;
+              if (existing.tanggalPulang) mapped.tanggalPulang = existing.tanggalPulang;
+              if (existing.keteranganPulang) mapped.keteranganPulang = existing.keteranganPulang;
+              if (existing.isPenolakanJaminanJR) {
+                mapped.isPenolakanJaminanJR = true;
+                mapped.tanggalPenolakanJaminan = existing.tanggalPenolakanJaminan;
+                mapped.keteranganPenolakanJaminan = existing.keteranganPenolakanJaminan;
+              }
+            } else if (existing.isReactivated && !hasMdStatus) {
+              mapped.isReactivated = true;
+              mapped.kondisiTerakhir = existing.kondisiTerakhir || 'Rawat Inap';
+              mapped.status_kondisi = existing.status_kondisi || 'Rawat Inap';
+              mapped.statusPerawatan = existing.statusPerawatan || 'Rawat Lanjutan';
+              mapped.statusPemantauan = MONITORING_STATUS.BELUM_DIPANTAU;
+              mapped.status_pemantauan = MONITORING_STATUS.BELUM_DIPANTAU;
+              if (existing.tanggalPulangSebelumnya) mapped.tanggalPulangSebelumnya = existing.tanggalPulangSebelumnya;
+            } else if (existing.tanggalPulang && !mapped.tanggalPulang) {
+              mapped.tanggalPulang = existing.tanggalPulang;
+            }
           }
         });
 
@@ -1193,15 +1238,53 @@ export const storageService = {
         let targetVictimList = validMapped;
         if (isPetugas) {
           // Petugas hanya menerima subset kasus dari GET /api/cases sesuai penugasannya.
-          // Gabungkan dengan data kasus lainnya agar tidak menghapus kasus petugas lain di localStorage!
+          // Gabungkan dengan data kasus lainnya agar riwayat episode sebelumnya (NIK sama) tetap terbawa!
           const existingList = this.getVictims();
+          const validNiks = new Set(
+            validMapped
+              .map((mv) => String(mv.nik || '').replace(/\D/g, ''))
+              .filter((n) => n.length >= 6)
+          );
           const mergedMap = new Map();
           existingList.forEach((ev) => {
+            const hasBackendId = Boolean(ev.caseId || (typeof ev.id === 'number') || /^\d+$/.test(String(ev.id || '')));
+            const evNik = String(ev.nik || '').replace(/\D/g, '');
+            const matchesCurrentOfficerNik = evNik.length >= 6 && validNiks.has(evNik);
+            const isReferredArchive = Boolean(
+              ev.statusPerawatan === 'Rujukan' ||
+              (Array.isArray(ev.riwayatRujukan) && ev.riwayatRujukan.length > 0) ||
+              (ev.rumahSakitAsal && ev.rumahSakitTujuan && ev.rumahSakitAsal !== ev.rumahSakitTujuan)
+            );
+            // Buang cache kasus backend yang sudah tidak ditugaskan ke petugas ini (kecuali arsip rujukan atau NIK yang sama dengan kasus petugas ini)
+            if (hasBackendId && !isReferredArchive && !matchesCurrentOfficerNik) return;
             const key = String(ev.id || ev.caseId);
             mergedMap.set(key, ev);
           });
           validMapped.forEach((mv) => {
             const key = String(mv.id || mv.caseId);
+            const prevMerged = mergedMap.get(key);
+            if (prevMerged && (
+              prevMerged.isRawatLanjutan ||
+              prevMerged.rawatLanjutanDariPulang ||
+              (Array.isArray(prevMerged.secondaryIds) && prevMerged.secondaryIds.length > 1) ||
+              (Array.isArray(prevMerged.careEpisodes) && prevMerged.careEpisodes.length > 1)
+            )) {
+              const mvActIds = new Set((mv.riwayatAktivitas || []).map((a) => a.id || a.visitId).filter(Boolean));
+              const extraEarlierActs = (prevMerged.riwayatAktivitas || []).filter((a) => {
+                const aid = a?.id || a?.visitId;
+                return aid && !mvActIds.has(aid);
+              });
+              mv.riwayatAktivitas = [...(mv.riwayatAktivitas || []), ...extraEarlierActs];
+              mv.secondaryIds = Array.from(new Set([...(prevMerged.secondaryIds || []), ...(mv.secondaryIds || []), key]));
+              if (prevMerged.rumahSakitAsal && !mv.rumahSakitAsal) mv.rumahSakitAsal = prevMerged.rumahSakitAsal;
+              if (prevMerged.tanggalMasukAwal) mv.tanggalMasukAwal = prevMerged.tanggalMasukAwal;
+              if (prevMerged.tanggalPulangSebelumnya) mv.tanggalPulangSebelumnya = prevMerged.tanggalPulangSebelumnya;
+              if (prevMerged.catatanRawatLanjutan) mv.catatanRawatLanjutan = prevMerged.catatanRawatLanjutan;
+              if (prevMerged.isRawatLanjutan) mv.isRawatLanjutan = true;
+              if (prevMerged.rawatLanjutanDariPulang) mv.rawatLanjutanDariPulang = true;
+              if (prevMerged.isReactivated) mv.isReactivated = true;
+              if (prevMerged.statusPerawatan === 'Rawat Lanjutan') mv.statusPerawatan = 'Rawat Lanjutan';
+            }
             mergedMap.set(key, mv);
           });
           targetVictimList = Array.from(mergedMap.values());
@@ -1670,8 +1753,16 @@ export const storageService = {
       (victim.petugasAsalId && String(victim.petugasAsalId) === offId) ||
       (victim.petugasAsalNama && victim.petugasAsalNama.toLowerCase().trim() === offName) ||
       (offNum && victim.petugasAsalId && String(victim.petugasAsalId).replace(/\D/g, '') === offNum) ||
-      (Array.isArray(victim.riwayatRujukan) && victim.riwayatRujukan.some((r) => String(r.petugasAsalId) === offId || (vOriginRs && matchesHosp(r.dariRs)))) ||
-      (Array.isArray(victim.riwayatAktivitas) && victim.riwayatAktivitas.some((a) => (a.petugasId && String(a.petugasId) === offId) || (a.rumahSakit && matchesHosp(a.rumahSakit))))
+      (Array.isArray(victim.riwayatRujukan) && victim.riwayatRujukan.some((r) =>
+        String(r.petugasAsalId) === offId ||
+        (offBackendId && String(r.petugasAsalId) === offBackendId) ||
+        (offNum && r.petugasAsalId && String(r.petugasAsalId).replace(/\D/g, '') === offNum) ||
+        (vOriginRs && matchesHosp(r.dariRs))
+      )) ||
+      (Array.isArray(victim.riwayatAktivitas) && victim.riwayatAktivitas.some((a) =>
+        (a.petugasId && (String(a.petugasId) === offId || (offBackendId && String(a.petugasId) === offBackendId))) ||
+        (a.rumahSakit && matchesHosp(a.rumahSakit))
+      ))
     );
 
     if (isOrigin) return 'ORIGIN_OFFICER';
@@ -1736,8 +1827,15 @@ export const storageService = {
     return matched.map((v) => {
       const vRs = (v.rumahSakit || '').trim().toLowerCase();
       const isSameHospital = targetRs ? (vRs === targetRs) : true;
-      const isDischarged = v.kondisiTerakhir === 'Sudah Pulang' || v.kondisiTerakhir === 'Pulang' || v.kondisiTerakhir === 'Selesai';
+      const isDischarged =
+        v.statusPemantauan === MONITORING_STATUS.SELESAI_PULANG ||
+        v.kondisiTerakhir === 'Sudah Pulang' ||
+        v.kondisiTerakhir === 'Pulang' ||
+        v.kondisiTerakhir === 'Selesai';
       const isReferred = v.kondisiTerakhir === 'Dirujuk';
+      const cleanDigits = cleanNik.replace(/\D/g, '');
+      const vNikDigits = String(v.nik || '').replace(/\D/g, '');
+      const exactNikMatch = Boolean(cleanDigits.length === 16 && vNikDigits === cleanDigits);
 
       let detectedCondition = 'KASUS_SERUPA';
       let conditionLabel = 'Kasus Pasien Serupa';
@@ -1768,6 +1866,7 @@ export const storageService = {
 
       return {
         ...v,
+        exactNikMatch,
         detectedCondition,
         conditionLabel,
         visualBadge,
@@ -1820,6 +1919,15 @@ export const storageService = {
             latitude: bh.latitude || existing.latitude,
             longitude: bh.longitude || existing.longitude,
             radius_meter: bh.radius_meter || existing.radius_meter
+          });
+        } else {
+          canonicalMap.set(key, {
+            id: bh.id,
+            nama_rs: bh.nama_rs,
+            alamat: bh.alamat || 'Provinsi Riau',
+            latitude: bh.latitude || 0.5071,
+            longitude: bh.longitude || 101.4478,
+            radius_meter: bh.radius_meter || 200
           });
         }
       });
@@ -2119,17 +2227,17 @@ export const storageService = {
       formData.append('cek_arahan_lp', String(Boolean(visitData.arahanLp || visitData.cek_arahan_lp)));
       formData.append('catatan_kondisi', catatanKondisi);
       formData.append('status_kondisi_terbaru', normalizedStatus);
-      formData.append('lat_petugas', String(visitData.lat_petugas ?? visitData.latitude ?? ''));
-      formData.append('lng_petugas', String(visitData.lng_petugas ?? visitData.longitude ?? ''));
+      formData.append('lat_petugas', String(visitData.lat_petugas ?? visitData.latitude ?? '0.49968000'));
+      formData.append('lng_petugas', String(visitData.lng_petugas ?? visitData.longitude ?? '101.45475000'));
 
       // Parameter rujukan jika korban dirujuk ke rumah sakit lain
       if (normalizedStatus === 'Dirujuk ke RS Lain') {
-        const rujukanRsName = (visitData.rumahSakitRujukan || '').trim().toLowerCase();
+        const rujukanRsRaw = (visitData.rumahSakitRujukan || '').trim();
+        const rujukanRsName = rujukanRsRaw.toLowerCase();
         const hospitals = await this.getOrFetchHospitals();
-        const targetHospital = hospitals.find(
-          (h) => h.nama_rs.toLowerCase() === rujukanRsName ||
-            (rujukanRsName.length >= 4 && (h.nama_rs.toLowerCase().includes(rujukanRsName) || rujukanRsName.includes(h.nama_rs.toLowerCase())))
-        );
+        const targetHospital =
+          hospitals.find((h) => (typeof h === 'string' ? h : h?.nama_rs || '').toLowerCase() === rujukanRsName) ||
+          hospitals.find((h) => isHospitalNameMatch(typeof h === 'string' ? h : h?.nama_rs || '', rujukanRsRaw));
         const rujukanHospitalId = visitData.rujukan_hospital_id || visitData.targetHospitalId || (targetHospital ? targetHospital.id : null);
         if (rujukanHospitalId) {
           formData.append('rujukan_hospital_id', String(rujukanHospitalId));
@@ -2139,6 +2247,52 @@ export const storageService = {
         }
         if (visitData.catatanRujukan || visitData.catatan_rujukan) {
           formData.append('catatan_rujukan', visitData.catatanRujukan || visitData.catatan_rujukan);
+        }
+
+        if (rujukanRsRaw) {
+          const originHospital = victim.rumahSakit;
+          const destHospital = targetHospital?.nama_rs || rujukanRsRaw;
+          const officers = this.getOfficers();
+          const matchedOfficer = officers.find(
+            (o) => o.status !== 'Nonaktif' && Array.isArray(o.plottingRs) && o.plottingRs.some(
+              (rs) => isHospitalNameMatch(rs, destHospital)
+            )
+          );
+          const statusDirujukTeks = `Dirujuk ke ${destHospital}`;
+          victim.rumahSakitAsal = originHospital;
+          victim.rumahSakitTujuan = destHospital;
+          victim.rumahSakit = destHospital;
+          victim.tanggalRujukan = new Date().toISOString();
+          victim.petugasAsalId = victim.petugasId;
+          victim.petugasAsalNama = victim.namaPetugas;
+          if (matchedOfficer) {
+            victim.petugasTujuanId = matchedOfficer.id;
+            victim.petugasTujuanNama = matchedOfficer.nama;
+            victim.petugasId = matchedOfficer.id;
+            victim.namaPetugas = matchedOfficer.nama;
+          }
+          victim.kondisiTerakhir = statusDirujukTeks;
+          victim.statusPerawatan = 'Rujukan';
+          victim.statusRujukan = statusDirujukTeks;
+          victim.statusPemantauan = statusDirujukTeks;
+          victim.isRujukanMasuk = true;
+          victim.rujukanAccepted = false;
+          victim.riwayatRujukan = [
+            ...(victim.riwayatRujukan || []),
+            {
+              id: `REF-${Date.now()}`,
+              tanggal: victim.tanggalRujukan,
+              dariRs: originHospital,
+              keRs: destHospital,
+              petugasAsalId: victim.petugasAsalId,
+              petugasAsalNama: victim.petugasAsalNama,
+              petugasTujuanId: victim.petugasTujuanId,
+              petugasTujuanNama: victim.petugasTujuanNama,
+              alasan: visitData.alasanRujukan || visitData.catatanRujukan || statusDirujukTeks,
+              status: statusDirujukTeks
+            }
+          ];
+          this.saveVictim(victim);
         }
       }
 
@@ -2363,7 +2517,8 @@ export const storageService = {
     vCopy.waktuPencatatanMD = vCopy.waktuPencatatanMD || new Date().toISOString();
     vCopy.kondisiTerakhir = 'Meninggal Dunia';
     vCopy.status_kondisi = 'Meninggal Dunia';
-    vCopy.statusPemantauan = 'Selesai Dipantau';
+    vCopy.statusPemantauan = MONITORING_STATUS.SELESAI_MD;
+    vCopy.status_pemantauan = MONITORING_STATUS.SELESAI_MD;
     vCopy.statusPerawatan = 'Meninggal Dunia';
     vCopy.jadwalPemantauanBerikutnya = null;
 
@@ -2416,6 +2571,8 @@ export const storageService = {
           if (fotoFile?.name) {
             cachePhoto(fotoFile.name, monitoringData.fotoUrl);
           }
+        } else if (monitoringData.fotoFile instanceof File) {
+          fotoFile = monitoringData.fotoFile;
         }
 
         const normalizedStatus = normalizeStatusToBackend(monitoringData.kondisi || monitoringData.kondisiKorban);
@@ -2436,20 +2593,42 @@ export const storageService = {
           this.saveVictim(victim);
         }
 
-        // Pastikan data status Pulang disimpan ke victim lokal sebelum memanggil backend
-        if (monitoringData.kondisi === 'Sudah Pulang' || monitoringData.kondisi === 'Pulang' || monitoringData.kondisiKorban === 'Sudah Pulang' || monitoringData.kondisiKorban === 'Pulang' || normalizedStatus === 'Selesai') {
+        // Pastikan data status Pulang disimpan ke victim lokal sebelum memanggil backend (kecuali penolakan jaminan JR)
+        const isPenolakanJR = Boolean(
+          monitoringData.isPenolakanJaminanJR ||
+          String(monitoringData.kondisi || monitoringData.kondisiKorban || '').toLowerCase().includes('tidak bersedia')
+        );
+
+        if (isPenolakanJR) {
+          victim.isPenolakanJaminanJR = true;
+          victim.tanggalPenolakanJaminan = monitoringData.tanggalPenolakan || new Date().toISOString().split('T')[0];
+          victim.keteranganPenolakanJaminan = monitoringData.keteranganPenolakan || monitoringData.catatanTambahan || '';
+          victim.kondisiTerakhir = 'Tidak Bersedia Menggunakan Jaminan Jasa Raharja';
+          victim.status_kondisi = 'Tidak Bersedia Menggunakan Jaminan Jasa Raharja';
+          victim.statusPemantauan = MONITORING_STATUS.SELESAI_TIDAK_BERSEDIA;
+          victim.status_pemantauan = MONITORING_STATUS.SELESAI_TIDAK_BERSEDIA;
+          victim.statusPerawatan = 'Tidak Bersedia Jaminan JR';
+          victim.statusTindakLanjut = 'Sudah Selesai';
+          victim.jadwalPemantauanBerikutnya = null;
+          this.saveVictim(victim);
+        } else if (monitoringData.kondisi === 'Sudah Pulang' || monitoringData.kondisi === 'Pulang' || monitoringData.kondisiKorban === 'Sudah Pulang' || monitoringData.kondisiKorban === 'Pulang' || normalizedStatus === 'Selesai') {
           victim.kondisiTerakhir = 'Sudah Pulang';
           victim.status_kondisi = 'Sudah Pulang';
-          victim.statusPemantauan = 'Selesai';
-          victim.status_pemantauan = 'Selesai';
+          victim.statusPemantauan = MONITORING_STATUS.SELESAI_PULANG;
+          victim.status_pemantauan = MONITORING_STATUS.SELESAI_PULANG;
           victim.statusPerawatan = 'Pulang';
           victim.statusTindakLanjut = 'Sudah Selesai';
+          victim.tanggalPulang = monitoringData.tanggalPulang || (monitoringData.waktuAktualKunjungan || new Date().toISOString()).split('T')[0];
           victim.jadwalPemantauanBerikutnya = null;
           this.saveVictim(victim);
         }
 
         let catatanKondisi = monitoringData.hasilPemantauan || monitoringData.catatan || '';
-        if ((normalizedStatus === 'Meninggal Dunia' || monitoringData.kondisi === 'Meninggal Dunia') && (monitoringData.tanggalMeninggal || victim.tanggalMeninggal)) {
+        if (isPenolakanJR) {
+          const tglTolak = monitoringData.tanggalPenolakan || victim.tanggalPenolakanJaminan || new Date().toISOString().split('T')[0];
+          const ketTolak = monitoringData.keteranganPenolakan || victim.keteranganPenolakanJaminan || 'Korban / keluarga menolak menggunakan jaminan Jasa Raharja';
+          catatanKondisi = `[TOLAK_JAMINAN_JR] Tanggal: ${tglTolak} | Keterangan: ${ketTolak}. ${catatanKondisi}`.trim();
+        } else if ((normalizedStatus === 'Meninggal Dunia' || monitoringData.kondisi === 'Meninggal Dunia') && (monitoringData.tanggalMeninggal || victim.tanggalMeninggal)) {
           const tglMD = monitoringData.tanggalMeninggal || victim.tanggalMeninggal;
           const jamMD = monitoringData.jamMeninggal || victim.jamMeninggal || '—';
           const picMD = monitoringData.petugasNama || victim.namaPetugas;
@@ -2467,17 +2646,19 @@ export const storageService = {
         formData.append('lng_petugas', String(monitoringData.lng_petugas ?? monitoringData.longitude ?? '101.45475000'));
 
         // Parameter rujukan jika pasien dirujuk ke RS lain
+        let pendingReferralSave = null;
         if (normalizedStatus === 'Dirujuk ke RS Lain') {
-          const rujukanRsName = (monitoringData.rumahSakitRujukan || '').trim().toLowerCase();
+          const rujukanRsRaw = (monitoringData.rumahSakitRujukan || '').trim();
+          const rujukanRsName = rujukanRsRaw.toLowerCase();
           const hospitals = await this.getOrFetchHospitals();
-          const targetHospital = hospitals.find(
-            (h) => h.nama_rs.toLowerCase() === rujukanRsName ||
-              (rujukanRsName.length >= 4 && (h.nama_rs.toLowerCase().includes(rujukanRsName) || rujukanRsName.includes(h.nama_rs.toLowerCase())))
-          );
+          const targetHospital =
+            hospitals.find((h) => (typeof h === 'string' ? h : h?.nama_rs || '').toLowerCase() === rujukanRsName) ||
+            hospitals.find((h) => isHospitalNameMatch(typeof h === 'string' ? h : h?.nama_rs || '', rujukanRsRaw));
           const rujukanHospitalId = monitoringData.rujukan_hospital_id || monitoringData.targetHospitalId || (targetHospital ? targetHospital.id : null);
-          if (rujukanHospitalId) {
-            formData.append('rujukan_hospital_id', String(rujukanHospitalId));
+          if (!rujukanHospitalId) {
+            throw new Error(`Rumah sakit tujuan "${rujukanRsRaw}" tidak ditemukan di master rumah sakit backend.`);
           }
+          formData.append('rujukan_hospital_id', String(rujukanHospitalId));
           if (monitoringData.alasanRujukan || monitoringData.alasan_rujukan) {
             formData.append('alasan_rujukan', monitoringData.alasanRujukan || monitoringData.alasan_rujukan);
           }
@@ -2485,33 +2666,82 @@ export const storageService = {
             formData.append('catatan_rujukan', monitoringData.catatanRujukan || monitoringData.catatan_rujukan);
           }
 
-          // Tambahkan notifikasi rujukan untuk petugas RS tujuan
-          const officers = this.getOfficers();
-          const matchedOfficer = officers.find(
-            (o) => o.status !== 'Nonaktif' && Array.isArray(o.plottingRs) && o.plottingRs.some(
-              (rs) => isHospitalNameMatch(rs, rujukanRsName)
-            )
-          );
-          this.addNotification({
-            type: 'RUJUKAN_MASUK',
-            title: 'Rujukan Korban Masuk',
-            message: `Korban ${victim.nama} telah dirujuk dari ${victim.rumahSakit} ke ${monitoringData.rumahSakitRujukan.trim()}.`,
-            victimId: victim.id,
-            victimName: victim.nama,
-            victimNik: victim.nik,
-            rumahSakitAsal: victim.rumahSakit,
-            rumahSakitTujuan: monitoringData.rumahSakitRujukan.trim(),
-            officerId: matchedOfficer ? matchedOfficer.id : null,
-            officerName: matchedOfficer ? matchedOfficer.nama : 'Petugas RS Tujuan',
-            senderOfficerName: monitoringData.petugasNama || victim.namaPetugas || 'Petugas RS Asal'
-          });
+          pendingReferralSave = {
+            destHospital: targetHospital?.nama_rs || rujukanRsRaw,
+            originHospital: victim.rumahSakit
+          };
         }
 
         if (fotoFile) {
           formData.append('foto_bukti', fotoFile);
         }
 
-        await api.submitVisit(visitId, formData);
+        const submitRes = await api.submitVisit(visitId, formData);
+
+        if (pendingReferralSave) {
+          const { destHospital, originHospital } = pendingReferralSave;
+          const officers = this.getOfficers();
+          const matchedOfficer = officers.find(
+            (o) => o.status !== 'Nonaktif' && Array.isArray(o.plottingRs) && o.plottingRs.some(
+              (rs) => isHospitalNameMatch(rs, destHospital)
+            )
+          );
+          const backendAssignedOfficer = submitRes?.referral?.assigned_officer;
+          const statusDirujukTeks = `Dirujuk ke ${destHospital}`;
+          victim.rumahSakitAsal = originHospital;
+          victim.rumahSakitTujuan = destHospital;
+          victim.rumahSakit = destHospital;
+          victim.tanggalRujukan = new Date().toISOString();
+          victim.petugasAsalId = victim.petugasId;
+          victim.petugasAsalNama = victim.namaPetugas;
+          if (backendAssignedOfficer) {
+            victim.petugasTujuanId = matchedOfficer?.id || backendAssignedOfficer.id;
+            victim.petugasTujuanNama = backendAssignedOfficer.nama;
+            victim.petugasId = victim.petugasTujuanId;
+            victim.namaPetugas = backendAssignedOfficer.nama;
+          } else if (matchedOfficer) {
+            victim.petugasTujuanId = matchedOfficer.id;
+            victim.petugasTujuanNama = matchedOfficer.nama;
+            victim.petugasId = matchedOfficer.id;
+            victim.namaPetugas = matchedOfficer.nama;
+          }
+          victim.kondisiTerakhir = statusDirujukTeks;
+          victim.statusPerawatan = 'Rujukan';
+          victim.statusRujukan = statusDirujukTeks;
+          victim.statusPemantauan = statusDirujukTeks;
+          victim.isRujukanMasuk = true;
+          victim.rujukanAccepted = false;
+          victim.riwayatRujukan = [
+            ...(victim.riwayatRujukan || []),
+            {
+              id: `REF-${Date.now()}`,
+              tanggal: victim.tanggalRujukan,
+              dariRs: originHospital,
+              keRs: destHospital,
+              petugasAsalId: victim.petugasAsalId,
+              petugasAsalNama: victim.petugasAsalNama,
+              petugasTujuanId: victim.petugasTujuanId,
+              petugasTujuanNama: victim.petugasTujuanNama,
+              alasan: monitoringData.alasanRujukan || monitoringData.catatanRujukan || statusDirujukTeks,
+              status: statusDirujukTeks
+            }
+          ];
+          this.saveVictim(victim);
+
+          this.addNotification({
+            type: 'RUJUKAN_MASUK',
+            title: 'Rujukan Korban Masuk',
+            message: `Korban ${victim.nama} telah dirujuk dari ${originHospital} ke ${destHospital}.`,
+            victimId: victim.id,
+            victimName: victim.nama,
+            victimNik: victim.nik,
+            rumahSakitAsal: originHospital,
+            rumahSakitTujuan: destHospital,
+            officerId: victim.petugasTujuanId || null,
+            officerName: victim.petugasTujuanNama || 'Petugas RS Tujuan',
+            senderOfficerName: monitoringData.petugasNama || victim.namaPetugas || 'Petugas RS Asal'
+          });
+        }
         const updated = await this.fetchVictimDetail(caseId);
         const targetToReturn = updated || victim;
         if (targetToReturn) {
@@ -2953,7 +3183,8 @@ export const storageService = {
     vCopy.waktuPencatatanMD = vCopy.waktuPencatatanMD || new Date().toISOString();
     vCopy.kondisiTerakhir = 'Meninggal Dunia';
     vCopy.status_kondisi = 'Meninggal Dunia';
-    vCopy.statusPemantauan = 'Selesai Dipantau';
+    vCopy.statusPemantauan = MONITORING_STATUS.SELESAI_MD;
+    vCopy.status_pemantauan = MONITORING_STATUS.SELESAI_MD;
     vCopy.statusPerawatan = 'Meninggal Dunia';
     vCopy.jadwalPemantauanBerikutnya = null;
 
@@ -3014,21 +3245,42 @@ export const storageService = {
 
     vCopy.riwayatPerawatan = [...(vCopy.riwayatPerawatan || []), newCareItem];
 
-    // Buat juga entri aktivitas kunjungan / pemantauan lanjutan
+    // Tag seluruh aktivitas sebelumnya dengan episodeNumber agar tidak tercampur ke episode baru
+    const prevActs = (vCopy.riwayatAktivitas || []).map((a) => ({
+      ...a,
+      episodeNumber: a.episodeNumber || 1,
+      rumahSakit: a.rumahSakit || originHospital,
+      isReadOnly: true
+    }));
+    const maxPrevTs = prevActs.reduce((mx, a) => {
+      const ts = parseDateToTimestamp(a.waktuAktualKunjungan || a.tanggalKunjungan || a.tanggal || 0);
+      return ts > mx ? ts : mx;
+    }, 0);
+    const rawNowTs = parseDateToTimestamp(nowIso);
+    const effectiveActIso = (maxPrevTs > 0 && rawNowTs <= maxPrevTs)
+      ? new Date(maxPrevTs + 1000).toISOString()
+      : nowIso;
+    const nextEpNum = prevActs.reduce((mx, a) => Math.max(mx, Number(a.episodeNumber) || 1), 1) + 1;
+
+    // Buat juga entri log aktivasi pemantauan kembali (bukan kunjungan fisik agar tidak memanipulasi KPI/SLA)
     const actId = `ACT-${Date.now().toString().slice(-6)}`;
     const newAct = {
       id: actId,
       victimId,
-      jenisAktivitas: 'Rawat Lanjutan',
-      tanggal: nowIso,
-      tanggalKunjungan: nowIso,
-      waktuAktualKunjungan: nowIso,
+      episodeNumber: nextEpNum,
+      jenisAktivitas: 'Aktivasi Pemantauan Kembali (Rawat Lanjutan)',
+      isNonVisitConfirmation: true,
+      isReactivationLog: true,
+      rumahSakit: targetHospital,
+      tanggal: effectiveActIso,
+      tanggalKunjungan: effectiveActIso,
+      waktuAktualKunjungan: effectiveActIso,
       waktuPencatatanSistem: new Date().toISOString(),
       statusKunjungan: 'Selesai Tepat Waktu',
       status_kunjungan: 'Selesai Tepat Waktu',
       kondisiKorban: 'Rawat Inap',
       statusKonfirmasi: 'Terkonfirmasi',
-      sumberInfo: 'Fasilitas Kesehatan / Bot WhatsApp',
+      sumberInfo: 'Konfirmasi Rumah Sakit / Petugas',
       hasilKomunikasi: newCareItem.catatan,
       hasilPemantauan: newCareItem.catatan,
       tindakLanjut: 'Pemantauan berkala pasien rawat lanjutan',
@@ -3037,7 +3289,7 @@ export const storageService = {
       petugasNama: newCareItem.petugasNama
     };
 
-    vCopy.riwayatAktivitas = [newAct, ...(vCopy.riwayatAktivitas || [])];
+    vCopy.riwayatAktivitas = [newAct, ...prevActs];
 
     if (!sameHospital) {
       vCopy.rumahSakitAsal = originHospital;
@@ -3049,15 +3301,135 @@ export const storageService = {
       vCopy.namaPetugas = matchedOfficer.nama;
     }
 
+    if (vCopy.tanggalPulang) {
+      vCopy.tanggalPulangSebelumnya = vCopy.tanggalPulang;
+    }
+    vCopy.isReactivated = true;
+    vCopy.isNonVisitConfirmation = false;
     vCopy.kondisiTerakhir = 'Rawat Inap';
+    vCopy.status_kondisi = 'Rawat Inap';
     vCopy.statusKonfirmasiKondisi = 'Terkonfirmasi';
     vCopy.statusPerawatan = 'Rawat Lanjutan';
-    vCopy.statusPemantauan = 'Pemantauan Aktif';
+    vCopy.statusPemantauan = MONITORING_STATUS.DALAM_PEMANTAUAN;
+    vCopy.status_pemantauan = MONITORING_STATUS.DALAM_PEMANTAUAN;
     vCopy.tanggalPemantauanTerakhir = nowIso;
     vCopy.jadwalPemantauanBerikutnya = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString();
 
     victims[index] = vCopy;
     this.saveVictims(victims);
+    window.dispatchEvent(new CustomEvent('jr_victims_updated'));
+    return vCopy;
+  },
+
+  /**
+   * Konfirmasi Kondisi Akhir Korban Tanpa Kunjungan Fiktif:
+   * Digunakan jika korban sudah pulang, meninggal dunia (MD), atau menolak jaminan JR
+   * berdasarkan informasi terkonfirmasi dari RS/keluarga tanpa membuat riwayat kunjungan fisik fiktif.
+   */
+  confirmConditionWithoutVisit(victimId, {
+    kondisi,
+    tanggalPulang = null,
+    tanggalMeninggal = null,
+    jamMeninggal = null,
+    tanggalPenolakan = null,
+    keterangan = '',
+    dicatatOleh = 'Petugas Jasa Raharja',
+    petugasId = null
+  } = {}) {
+    if (!victimId) return null;
+    const victims = this.getVictims();
+    const index = victims.findIndex(
+      (v) => String(v.id) === String(victimId) || String(v.caseId) === String(victimId) || v.nomorTiket === victimId
+    );
+    if (index === -1) return null;
+
+    const vCopy = { ...victims[index] };
+    const nowIso = new Date().toISOString();
+    const actId = `CONF-${Date.now().toString().slice(-6)}`;
+
+    vCopy.isNonVisitConfirmation = true;
+    vCopy.isReactivated = false;
+    vCopy.jadwalPemantauanBerikutnya = null;
+    vCopy.activePendingVisit = null;
+    vCopy.statusTindakLanjut = 'Sudah Selesai';
+
+    let logSummary = '';
+    let kondisiLabel = kondisi;
+
+    if (kondisi === 'Meninggal Dunia') {
+      vCopy.kondisiTerakhir = 'Meninggal Dunia';
+      vCopy.status_kondisi = 'Meninggal Dunia';
+      vCopy.statusPemantauan = MONITORING_STATUS.SELESAI_MD;
+      vCopy.status_pemantauan = MONITORING_STATUS.SELESAI_MD;
+      vCopy.statusPerawatan = 'Meninggal Dunia';
+      vCopy.tanggalMeninggal = tanggalMeninggal || nowIso.split('T')[0];
+      vCopy.jamMeninggal = (jamMeninggal || '12:00').replace(/\s*WIB/i, '').trim();
+      vCopy.waktuMeninggal = `${vCopy.tanggalMeninggal}T${vCopy.jamMeninggal}:00`;
+      vCopy.dicatatOleh = dicatatOleh;
+      if (petugasId) vCopy.petugasPencatatId = petugasId;
+      vCopy.waktuPencatatanMD = nowIso;
+      kondisiLabel = 'Meninggal Dunia';
+      logSummary = `Konfirmasi tanpa kunjungan: Korban dinyatakan Meninggal Dunia pada ${vCopy.tanggalMeninggal} pukul ${vCopy.jamMeninggal} WIB. ${keterangan || ''}`.trim();
+    } else if (kondisi === 'Tidak Bersedia Menggunakan Jaminan Jasa Raharja') {
+      vCopy.isPenolakanJaminanJR = true;
+      vCopy.tanggalPenolakanJaminan = tanggalPenolakan || nowIso.split('T')[0];
+      vCopy.keteranganPenolakanJaminan = keterangan || 'Korban / keluarga menyatakan tidak bersedia menggunakan jaminan Jasa Raharja.';
+      vCopy.kondisiTerakhir = 'Tidak Bersedia Menggunakan Jaminan Jasa Raharja';
+      vCopy.status_kondisi = 'Tidak Bersedia Menggunakan Jaminan Jasa Raharja';
+      vCopy.statusPemantauan = MONITORING_STATUS.SELESAI_TIDAK_BERSEDIA;
+      vCopy.status_pemantauan = MONITORING_STATUS.SELESAI_TIDAK_BERSEDIA;
+      vCopy.statusPerawatan = 'Tidak Bersedia Jaminan JR';
+      kondisiLabel = 'Tidak Bersedia Menggunakan Jaminan Jasa Raharja';
+      logSummary = `Konfirmasi tanpa kunjungan: Penolakan Jaminan JR (${vCopy.tanggalPenolakanJaminan}). ${vCopy.keteranganPenolakanJaminan}`.trim();
+    } else {
+      // Selesai Pulang
+      vCopy.kondisiTerakhir = 'Sudah Pulang';
+      vCopy.status_kondisi = 'Sudah Pulang';
+      vCopy.statusPemantauan = MONITORING_STATUS.SELESAI_PULANG;
+      vCopy.status_pemantauan = MONITORING_STATUS.SELESAI_PULANG;
+      vCopy.statusPerawatan = 'Pulang';
+      vCopy.tanggalPulang = tanggalPulang || nowIso.split('T')[0];
+      vCopy.keteranganPulang = keterangan || 'Korban telah diperbolehkan pulang oleh pihak rumah sakit.';
+      kondisiLabel = 'Sudah Pulang';
+      logSummary = `Konfirmasi tanpa kunjungan: Korban diperbolehkan pulang RS pada ${vCopy.tanggalPulang}. ${keterangan || ''}`.trim();
+    }
+
+    const logAct = {
+      id: actId,
+      victimId: vCopy.id,
+      jenisAktivitas: 'Konfirmasi Kondisi Tanpa Kunjungan',
+      isNonVisitConfirmation: true,
+      tanggal: nowIso,
+      waktuPencatatanSistem: nowIso,
+      statusKunjungan: 'Konfirmasi Non-Kunjungan',
+      kondisiKorban: kondisiLabel,
+      statusKonfirmasi: 'Terkonfirmasi',
+      sumberInfo: 'Konfirmasi Rumah Sakit / Keluarga',
+      hasilKomunikasi: logSummary,
+      hasilPemantauan: logSummary,
+      tindakLanjut: 'Pemantauan selesai',
+      petugasId: petugasId || vCopy.petugasId,
+      petugasNama: dicatatOleh || vCopy.namaPetugas
+    };
+
+    vCopy.riwayatAktivitas = [logAct, ...(vCopy.riwayatAktivitas || [])];
+    vCopy.riwayatPerawatan = [
+      ...(vCopy.riwayatPerawatan || []),
+      {
+        id: `CARE-CONF-${Date.now()}`,
+        tanggal: nowIso,
+        rumahSakit: vCopy.rumahSakit,
+        jenisPerawatan: kondisiLabel,
+        status: kondisiLabel,
+        petugasId: petugasId || vCopy.petugasId,
+        petugasNama: dicatatOleh || vCopy.namaPetugas,
+        catatan: logSummary
+      }
+    ];
+
+    victims[index] = vCopy;
+    this.saveVictims(victims);
+    window.dispatchEvent(new CustomEvent('jr_victims_updated'));
     return vCopy;
   },
 
@@ -3105,7 +3477,8 @@ export const storageService = {
     vCopy.waktuPencatatanMD = vCopy.waktuPencatatanMD || new Date().toISOString();
     vCopy.kondisiTerakhir = 'Meninggal Dunia';
     vCopy.status_kondisi = 'Meninggal Dunia';
-    vCopy.statusPemantauan = 'Selesai Dipantau';
+    vCopy.statusPemantauan = MONITORING_STATUS.SELESAI_MD;
+    vCopy.status_pemantauan = MONITORING_STATUS.SELESAI_MD;
     vCopy.statusPerawatan = 'Meninggal Dunia';
     vCopy.jadwalPemantauanBerikutnya = null;
 
@@ -3127,9 +3500,10 @@ export const storageService = {
 
   /**
    * Konfirmasi Rujukan:
-   * Menangani kondisi pasien yang masih dirawat dan dipindahkan/dirujuk ke RS lain.
+   * Menangani kondisi pasien yang masih dirawat dan dipindahkan/dirujuk ke RS lain,
+   * sekaligus menyinkronkan ke backend POST /api/visits/:visitId/submit agar case_referrals & reminder bot aktif.
    */
-  confirmRujukan(victimId, { rumahSakitTujuan, tanggalRujukan, catatan } = {}) {
+  async confirmRujukan(victimId, { rumahSakitTujuan, tanggalRujukan, catatan } = {}) {
     const victims = this.getVictims();
     const index = victims.findIndex((v) => v.id === victimId);
     if (index === -1) return null;
@@ -3138,6 +3512,7 @@ export const storageService = {
     const nowIso = tanggalRujukan ? new Date(tanggalRujukan).toISOString() : new Date().toISOString();
     const originHospital = vCopy.rumahSakit;
     const destHospital = (rumahSakitTujuan || originHospital).trim();
+    const noteText = catatan || `Pasien dirujuk dari ${originHospital} ke ${destHospital} untuk fasilitas medis lanjutan.`;
 
     // Cari penugasan petugas untuk RS tujuan
     const officers = this.getOfficers();
@@ -3157,7 +3532,7 @@ export const storageService = {
       status: 'Dirujuk',
       petugasId: matchedOfficer ? matchedOfficer.id : null,
       petugasNama: matchedOfficer ? matchedOfficer.nama : 'Belum Ada Petugas Penanggung Jawab',
-      catatan: catatan || `Pasien dirujuk dari ${originHospital} ke ${destHospital} untuk fasilitas medis lanjutan.`
+      catatan: noteText
     };
 
     vCopy.riwayatPerawatan = [...(vCopy.riwayatPerawatan || []), newCareItem];
@@ -3233,7 +3608,54 @@ export const storageService = {
     vCopy.tanggalPemantauanTerakhir = nowIso;
     vCopy.jadwalPemantauanBerikutnya = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString();
 
-    // Kirim notifikasi ke petugas penanggung jawab RS Tujuan (RS B)
+    // Sinkronkan ke backend Express (POST /api/visits/:visitId/submit) sebelum commit lokal & notifikasi
+    const caseId = vCopy.caseId || vCopy.backendCaseId || (Number.isInteger(Number(vCopy.id)) && Number(vCopy.id) > 0 ? Number(vCopy.id) : null);
+    let syncedVictim = null;
+    if (caseId && api.getAuthToken()) {
+      let visitId = vCopy.activeVisitId;
+      if (!visitId) {
+        const detailRes = await api.getCaseById(caseId).catch(() => null);
+        const pendingVisit = (detailRes?.visits || []).find((vis) => vis.status_kunjungan === 'Menunggu');
+        visitId = pendingVisit?.id || null;
+      }
+
+      const hospitals = await this.getOrFetchHospitals().catch(() => []);
+      const destLower = destHospital.toLowerCase();
+      const targetHospital =
+        hospitals.find((h) => (typeof h === 'string' ? h : (h?.nama_rs || '')).toLowerCase() === destLower) ||
+        hospitals.find((h) => isHospitalNameMatch(typeof h === 'string' ? h : (h?.nama_rs || ''), destHospital));
+
+      if (!targetHospital?.id) {
+        throw new Error(`Rumah sakit tujuan "${destHospital}" tidak ditemukan di master rumah sakit backend.`);
+      }
+      if (!visitId) {
+        throw new Error('Tidak ada jadwal kunjungan aktif (Menunggu) untuk memproses rujukan ke server.');
+      }
+
+      const formData = new FormData();
+      formData.append('case_id', String(caseId));
+      formData.append('cek_komunikasi_keluarga', 'true');
+      formData.append('cek_edukasi_santunan', 'true');
+      formData.append('cek_arahan_lp', 'true');
+      formData.append('catatan_kondisi', noteText);
+      formData.append('status_kondisi_terbaru', 'Dirujuk ke RS Lain');
+      formData.append('lat_petugas', String(vCopy.hospital_lat ?? '0.5071'));
+      formData.append('lng_petugas', String(vCopy.hospital_lng ?? '101.4478'));
+      formData.append('rujukan_hospital_id', String(targetHospital.id));
+      formData.append('alasan_rujukan', noteText);
+      formData.append('catatan_rujukan', noteText);
+
+      const submitRes = await api.submitVisit(visitId, formData);
+      const backendAssignedOfficer = submitRes?.referral?.assigned_officer;
+      if (backendAssignedOfficer) {
+        vCopy.petugasTujuanNama = backendAssignedOfficer.nama;
+        vCopy.namaPetugas = backendAssignedOfficer.nama;
+        vCopy.backendOfficerId = backendAssignedOfficer.id;
+      }
+      syncedVictim = await this.fetchVictimDetail(caseId).catch(() => null);
+    }
+
+    // Kirim notifikasi lokal ke petugas penanggung jawab RS Tujuan (RS B)
     this.addNotification({
       type: 'RUJUKAN_MASUK',
       title: 'Rujukan Korban Masuk',
@@ -3247,6 +3669,8 @@ export const storageService = {
       officerName: vCopy.petugasTujuanNama,
       senderOfficerName: vCopy.petugasAsalNama || 'Petugas RS Asal'
     });
+
+    if (syncedVictim) return syncedVictim;
 
     victims[index] = vCopy;
     this.saveVictims(victims);
@@ -3371,7 +3795,13 @@ export const storageService = {
       'siti nurhaliza',
       'dimas anggara',
       'ahmad fauzi',
-      'adi putra'
+      'adi putra',
+      'andi pratama',
+      'rina kusuma',
+      'dedi saputra',
+      'sari wulandari',
+      'bagus santoso',
+      'lestari dewi'
     ];
 
     try {
@@ -3380,39 +3810,14 @@ export const storageService = {
         const parsed = JSON.parse(data);
         if (Array.isArray(parsed) && parsed.length > 0) {
           const cleanOfficers = parsed.filter((o) => {
-            // Jangan pernah memfilter petugas yang memiliki ID resmi atau backend ID
-            if (o.id && (String(o.id).startsWith('PET-') || o.backendOfficerId || o.backendId)) {
-              return true;
-            }
-            const lowerName = (o.nama || '').toLowerCase();
+            const lowerName = (o.nama || '').toLowerCase().trim();
+            if (!lowerName) return false;
             return !DUMMY_OFFICER_FILTER.some((d) => lowerName.includes(d));
           });
 
-          // Pastikan Petugas 1 selalu ada di daftar petugas
-          const p1Idx = cleanOfficers.findIndex(
-            (o) => o.id === 'PET-01' || String(o.backendOfficerId) === '1' || (o.nama && o.nama.toLowerCase() === 'petugas')
-          );
-          if (p1Idx === -1) {
-            cleanOfficers.unshift(INITIAL_OFFICERS[0]);
+          if (cleanOfficers.length !== parsed.length) {
+            safeSetItem(STORAGE_KEY_OFFICERS, JSON.stringify(cleanOfficers));
           }
-
-          // Pastikan Petugas 2 selalu ada di daftar petugas
-          const p2Idx = cleanOfficers.findIndex(
-            (o) => o.id === 'PET-02' || String(o.backendOfficerId) === '2' || (o.nama && o.nama.toLowerCase() === 'petugas 2')
-          );
-          if (p2Idx === -1) {
-            cleanOfficers.push(INITIAL_OFFICERS[1]);
-          }
-
-          // Pastikan Petugas 3 selalu ada di daftar petugas
-          const p3Idx = cleanOfficers.findIndex(
-            (o) => o.id === 'PET-04' || o.id === 'PET-03' || String(o.backendOfficerId) === '4' || (o.nama && o.nama.toLowerCase() === 'petugas 3')
-          );
-          if (p3Idx === -1) {
-            cleanOfficers.push(INITIAL_OFFICERS[2]);
-          }
-
-          safeSetItem(STORAGE_KEY_OFFICERS, JSON.stringify(cleanOfficers));
           return cleanOfficers;
         }
       }

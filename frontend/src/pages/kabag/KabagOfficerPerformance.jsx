@@ -1,37 +1,24 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { useSearchParams, useNavigate, Link } from 'react-router-dom';
+import { useState, useEffect, useMemo } from 'react';
+import { useSearchParams, Link } from 'react-router-dom';
 import {
   Users,
-  Briefcase,
   CheckCircle2,
   Clock,
-  AlertTriangle,
   Search,
   ChevronRight,
   ChevronLeft,
-  Calendar,
-  Filter,
   RotateCcw,
-  ArrowUpDown,
-  ArrowUp,
-  ArrowDown,
   Eye,
   MapPin,
-  CalendarCheck,
   TrendingUp,
-  FileSpreadsheet,
   FileText,
-  Download,
   Building2,
   BarChart3,
   Award,
-  Layers,
   Activity,
-  Check,
   X,
   ShieldCheck,
   ExternalLink,
-  Navigation,
   User
 } from 'lucide-react';
 import {
@@ -47,36 +34,17 @@ import {
 import { storageService } from '../../services/storageService';
 import {
   calculateFirstVisitSla,
-  calculateMonitoringSla,
-  calculateOfficerFinalScore,
-  calculateSlaByTotalVisits,
-  calculateSlaByTotalPatients,
   evaluateOfficerKpi
 } from '../../services/slaService';
-import { generatePerformancePdfReport } from '../../services/pdfReportService';
 import AuthenticatedImage from '../../components/common/AuthenticatedImage';
+import SortableHeader from '../../components/common/SortableHeader';
 import KabagReportPage from './KabagReportPage';
 import { getReferralPerspectiveInfo } from '../../utils/referralUtils';
 import { getRealVisitPhoto } from '../../utils/realPhotos';
-import { formatDateIndo, formatDateTimeIndo } from '../../utils/dateUtils';
-
-// Format Helpers
-const formatDate = (dateStr) => {
-  return formatDateIndo(dateStr);
-};
-
-const formatDateTime = (dateStr) => {
-  return formatDateTimeIndo(dateStr);
-};
-
-const MONTH_NAMES = [
-  'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
-  'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'
-];
+import { formatDateIndo as formatDate, formatDateTimeIndo as formatDateTime, parseDateSafe } from '../../utils/dateUtils';
 
 export default function KabagOfficerPerformance() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const navigate = useNavigate();
 
   // ── TAB STATE ('ringkasan' | 'detail' | 'laporan') ──
   const activeTab = searchParams.get('tab') || 'ringkasan';
@@ -127,33 +95,12 @@ export default function KabagOfficerPerformance() {
   const currentMonthNum = new Date().getMonth();
 
   const [periodFilter, setPeriodFilter] = useState('THIS_YEAR');
-  const [selectedYear, setSelectedYear] = useState(() => String(currentYearNum));
+  const [selectedYear] = useState(() => String(currentYearNum));
   const [officerSearch, setOfficerSearch] = useState('');
-  const [sortField, setSortField] = useState('ketepatan');
-  const [sortDirection, setSortDirection] = useState('desc');
+  const [sortField] = useState('ketepatan');
+  const [sortDirection] = useState('desc');
   const [rankingPage, setRankingPage] = useState(1);
   const rankingPageSize = 5;
-
-  const availableYears = useMemo(() => {
-    const yearsSet = new Set([currentYearNum, currentYearNum - 1, currentYearNum - 2, currentYearNum + 1]);
-    victims.forEach((v) => {
-      const dates = [
-        v.tanggalInformasiDiterima,
-        v.tanggalMasukRs,
-        v.tanggalKecelakaan,
-        ...(v.riwayatAktivitas || []).map((a) => a.tanggalKunjungan || a.tanggal || a.waktuAktualKunjungan || a.waktuSelesai),
-        ...(v.riwayatKunjungan || []).map((k) => k.tanggalKunjungan || k.tanggal || k.waktuAktualKunjungan)
-      ];
-      dates.forEach((dStr) => {
-        if (!dStr) return;
-        const d = new Date(dStr);
-        if (!isNaN(d.getTime())) {
-          yearsSet.add(d.getFullYear());
-        }
-      });
-    });
-    return Array.from(yearsSet).sort((a, b) => b - a);
-  }, [victims, currentYearNum]);
 
   const periodFilteredVictims = useMemo(() => {
     if (periodFilter === 'ALL') return victims;
@@ -324,6 +271,17 @@ export default function KabagOfficerPerformance() {
   const [selectedDetailOfficerId, setSelectedDetailOfficerId] = useState(() => {
     return paramOfficerId || (officers[0]?.id || '');
   });
+  const [detailSortConfig, setDetailSortConfig] = useState({ key: null, direction: 'asc' });
+
+  const handleDetailSort = (key) => {
+    setDetailSortConfig((prev) => {
+      if (prev.key === key) {
+        if (prev.direction === 'asc') return { key, direction: 'desc' };
+        return { key: null, direction: 'asc' };
+      }
+      return { key, direction: 'asc' };
+    });
+  };
 
   // Sinkronkan jika paramOfficerId berubah di URL
   useEffect(() => {
@@ -380,7 +338,7 @@ export default function KabagOfficerPerformance() {
         kepatuhanSla: found.persentaseKetepatan
       };
     }
-    const kpi = evaluateOfficerKpi(activeOfficerVictims, new Date(), 90, 30);
+    const kpi = evaluateOfficerKpi(activeOfficerVictims, new Date(), 90, 30, activeOfficer);
     return {
       totalKunjungan: kpi.totalKunjungan,
       kunjunganTepat: kpi.kunjunganTepat,
@@ -445,7 +403,7 @@ export default function KabagOfficerPerformance() {
   // Kolom: Nama Korban | RS | Tgl Kecelakaan | Tgl Masuk RS | Total Kunjungan | SLA | Status | Aksi
   const [detailVictimSearch, setDetailVictimSearch] = useState('');
   const [detailSlaFilter, setDetailSlaFilter] = useState('ALL');
-  const [detailConditionFilter, setDetailConditionFilter] = useState('ALL');
+  const [detailConditionFilter] = useState('ALL');
   const [selectedVisitModalData, setSelectedVisitModalData] = useState(null);
   const [activeVisitModalTab, setActiveVisitModalTab] = useState(0);
 
@@ -550,7 +508,7 @@ export default function KabagOfficerPerformance() {
       return {
         victimId: v.id,
         namaKorban: v.nama,
-        rumahSakit: refInfo.displayHospital,
+        rumahSakit: v.rumahSakit || refInfo.displayHospital,
         referralBadge: refInfo.isReferred ? refInfo.badgeLabel : null,
         referralColorClass: refInfo.badgeColorClass,
         tanggalKecelakaan: v.tanggalKecelakaan || v.tanggalKejadian || null,
@@ -568,7 +526,7 @@ export default function KabagOfficerPerformance() {
   }, [activeOfficerVictims, activeOfficer]);
 
   const filteredUniqueVictimRows = useMemo(() => {
-    return uniqueVictimRows.filter((row) => {
+    const filtered = uniqueVictimRows.filter((row) => {
       if (detailVictimSearch.trim()) {
         const q = detailVictimSearch.toLowerCase();
         const matchName = row.namaKorban.toLowerCase().includes(q);
@@ -587,160 +545,41 @@ export default function KabagOfficerPerformance() {
       }
       return true;
     });
-  }, [uniqueVictimRows, detailVictimSearch, detailSlaFilter, detailConditionFilter]);
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // TAB 3: LAPORAN (FILTER, KPI, TABEL REKAPITULASI, EXPORT PDF & CSV)
-  // ══════════════════════════════════════════════════════════════════════════
-  const [reportType, setReportType] = useState('ALL_OFFICERS');
-  const [reportOfficerId, setReportOfficerId] = useState('');
-  const [reportPeriodType, setReportPeriodType] = useState('MONTHLY');
-  const [reportMonth, setReportMonth] = useState(() => String(currentMonthNum));
-  const [reportYear, setReportYear] = useState(() => String(currentYearNum));
-  const [reportStartDate, setReportStartDate] = useState('');
-  const [reportEndDate, setReportEndDate] = useState('');
-  const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
-  const [toastMessage, setToastMessage] = useState('');
+    if (!detailSortConfig.key) return filtered;
 
-  const reportFilteredData = useMemo(() => {
-    const checkDateMatches = (dateStr) => {
-      if (!dateStr) return false;
-      const d = new Date(dateStr);
-      if (isNaN(d.getTime())) return false;
-      const y = String(d.getFullYear());
-      const m = String(d.getMonth());
-
-      if (reportPeriodType === 'MONTHLY') return y === reportYear && m === reportMonth;
-      if (reportPeriodType === 'YEARLY') return y === reportYear;
-      if (reportPeriodType === 'CUSTOM') {
-        if (!reportStartDate && !reportEndDate) return true;
-        const time = d.getTime();
-        const start = reportStartDate ? new Date(reportStartDate).getTime() : 0;
-        const end = reportEndDate ? new Date(reportEndDate).getTime() + 86400000 : Infinity;
-        return time >= start && time <= end;
-      }
-      return true;
+    const dir = detailSortConfig.direction === 'asc' ? 1 : -1;
+    const toTime = (val) => {
+      const d = parseDateSafe(val);
+      return d ? d.getTime() : 0;
     };
 
-    const matchingVictims = victims.filter((v) => {
-      if (reportType === 'INDIVIDUAL_OFFICER' && reportOfficerId) {
-        if (v.petugasId !== reportOfficerId) return false;
+    return [...filtered].sort((a, b) => {
+      switch (detailSortConfig.key) {
+        case 'namaKorban':
+          return dir * (a.namaKorban || '').trim().localeCompare((b.namaKorban || '').trim(), 'id', { sensitivity: 'base', numeric: true });
+        case 'rumahSakit':
+          return dir * (a.rumahSakit || '').trim().localeCompare((b.rumahSakit || '').trim(), 'id', { sensitivity: 'base', numeric: true });
+        case 'tanggalKecelakaan':
+          return dir * (toTime(a.tanggalKecelakaan) - toTime(b.tanggalKecelakaan));
+        case 'tanggalMasukRs':
+          return dir * (toTime(a.tanggalMasukRs) - toTime(b.tanggalMasukRs));
+        case 'totalKunjungan':
+          return dir * ((a.totalKunjungan || 0) - (b.totalKunjungan || 0));
+        case 'slaSummary':
+          return dir * (a.slaSummary || '').trim().localeCompare((b.slaSummary || '').trim(), 'id', { sensitivity: 'base', numeric: true });
+        case 'kondisiTerakhir':
+          return dir * (a.kondisiTerakhir || '').trim().localeCompare((b.kondisiTerakhir || '').trim(), 'id', { sensitivity: 'base', numeric: true });
+        default:
+          return 0;
       }
-      const dates = [
-        v.tanggalInformasiDiterima,
-        v.tanggalKecelakaan,
-        ...(v.riwayatAktivitas || []).map((a) => a.tanggalKunjungan || a.tanggal || a.waktuSelesai)
-      ].filter(Boolean);
-      if (dates.length === 0) return true;
-      return dates.some(checkDateMatches);
     });
-
-    const matchingActivities = [];
-    matchingVictims.forEach((v) => {
-      const acts = v.riwayatAktivitas || [];
-      acts.forEach((a) => {
-        const actDate = a.waktuSelesai || a.tanggalKunjungan || a.tanggal || a.waktuInput;
-        if (checkDateMatches(actDate)) {
-          const isFirstVisit = a.jenisAktivitas === 'Kunjungan Pertama' || a.kunjunganKe === 1;
-          const wasLate = a.terlambat || a.wasLate;
-
-          matchingActivities.push({
-            id: a.id || `${v.id}-${Math.random()}`,
-            namaKorban: v.nama,
-            rumahSakit: v.rumahSakit,
-            petugasNama: a.petugasNama || v.namaPetugas || 'Petugas Lapangan',
-            waktuAktivitas: actDate,
-            jenisAktivitas: isFirstVisit ? 'Kunjungan Pertama' : 'Pemantauan Lanjutan',
-            kondisiKorban: a.kondisiKorban || v.kondisiTerakhir || 'Masih Dirawat',
-            terlambat: wasLate,
-            slaText: wasLate ? 'Terlambat' : 'Tepat Waktu'
-          });
-        }
-      });
-    });
-
-    return { victims: matchingVictims, activities: matchingActivities };
-  }, [victims, reportType, reportOfficerId, reportPeriodType, reportMonth, reportYear, reportStartDate, reportEndDate]);
-
-  const reportSummary = useMemo(() => {
-    const totalPasien = reportFilteredData.victims.length;
-    let totalTepat = 0;
-    let totalTerlambat = 0;
-
-    reportFilteredData.activities.forEach((a) => {
-      if (a.terlambat) totalTerlambat++;
-      else totalTepat++;
-    });
-
-    const totalKunjungan = totalTepat + totalTerlambat;
-    const slaPersen = totalKunjungan > 0 ? Math.round((totalTepat / totalKunjungan) * 100) : null;
-
-    return { totalPasien, totalKunjungan, totalTepat, totalTerlambat, slaPersen };
-  }, [reportFilteredData]);
-
-  // Export PDF Laporan
-  const handleDownloadPdf = async () => {
-    setIsGeneratingPdf(true);
-    setToastMessage('Menyiapkan dokumen PDF Laporan Kinerja...');
-    try {
-      const periodLabel = reportPeriodType === 'MONTHLY'
-        ? `${MONTH_NAMES[Number(reportMonth)]} ${reportYear}`
-        : reportPeriodType === 'YEARLY'
-          ? `Tahun ${reportYear}`
-          : `${reportStartDate || 'Awal'} s/d ${reportEndDate || 'Sekarang'}`;
-
-      const officerObj = reportType === 'INDIVIDUAL_OFFICER'
-        ? officers.find((o) => o.id === reportOfficerId)
-        : null;
-
-      const doc = await generatePerformancePdfReport({
-        officers: reportType === 'INDIVIDUAL_OFFICER' && officerObj ? [officerObj] : officers,
-        evaluatedOfficers,
-        victims: reportFilteredData.victims,
-        activities: reportFilteredData.activities,
-        periodLabel,
-        kpiSummary: reportSummary
-      });
-
-      doc.save(`Laporan_Kinerja_Petugas_JR_${reportYear}.pdf`);
-      setToastMessage('Laporan PDF berhasil diunduh!');
-    } catch (err) {
-      console.error(err);
-      setToastMessage('Gagal membuat PDF.');
-    } finally {
-      setIsGeneratingPdf(false);
-      setTimeout(() => setToastMessage(''), 3000);
-    }
-  };
-
-  // Export CSV
-  const handleExportCsv = () => {
-    const headers = ['No', 'Petugas', 'NIP', 'Wilayah', 'Total Korban', 'Tepat Waktu', 'Terlambat', 'Kepatuhan SLA (%)'];
-    const rows = evaluatedOfficers.map((o, idx) => [
-      idx + 1,
-      `"${o.nama}"`,
-      `"${o.nip || '-'}"`,
-      `"${o.wilayah || '-'}"`,
-      o.jumlahKorbanDitangani,
-      o.tepatWaktu,
-      o.terlambat,
-      o.persentaseKetepatan === null ? 'N/A' : `${o.persentaseKetepatan}%`
-    ]);
-
-    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement('a');
-    link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `Rekapitulasi_Kinerja_Petugas_${selectedYear}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
+  }, [uniqueVictimRows, detailVictimSearch, detailSlaFilter, detailConditionFilter, detailSortConfig]);
 
   return (
     <div className="space-y-6 pb-16">
       {/* ── HEADER UTAMA HALAMAN ── */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200/80 pb-4">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200/80 pb-4 print:hidden">
         <div>
           <h1 className="text-2xl font-black text-slate-900 tracking-tight">
             Kinerja Petugas
@@ -763,7 +602,7 @@ export default function KabagOfficerPerformance() {
       </div>
 
       {/* ── NAVIGASI 3 TAB UTAMA ── */}
-      <div className="flex items-center gap-2 border-b border-slate-200 pb-2">
+      <div className="flex items-center gap-2 border-b border-slate-200 pb-2 print:hidden">
         <button
           type="button"
           onClick={() => setTab('ringkasan')}
@@ -803,14 +642,6 @@ export default function KabagOfficerPerformance() {
           <span>Laporan</span>
         </button>
       </div>
-
-      {/* Toast Notification */}
-      {toastMessage && (
-        <div className="fixed bottom-6 right-6 z-50 bg-slate-900 text-white px-4 py-2.5 rounded-xl shadow-xl text-xs font-semibold flex items-center gap-2 animate-fade-in">
-          <Check className="w-4 h-4 text-emerald-400" />
-          <span>{toastMessage}</span>
-        </div>
-      )}
 
       {/* ════════════════════════════════════════════════════════════════════
           KONTEN TAB 1: RINGKASAN KINERJA
@@ -1292,15 +1123,63 @@ export default function KabagOfficerPerformance() {
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
-                  <tr className="bg-slate-50/80 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
-                    <th className="py-3 px-4">Nama Korban</th>
-                    <th className="py-3 px-4">RS</th>
-                    <th className="py-3 px-4">Tgl Kecelakaan</th>
-                    <th className="py-3 px-4">Tgl Masuk RS</th>
-                    <th className="py-3 px-4 text-center">Total Kunjungan</th>
-                    <th className="py-3 px-4 text-center">SLA</th>
-                    <th className="py-3 px-4">Status</th>
-                    <th className="py-3 px-4 text-right">Aksi</th>
+                  <tr className="bg-slate-50/80 border-b border-slate-200">
+                    <SortableHeader
+                      label="Nama Korban"
+                      sortKey="namaKorban"
+                      currentSortKey={detailSortConfig.key}
+                      currentSortDirection={detailSortConfig.direction}
+                      onSort={handleDetailSort}
+                    />
+                    <SortableHeader
+                      label="RS Saat Ini"
+                      sortKey="rumahSakit"
+                      currentSortKey={detailSortConfig.key}
+                      currentSortDirection={detailSortConfig.direction}
+                      onSort={handleDetailSort}
+                    />
+                    <SortableHeader
+                      label="Tgl Kecelakaan"
+                      sortKey="tanggalKecelakaan"
+                      currentSortKey={detailSortConfig.key}
+                      currentSortDirection={detailSortConfig.direction}
+                      onSort={handleDetailSort}
+                    />
+                    <SortableHeader
+                      label="Tgl Masuk RS"
+                      sortKey="tanggalMasukRs"
+                      currentSortKey={detailSortConfig.key}
+                      currentSortDirection={detailSortConfig.direction}
+                      onSort={handleDetailSort}
+                    />
+                    <SortableHeader
+                      label="Total Kunjungan"
+                      sortKey="totalKunjungan"
+                      currentSortKey={detailSortConfig.key}
+                      currentSortDirection={detailSortConfig.direction}
+                      onSort={handleDetailSort}
+                      align="center"
+                      className="text-center"
+                    />
+                    <SortableHeader
+                      label="SLA"
+                      sortKey="slaSummary"
+                      currentSortKey={detailSortConfig.key}
+                      currentSortDirection={detailSortConfig.direction}
+                      onSort={handleDetailSort}
+                      align="center"
+                      className="text-center"
+                    />
+                    <SortableHeader
+                      label="Status"
+                      sortKey="kondisiTerakhir"
+                      currentSortKey={detailSortConfig.key}
+                      currentSortDirection={detailSortConfig.direction}
+                      onSort={handleDetailSort}
+                    />
+                    <th className="py-3 px-4 font-bold text-slate-700 uppercase tracking-wider text-[11px] text-right">
+                      Aksi
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -1341,17 +1220,13 @@ export default function KabagOfficerPerformance() {
                           </span>
                         </td>
                         <td className="py-3.5 px-4 text-right whitespace-nowrap">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSelectedVisitModalData(row);
-                              setActiveVisitModalTab(0);
-                            }}
+                          <Link
+                            to={`/kabag/korban/${row.victimId}`}
                             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-[#145DA0] bg-blue-50 hover:bg-blue-100 transition-colors cursor-pointer"
                           >
                             <Eye className="w-3.5 h-3.5" />
                             <span>Lihat</span>
-                          </button>
+                          </Link>
                         </td>
                       </tr>
                     ))

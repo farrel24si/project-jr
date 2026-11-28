@@ -1,11 +1,11 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
-import { 
-  Home, 
-  Calendar, 
-  Bell, 
-  LogOut, 
+import {
+  Home,
+  Calendar,
+  Bell,
+  LogOut,
   Menu,
   ArrowUpRight,
   CheckCheck,
@@ -16,6 +16,8 @@ import {
 } from 'lucide-react';
 import { storageService } from '../../services/storageService';
 import { calculateFirstVisitSla, calculateMonitoringSla } from '../../services/slaService';
+import { isVictimFinished, getMonitoringStatus, MONITORING_STATUS } from '../../utils/monitoringStatus';
+import { getReferralPerspectiveInfo, isSameHospital } from '../../utils/referralUtils';
 
 function formatRelativeTime(dateStr) {
   if (!dateStr) return 'Baru saja';
@@ -60,42 +62,68 @@ export default function Navbar({ onToggleSidebar }) {
       // ignore
     }
 
-    // 3. Generate notifikasi operasional SLA & Pemantauan secara dinamis dari data korban terkini
-    const victims = storageService.getVictims() || [];
+    // 3. Generate notifikasi operasional SLA, Rujukan Masuk, & Pasien Perlu Ditangani secara dinamis dari data korban terkini
+    const rawVictims = storageService.getVictims() || [];
+    const allOfficers = storageService.getOfficers() || [];
+    const victims = isKabag
+      ? rawVictims
+      : storageService.getOfficerVictimsForPortal(currentUser?.profile || currentUser?.profile?.id || currentUser?.profile?.backendOfficerId);
     const now = new Date();
     const systemNotifs = [];
 
     const officerId = currentUser?.profile?.id;
+    const backendOfficerId = currentUser?.profile?.backendOfficerId;
     const officerName = (currentUser?.profile?.nama || '').toLowerCase().trim();
     const plotting = Array.isArray(currentUser?.profile?.plottingRs)
-      ? currentUser.profile.plottingRs.map((r) => (r || '').toLowerCase().trim())
+      ? currentUser.profile.plottingRs.map((r) => (r || '').toLowerCase().trim()).filter(Boolean)
       : [];
 
     victims.forEach((v) => {
-      const isDischarged = Boolean(
-        v.kondisiTerakhir === 'Sudah Pulang' ||
-        v.kondisiTerakhir === 'Pulang' ||
-        v.kondisiTerakhir === 'Selesai' ||
-        v.kondisiTerakhir === 'Meninggal Dunia' ||
-        v.status_kondisi === 'Pulang' ||
-        v.status_kondisi === 'Sudah Pulang' ||
-        v.status_kondisi === 'Selesai' ||
-        v.status_kondisi === 'Meninggal Dunia' ||
-        (v.statusPemantauan === 'Selesai Dipantau' && !v.isRawatLanjutan)
-      );
+      if (!v) return;
+      const isArchived = v.statusPemantauan === 'Diarsipkan' || v.status_pemantauan === 'Diarsipkan';
+      const isFinished = isVictimFinished(v);
+      if (isArchived || isFinished) return;
 
-      // A. Kunjungan Awal (First Visit SLA)
-      const fSla = calculateFirstVisitSla(v.tanggalInformasiDiterima, v.kunjunganPertama, now);
-      if (!v.kunjunganPertama || v.kunjunganPertama.statusKunjungan === 'Menunggu') {
+      const refInfo = getReferralPerspectiveInfo(v, null, currentUser);
+      const isReferredOut = refInfo.isReferred && refInfo.isOriginView;
+      if (!isKabag && isReferredOut) return;
+
+      // A. Notifikasi Pasien Rujukan Masuk (sinkron lintas browser/perangkat dari data backend)
+      if (refInfo.isReferred && (refInfo.isDestinationView || isKabag)) {
+        const hasStoredRefNotif = storedNotifs.some(
+          (sn) => sn.type === 'RUJUKAN_MASUK' && String(sn.victimId) === String(v.id)
+        );
+        if (!hasStoredRefNotif) {
+          systemNotifs.push({
+            id: `SYS-RUJUKAN-MASUK-${v.id}`,
+            type: 'RUJUKAN_MASUK',
+            title: 'Pasien Rujukan Masuk',
+            message: `Korban ${v.nama} dirujuk dari ${refInfo.rsAsal} ke ${refInfo.rsTujuan} dan perlu ditangani.`,
+            victimId: v.id,
+            victimName: v.nama,
+            rumahSakitAsal: refInfo.rsAsal,
+            rumahSakitTujuan: refInfo.rsTujuan,
+            officerId: v.petugasTujuanId || v.petugasId,
+            officerName: v.petugasTujuanNama || v.namaPetugas || 'Petugas RS Tujuan',
+            createdAt: v.tanggalRujukan || v.tanggalPemantauanTerakhir || v.tanggalInformasiDiterima || now.toISOString(),
+            priority: 1
+          });
+        }
+      }
+
+      // B. Pasien Masuk / Kunjungan Awal (First Visit SLA)
+      const hasFirstDone = Boolean(v.kunjunganPertama && v.kunjunganPertama.statusKunjungan !== 'Menunggu');
+      const fSla = calculateFirstVisitSla(v.tanggalInformasiDiterima, hasFirstDone ? v.kunjunganPertama : null, now);
+      if (!hasFirstDone) {
         if (fSla.isOverdue) {
           systemNotifs.push({
             id: `SYS-FIRST-OVERDUE-${v.id}`,
             type: 'SLA_TERLAMBAT',
             title: 'Kunjungan Awal Terlambat',
-            message: `Kunjungan awal korban ${v.nama} di ${v.rumahSakit} telah melewati batas waktu 3 hari.`,
+            message: `Korban ${v.nama} di ${refInfo.displayHospital || v.rumahSakit} perlu segera dikunjungi (lewat 72 jam).`,
             victimId: v.id,
             victimName: v.nama,
-            rumahSakitTujuan: v.rumahSakit,
+            rumahSakitTujuan: refInfo.displayHospital || v.rumahSakit,
             officerId: v.petugasId,
             officerName: v.namaPetugas || 'Petugas RS',
             createdAt: v.tanggalInformasiDiterima || now.toISOString(),
@@ -105,11 +133,11 @@ export default function Navbar({ onToggleSidebar }) {
           systemNotifs.push({
             id: `SYS-FIRST-WAITING-${v.id}`,
             type: 'TUGAS_MENUNGGU',
-            title: 'Menunggu Kunjungan Pertama',
-            message: `Korban baru ${v.nama} di ${v.rumahSakit} sedang menunggu pelaksanaan kunjungan awal.`,
+            title: 'Pasien Baru Masuk — Perlu Kunjungan',
+            message: `Korban baru ${v.nama} di ${refInfo.displayHospital || v.rumahSakit} menunggu kunjungan awal.`,
             victimId: v.id,
             victimName: v.nama,
-            rumahSakitTujuan: v.rumahSakit,
+            rumahSakitTujuan: refInfo.displayHospital || v.rumahSakit,
             officerId: v.petugasId,
             officerName: v.namaPetugas || 'Petugas RS',
             createdAt: v.tanggalInformasiDiterima || now.toISOString(),
@@ -118,18 +146,19 @@ export default function Navbar({ onToggleSidebar }) {
         }
       }
 
-      // B. Pemantauan Lanjutan Berkala (Monitoring SLA 3 Hari)
-      if (!isDischarged && v.kunjunganPertama && v.kunjunganPertama.statusKunjungan !== 'Menunggu') {
+      // C. Pasien yang Perlu Ditangani / Pemantauan Lanjutan (Monitoring SLA 3 Hari)
+      if (hasFirstDone) {
         const mSla = calculateMonitoringSla(v, now);
+        const monStatus = getMonitoringStatus(v);
         if (mSla.isOverdue && mSla.status === 'TERLAMBAT') {
           systemNotifs.push({
             id: `SYS-MON-OVERDUE-${v.id}`,
             type: 'SLA_TERLAMBAT',
-            title: 'Kunjungan Pemantauan Terlambat',
-            message: `Pemantauan berkala korban ${v.nama} di ${v.rumahSakit} melewati interval 3 hari (72 Jam).`,
+            title: 'Pasien Perlu Segera Ditangani (Terlambat)',
+            message: `Pemantauan berkala korban ${v.nama} di ${refInfo.displayHospital || v.rumahSakit} melewati batas 72 jam.`,
             victimId: v.id,
             victimName: v.nama,
-            rumahSakitTujuan: v.rumahSakit,
+            rumahSakitTujuan: refInfo.displayHospital || v.rumahSakit,
             officerId: v.petugasId,
             officerName: v.namaPetugas || 'Petugas RS',
             createdAt: v.jadwalKunjunganBerikutnya || v.jadwalPemantauanBerikutnya || now.toISOString(),
@@ -139,11 +168,25 @@ export default function Navbar({ onToggleSidebar }) {
           systemNotifs.push({
             id: `SYS-MON-WARN-${v.id}`,
             type: 'SLA_MENDEKATI_TENGGAT',
-            title: 'Mendekati Batas Waktu',
-            message: `Jadwal kunjungan ${v.nama} di ${v.rumahSakit} tersisa kurang dari 24 jam.`,
+            title: 'Mendekati Batas Waktu Kunjungan',
+            message: `Jadwal kunjungan ${v.nama} di ${refInfo.displayHospital || v.rumahSakit} tersisa kurang dari 24 jam.`,
             victimId: v.id,
             victimName: v.nama,
-            rumahSakitTujuan: v.rumahSakit,
+            rumahSakitTujuan: refInfo.displayHospital || v.rumahSakit,
+            officerId: v.petugasId,
+            officerName: v.namaPetugas || 'Petugas RS',
+            createdAt: v.jadwalKunjunganBerikutnya || v.jadwalPemantauanBerikutnya || now.toISOString(),
+            priority: 2
+          });
+        } else if (monStatus === MONITORING_STATUS.DALAM_PEMANTAUAN && (mSla.isOverdue || mSla.isWarning)) {
+          systemNotifs.push({
+            id: `SYS-MON-DUE-${v.id}`,
+            type: 'TUGAS_MENUNGGU',
+            title: 'Pasien Perlu Tindak Lanjut',
+            message: `Korban ${v.nama} di ${refInfo.displayHospital || v.rumahSakit} sudah waktunya pemantauan lanjutan.`,
+            victimId: v.id,
+            victimName: v.nama,
+            rumahSakitTujuan: refInfo.displayHospital || v.rumahSakit,
             officerId: v.petugasId,
             officerName: v.namaPetugas || 'Petugas RS',
             createdAt: v.jadwalKunjunganBerikutnya || v.jadwalPemantauanBerikutnya || now.toISOString(),
@@ -153,22 +196,22 @@ export default function Navbar({ onToggleSidebar }) {
       }
     });
 
-    // Gabungkan notifikasi tersimpan (rujukan antar RS) + notifikasi sistem (SLA & Kunjungan)
+    // Gabungkan notifikasi tersimpan (rujukan antar RS) + notifikasi sistem (SLA, Rujukan Masuk, & Kunjungan)
     const combined = [...storedNotifs, ...systemNotifs];
 
     // Filter notifikasi sesuai role pengguna
     let roleFiltered = combined;
     if (!isKabag) {
+      const offNum = officerId ? String(officerId).replace(/\D/g, '') : '';
       roleFiltered = combined.filter((n) => {
-        if (n.officerId && officerId && String(n.officerId).trim() === String(officerId).trim()) return true;
+        if (n.id && n.id.startsWith('SYS-')) return true; // Sudah difilter via getOfficerVictimsForPortal
+        const nOffStr = String(n.officerId || '').trim();
+        const nOffNum = nOffStr.replace(/\D/g, '');
+        if (nOffStr && officerId && nOffStr === String(officerId).trim()) return true;
+        if (nOffStr && backendOfficerId && nOffStr === String(backendOfficerId).trim()) return true;
+        if (nOffNum && offNum && nOffNum === offNum) return true;
         if (n.officerName && officerName && n.officerName.toLowerCase().trim() === officerName) return true;
-        if (
-          n.rumahSakitTujuan &&
-          plotting.some((p) => {
-            const t = n.rumahSakitTujuan.toLowerCase().trim();
-            return p === t || (t.length >= 4 && (p.includes(t) || t.includes(p)));
-          })
-        ) {
+        if (n.rumahSakitTujuan && plotting.some((p) => isSameHospital(p, n.rumahSakitTujuan))) {
           return true;
         }
         return false;
@@ -201,7 +244,7 @@ export default function Navbar({ onToggleSidebar }) {
       window.removeEventListener('jr_officers_updated', loadNotifications);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentUser?.profile?.id, currentUser?.profile?.nama, isKabag]);
+  }, [currentUser?.profile?.id, currentUser?.profile?.backendOfficerId, currentUser?.profile?.nama, currentUser?.profile?.plottingRs, isKabag]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   useEffect(() => {
@@ -272,26 +315,42 @@ export default function Navbar({ onToggleSidebar }) {
     navigate('/login', { replace: true });
   };
 
-  const currentDateFormatted = new Date().toLocaleDateString('id-ID', {
+  const [currentTime, setCurrentTime] = useState(() => new Date());
+
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const currentDateFormatted = currentTime.toLocaleDateString('id-ID', {
     weekday: 'long',
     day: 'numeric',
     month: 'long',
-    year: 'numeric'
-  });
+    year: 'numeric',
+    timeZone: 'Asia/Jakarta'
+  }).toUpperCase();
+
+  const currentTimeFormatted = `${currentTime.toLocaleTimeString('id-ID', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+    timeZone: 'Asia/Jakarta'
+  })} WIB`;
 
   const greeting = useMemo(() => {
-    const hour = new Date().getHours();
+    const hour = currentTime.getHours();
     if (hour >= 4 && hour < 11) return 'Selamat Pagi';
     if (hour >= 11 && hour < 15) return 'Selamat Siang';
     if (hour >= 15 && hour < 18) return 'Selamat Sore';
     return 'Selamat Malam';
-  }, []);
+  }, [currentTime.getHours()]);
 
   const userName = currentUser?.profile?.nama || currentUser?.nama || (isKabag ? 'Kabag' : 'Petugas');
 
   return (
-    <header className="bg-white border-b border-slate-200/90 h-16 px-4 sm:px-6 flex items-center justify-between sticky top-0 z-30 shadow-2xs">
-      {/* Left: Mobile Toggle & Breadcrumbs */}
+    <header className="bg-white border-b border-slate-200/90 h-16 px-4 sm:px-6 flex items-center justify-between sticky top-0 z-30 shadow-2xs print:hidden">
+      {/* Left: Mobile Toggle & Date/Time Pill */}
       <div className="flex items-center gap-3">
         <button
           type="button"
@@ -302,17 +361,10 @@ export default function Navbar({ onToggleSidebar }) {
           <Menu className="w-5 h-5" />
         </button>
 
-        <div className="flex items-center gap-2.5 text-xs text-slate-500 flex-wrap">
-          <div className="flex items-center gap-1.5 text-slate-700 font-semibold">
-            <Home className="w-3.5 h-3.5 text-slate-400" />
-            <span>/</span>
-            <span>Sistem Monitoring Terpadu</span>
-          </div>
-          <span className="text-slate-300 hidden sm:inline">•</span>
-          <div className="hidden sm:flex items-center gap-1.5 text-slate-500">
-            <Calendar className="w-3.5 h-3.5 text-slate-400" />
-            <span>{currentDateFormatted}</span>
-          </div>
+        <div className="inline-flex items-center gap-2 text-[10px] sm:text-[11px] font-bold text-sky-700 bg-sky-50 border border-sky-200/80 px-3 py-1 rounded-full uppercase tracking-wider">
+          <span className="hidden sm:inline">{currentDateFormatted}</span>
+          <span className="hidden sm:inline text-sky-400">•</span>
+          <span className="font-mono tabular-nums">{currentTimeFormatted}</span>
         </div>
       </div>
 
@@ -323,11 +375,10 @@ export default function Navbar({ onToggleSidebar }) {
           <button
             type="button"
             onClick={() => setNotifDropdownOpen((prev) => !prev)}
-            className={`p-2 rounded-xl transition-all relative cursor-pointer ${
-              notifDropdownOpen
-                ? 'bg-[#145DA0] text-white shadow-xs'
-                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
-            }`}
+            className={`p-2 rounded-xl transition-all relative cursor-pointer ${notifDropdownOpen
+              ? 'bg-[#145DA0] text-white shadow-xs'
+              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
             title={currentUser?.role === 'petugas' ? 'Pusat Notifikasi & Batas Waktu' : 'Pusat Notifikasi & Peringatan SLA'}
           >
             <Bell className="w-4 h-4" />
@@ -340,7 +391,7 @@ export default function Navbar({ onToggleSidebar }) {
 
           {/* Dropdown Popover */}
           {notifDropdownOpen && (
-            <div className="absolute right-0 mt-2 w-[calc(100vw-24px)] max-w-sm sm:w-[420px] bg-white rounded-2xl shadow-2xl border border-slate-200/95 py-2 z-50 animate-in fade-in zoom-in-95 duration-150">
+            <div className="fixed inset-x-3 top-[68px] sm:inset-x-auto sm:top-auto sm:absolute sm:right-0 sm:mt-2 sm:w-[420px] bg-white rounded-2xl shadow-2xl border border-slate-200/95 py-2 z-50 animate-in fade-in zoom-in-95 duration-150">
               {/* Header Popover */}
               <div className="px-4 py-2.5 border-b border-slate-100 flex items-center justify-between">
                 <div className="flex items-center gap-2">
@@ -370,33 +421,30 @@ export default function Navbar({ onToggleSidebar }) {
                 <button
                   type="button"
                   onClick={() => setActiveTab('ALL')}
-                  className={`px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${
-                    activeTab === 'ALL'
-                      ? 'bg-white text-[#145DA0] shadow-2xs'
-                      : 'text-slate-500 hover:text-slate-800'
-                  }`}
+                  className={`px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${activeTab === 'ALL'
+                    ? 'bg-white text-[#145DA0] shadow-2xs'
+                    : 'text-slate-500 hover:text-slate-800'
+                    }`}
                 >
                   Semua ({notifications.length})
                 </button>
                 <button
                   type="button"
                   onClick={() => setActiveTab('UNREAD')}
-                  className={`px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${
-                    activeTab === 'UNREAD'
-                      ? 'bg-white text-[#145DA0] shadow-2xs'
-                      : 'text-slate-500 hover:text-slate-800'
-                  }`}
+                  className={`px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${activeTab === 'UNREAD'
+                    ? 'bg-white text-[#145DA0] shadow-2xs'
+                    : 'text-slate-500 hover:text-slate-800'
+                    }`}
                 >
                   Belum Dibaca ({unreadCount})
                 </button>
                 <button
                   type="button"
                   onClick={() => setActiveTab('SLA')}
-                  className={`px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${
-                    activeTab === 'SLA'
-                      ? 'bg-white text-rose-600 shadow-2xs'
-                      : 'text-slate-500 hover:text-slate-800'
-                  }`}
+                  className={`px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${activeTab === 'SLA'
+                    ? 'bg-white text-rose-600 shadow-2xs'
+                    : 'text-slate-500 hover:text-slate-800'
+                    }`}
                 >
                   {currentUser?.role === 'petugas' ? 'Batas Waktu' : 'Peringatan SLA'}
                 </button>
@@ -412,8 +460,8 @@ export default function Navbar({ onToggleSidebar }) {
                       {activeTab === 'UNREAD'
                         ? 'Tidak ada notifikasi baru yang belum dibaca.'
                         : currentUser?.role === 'petugas'
-                        ? 'Tidak ada peringatan keterlambatan batas waktu pada saat ini.'
-                        : 'Tidak ada peringatan keterlambatan SLA pada saat ini.'}
+                          ? 'Tidak ada peringatan keterlambatan batas waktu pada saat ini.'
+                          : 'Tidak ada peringatan keterlambatan SLA pada saat ini.'}
                     </p>
                   </div>
                 ) : (
@@ -448,9 +496,8 @@ export default function Navbar({ onToggleSidebar }) {
                       <div
                         key={notif.id}
                         onClick={() => handleNotificationClick(notif)}
-                        className={`p-3.5 hover:bg-slate-50 transition-colors cursor-pointer flex items-start gap-3 ${
-                          !notif.read ? 'bg-blue-50/30' : ''
-                        }`}
+                        className={`p-3.5 hover:bg-slate-50 transition-colors cursor-pointer flex items-start gap-3 ${!notif.read ? 'bg-blue-50/30' : ''
+                          }`}
                       >
                         <div className={`w-8 h-8 rounded-xl ${iconBg} flex items-center justify-center shrink-0 mt-0.5 shadow-2xs`}>
                           <IconComponent className="w-4 h-4" />
@@ -512,11 +559,11 @@ export default function Navbar({ onToggleSidebar }) {
           <Link
             to={isKabag ? '/kabag/profil' : '/petugas/profil'}
             className="flex items-center px-2 sm:px-2.5 py-1.5 rounded-xl hover:bg-slate-100 transition-colors cursor-pointer group"
-            title="Profil & Pengaturan Akun"
+            title="Akun Saya"
           >
             <span className="text-xs font-bold text-slate-800 group-hover:text-[#0A3981] transition-colors whitespace-nowrap flex items-center">
-              <span className="text-slate-500 font-semibold mr-1">{greeting},</span>
-              <span className="truncate max-w-[130px] sm:max-w-xs">{userName}</span>
+              <span className="hidden sm:inline text-slate-500 font-semibold mr-1">{greeting},</span>
+              <span className="truncate max-w-[120px] sm:max-w-xs">{userName}</span>
             </span>
           </Link>
 

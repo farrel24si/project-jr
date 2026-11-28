@@ -288,12 +288,18 @@ export default function CameraCapture({
     };
   }, []);
 
-  // Format jam realtime untuk live viewfinder
+  // Format jam realtime untuk live viewfinder (WIB / Asia/Jakarta)
   const formattedRealtimeClock = realtimeNow.toLocaleDateString('id-ID', {
     day: '2-digit',
     month: 'short',
-    year: 'numeric'
-  }) + ', ' + realtimeNow.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).replace(/:/g, '.') + ' WIB';
+    year: 'numeric',
+    timeZone: 'Asia/Jakarta'
+  }) + ', ' + realtimeNow.toLocaleTimeString('id-ID', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    timeZone: 'Asia/Jakarta'
+  }).replace(/:/g, '.') + ' WIB';
 
   return (
     <div className="space-y-3">

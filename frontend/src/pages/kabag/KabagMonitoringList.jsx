@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { storageService } from '../../services/storageService';
 import {
@@ -7,44 +7,25 @@ import {
   getVictimDeadline,
   compareVictimsBySlaPriority
 } from '../../services/slaService';
-import { isVictimFinished } from '../../utils/monitoringStatus';
-import { formatDateIndo, formatDateTimeIndo } from '../../utils/dateUtils';
+import { isVictimFinished, hasPhysicalVisit } from '../../utils/monitoringStatus';
+import { formatDateTimeIndo as formatDateTimeShort } from '../../utils/dateUtils';
 import { getReferralPerspectiveInfo, matchesHospitalFilter } from '../../utils/referralUtils';
 import VictimDetailDrawer from '../../components/kabag/VictimDetailDrawer';
 import {
   Search,
-  Filter,
   ChevronLeft,
   ChevronRight,
   Building2,
-  Calendar,
   Eye,
   RotateCcw,
   Users,
   Clock,
-  HeartPulse,
-  UserCheck,
   CheckCircle2,
   AlertTriangle,
   AlertCircle,
   History,
   CalendarCheck
 } from 'lucide-react';
-
-function formatDateShort(dateStr) {
-  return formatDateIndo(dateStr);
-}
-
-function formatDateTimeShort(dateStr) {
-  return formatDateTimeIndo(dateStr);
-}
-
-function getInitials(name) {
-  if (!name) return '??';
-  const parts = name.trim().split(/\s+/);
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[1][0]).toUpperCase();
-}
 
 const PAGE_SIZE = 8;
 
@@ -103,7 +84,7 @@ export default function KabagMonitoringList() {
 
       if (isDone) return;
 
-      const firstPending = !v.kunjunganPertama && (!v.riwayatKunjungan || v.riwayatKunjungan.length === 0);
+      const firstPending = !hasPhysicalVisit(v);
 
       if (firstPending) {
         belumDikunjungi++;
@@ -557,7 +538,6 @@ export default function KabagMonitoringList() {
               ) : (
                 paginatedData.map((v, idx) => {
                   const number = String((currentPage - 1) * PAGE_SIZE + idx + 1).padStart(2, '0');
-                  const initials = getInitials(v.nama);
                   const officerInfo = getOfficerInfo(v);
                   const deadlineStr = v.evalStatus.deadline ? formatDateTimeShort(v.evalStatus.deadline) : '—';
                   const isUrgentApproaching = v.evalStatus.visitState === 'MENDEKATI_TENGGAT';
@@ -688,7 +668,6 @@ export default function KabagMonitoringList() {
           ) : (
             paginatedData.map((v, idx) => {
               const number = String((currentPage - 1) * PAGE_SIZE + idx + 1).padStart(2, '0');
-              const initials = getInitials(v.nama);
               const officerInfo = getOfficerInfo(v);
               const isUrgentApproaching = v.evalStatus.visitState === 'MENDEKATI_TENGGAT';
               const refInfo = getReferralPerspectiveInfo(v, hospitalFilter);

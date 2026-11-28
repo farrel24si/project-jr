@@ -1,16 +1,14 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import Modal from '../common/Modal';
-import { 
-  Building2, 
-  ArrowRight, 
-  User, 
-  Calendar, 
-  FileText, 
-  AlertTriangle, 
-  CheckCircle2, 
+import HospitalSingleSearchSelect from '../common/HospitalSingleSearchSelect';
+import {
+  User,
+  Calendar,
+  FileText,
+  AlertTriangle,
+  CheckCircle2,
   ArrowUpRight,
-  Activity,
-  ShieldAlert
+  Activity
 } from 'lucide-react';
 import { storageService } from '../../services/storageService';
 import { INITIAL_HOSPITALS } from '../../services/initialDataset';
@@ -24,7 +22,6 @@ export default function PatientTransitionModal({
   onConfirmed
 }) {
   const isRujukan = transitionType === 'RUJUKAN';
-  const isRawatLanjutan = transitionType === 'RAWAT_LANJUTAN';
 
   const [targetHospital, setTargetHospital] = useState(
     targetHospitalDefault || (isRujukan ? '' : (victim?.rumahSakit || ''))
@@ -95,7 +92,7 @@ export default function PatientTransitionModal({
     try {
       let updatedVictim = null;
       if (isRujukan) {
-        updatedVictim = storageService.confirmRujukan(victim.id, {
+        updatedVictim = await storageService.confirmRujukan(victim.id, {
           rumahSakitTujuan: targetHospital.trim(),
           tanggalRujukan: transitionDate,
           catatan: notes.trim() || `Pasien dirujuk dari ${victim.rumahSakit} ke ${targetHospital.trim()} untuk penanganan medis lanjutan.`
@@ -195,25 +192,15 @@ export default function PatientTransitionModal({
           {/* Form Input RS Tujuan */}
           <div>
             <label className="block text-slate-700 font-semibold mb-1">
-              {isRujukan ? 'Pilih Rumah Sakit Tujuan Rujukan' : 'Rumah Sakit Tempat Rawat Lanjutan'} <span className="text-red-500">*</span>
+              {isRujukan ? 'Rumah Sakit Tujuan Rujukan' : 'Rumah Sakit Tempat Rawat Lanjutan'} <span className="text-red-500">*</span>
             </label>
-            <div className="relative">
-              <select
-                value={targetHospital}
-                onChange={(e) => setTargetHospital(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg border border-slate-300 focus:outline-none focus:ring-1 focus:ring-blue-600 bg-white text-xs font-semibold cursor-pointer"
-                required
-              >
-                <option value="">— Pilih Rumah Sakit Tujuan Rujukan —</option>
-                {hospitalsList
-                  .filter((h) => !isRujukan || (h || '').trim().toLowerCase() !== (victim.rumahSakit || '').trim().toLowerCase())
-                  .map((h) => (
-                    <option key={h} value={h}>
-                      {h}
-                    </option>
-                  ))}
-              </select>
-            </div>
+            <HospitalSingleSearchSelect
+              value={targetHospital}
+              onChange={setTargetHospital}
+              hospitals={hospitalsList}
+              excludeHospital={isRujukan ? victim.rumahSakit : ''}
+              placeholder={isRujukan ? 'Ketik kata kunci nama rumah sakit rujukan...' : 'Ketik kata kunci nama rumah sakit...'}
+            />
           </div>
 
           {/* Petugas JR Penanggung Jawab di RS Tujuan */}

@@ -614,6 +614,99 @@ export async function generateOfficialKabagReportPdf({
 
   currentY = doc.lastAutoTable.finalY + 6;
 
+  // 2.5 Grafik Batang Perbandingan Kinerja Petugas (Tepat Waktu vs Terlambat)
+  if (Array.isArray(officerRankings) && officerRankings.length > 0) {
+    if (currentY > pageHeight - 62) {
+      doc.addPage();
+      currentY = 16;
+    }
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(15, 23, 42);
+    doc.text('PERBANDINGAN KINERJA PETUGAS', marginX, currentY);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7);
+    doc.setTextColor(100, 116, 139);
+    doc.text(`Jumlah kunjungan tepat waktu vs terlambat per petugas (${periodYear})`, marginX, currentY + 3.5);
+
+    // Legenda kanan
+    const legX = pageWidth - marginX - 48;
+    doc.setFillColor(5, 150, 105);
+    doc.rect(legX, currentY - 2, 3, 3, 'F');
+    doc.setTextColor(5, 150, 105);
+    doc.text('Tepat Waktu', legX + 4.5, currentY + 0.5);
+
+    doc.setFillColor(239, 68, 68);
+    doc.rect(legX + 25, currentY - 2, 3, 3, 'F');
+    doc.setTextColor(239, 68, 68);
+    doc.text('Terlambat', legX + 29.5, currentY + 0.5);
+
+    currentY += 6;
+
+    const chartData = [...officerRankings].sort((a, b) => (a.nama || '').localeCompare(b.nama || ''));
+    const maxVal = Math.max(4, ...chartData.map((o) => Math.max(o.tepatWaktu || 0, o.terlambat || 0)));
+    const chartLeft = marginX + 8;
+    const chartWidth = pageWidth - marginX - chartLeft;
+    const chartHeight = 32;
+    const baseLineY = currentY + chartHeight;
+
+    // Grid horizontal & angka Y
+    doc.setDrawColor(226, 232, 240);
+    doc.setLineWidth(0.2);
+    doc.setFontSize(6.5);
+    doc.setTextColor(100, 116, 139);
+    for (let step = 0; step <= 4; step += 1) {
+      const yPos = baseLineY - (chartHeight * step) / 4;
+      doc.line(chartLeft, yPos, chartLeft + chartWidth, yPos);
+      const tickVal = Math.round((maxVal * step) / 4);
+      doc.text(String(tickVal), marginX + 4, yPos + 1, { align: 'right' });
+    }
+    doc.setDrawColor(203, 213, 225);
+    doc.line(chartLeft, baseLineY, chartLeft + chartWidth, baseLineY);
+
+    const slotWidth = chartWidth / chartData.length;
+    const barW = Math.min(7, slotWidth * 0.25);
+
+    chartData.forEach((o, i) => {
+      const centerX = chartLeft + slotWidth * i + slotWidth / 2;
+      const tw = o.tepatWaktu || 0;
+      const tl = o.terlambat || 0;
+
+      // Bar Tepat Waktu
+      const twH = (tw / maxVal) * chartHeight;
+      if (tw > 0) {
+        doc.setFillColor(5, 150, 105);
+        doc.rect(centerX - barW - 0.8, baseLineY - twH, barW, twH, 'F');
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(6.5);
+        doc.setTextColor(6, 95, 70);
+        doc.text(String(tw), centerX - barW / 2 - 0.8, baseLineY - twH - 1.2, { align: 'center' });
+      }
+
+      // Bar Terlambat
+      const tlH = (tl / maxVal) * chartHeight;
+      if (tl > 0) {
+        doc.setFillColor(239, 68, 68);
+        doc.rect(centerX + 0.8, baseLineY - tlH, barW, tlH, 'F');
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(6.5);
+        doc.setTextColor(185, 28, 28);
+        doc.text(String(tl), centerX + barW / 2 + 0.8, baseLineY - tlH - 1.2, { align: 'center' });
+      }
+
+      // Nama singkat petugas
+      const shortName = (o.nama || '').split(' ')[0] || o.nama || '-';
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(6.5);
+      doc.setTextColor(71, 85, 105);
+      doc.text(shortName, centerX, baseLineY + 4, { align: 'center' });
+    });
+
+    currentY = baseLineY + 10;
+  }
+
   // 3. Daftar Korban yang Perlu Ditindaklanjuti
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(9);
@@ -692,12 +785,12 @@ export async function generateOfficialKabagReportPdf({
   currentY += 2;
 
   const rankingRows = (officerRankings || []).map((o, idx) => [
-    String(o.peringkat || idx + 1),
+    String(o.peringkat ?? (o.jumlahKorbanDitangani > 0 ? idx + 1 : '-')),
     o.nama || '—',
     `${o.jumlahKorbanDitangani || 0} Korban`,
     `${o.jumlahKunjungan || 0} Kunjungan`,
     o.ketepatanWaktuKunjungan || `${o.tepatWaktu || 0} Tepat`,
-    `${o.persentaseSla ?? 100}%`
+    o.persentaseSla !== null && o.persentaseSla !== undefined ? `${o.persentaseSla}%` : 'N/A'
   ]);
 
   runAutoTable(doc, {

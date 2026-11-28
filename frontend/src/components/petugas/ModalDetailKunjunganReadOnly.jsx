@@ -3,7 +3,6 @@ import Modal from '../common/Modal';
 import AuthenticatedImage from '../common/AuthenticatedImage';
 import { parseCatatanKondisi } from '../../services/backendMapper';
 import { getCachedPhoto } from '../../services/photoService';
-import { getRealVisitPhoto } from '../../utils/realPhotos';
 import { formatDateTimeIndo } from '../../utils/dateUtils';
 import {
   Calendar,
@@ -75,7 +74,7 @@ export default function ModalDetailKunjunganReadOnly({
     (activity.visitId ? getCachedPhoto(`VISIT-${activity.visitId}`) : null) ||
     (activity.id && !/^\d+$/.test(String(activity.id)) ? getCachedPhoto(activity.id) : null) ||
     activity.fotoUrl ||
-    getRealVisitPhoto(activity.id || activity.visitId || victim?.id);
+    null;
 
   return (
     <Modal

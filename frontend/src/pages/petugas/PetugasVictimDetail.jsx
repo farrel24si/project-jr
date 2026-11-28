@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { storageService } from '../../services/storageService';
-import { calculateFirstVisitSla, calculateMonitoringSla } from '../../services/slaService';
+import { calculateMonitoringSla } from '../../services/slaService';
 import { useAuth } from '../../context/AuthContext';
 import FormPemantauanModal from '../../components/petugas/FormPemantauanModal';
 import ModalDetailKunjunganReadOnly from '../../components/petugas/ModalDetailKunjunganReadOnly';
@@ -10,40 +10,29 @@ import RiwayatPerawatanTimeline, { resolveReferralHospitals } from '../../compon
 import PatientTransitionModal from '../../components/petugas/PatientTransitionModal';
 import MonitoringStatusBadge from '../../components/common/MonitoringStatusBadge';
 import {
-  MONITORING_STATUS,
-  getMonitoringStatus,
   isVictimFinished as checkVictimFinished,
-  canRecordVisit
+  isDeceasedVictim,
+  isPulangVictim,
+  isPenolakanJaminanVictim,
+  canReactivateMonitoring,
+  getCompletionReason
 } from '../../utils/monitoringStatus';
 import { cleanPhoneNumber, cleanSumberInformasi } from '../../services/backendMapper';
-import { formatDateIndo, formatDateTimeIndo } from '../../utils/dateUtils';
+import { formatDateIndo as formatDate, formatDateTimeIndo as formatDateTime } from '../../utils/dateUtils';
 import {
   ArrowLeft,
-  ArrowRight,
   ArrowUpRight,
   Building2,
-  Calendar,
   Clock,
-  CheckCircle2,
   AlertOctagon,
-  PlusCircle,
   Activity,
   User,
-  Info,
   ShieldAlert,
   Trash2,
   Lock,
   Edit3,
   X
 } from 'lucide-react';
-
-function formatDate(dateStr) {
-  return formatDateIndo(dateStr);
-}
-
-function formatDateTime(dateStr) {
-  return formatDateTimeIndo(dateStr);
-}
 
 function getLastVisitTimestamp(v) {
   if (!v) return null;
@@ -278,73 +267,40 @@ export default function PetugasVictimDetail() {
     ? victim.careEpisodes[victim.careEpisodes.length - 1]
     : null;
 
-  const isDischarged = activeEpisode
-    ? Boolean(
-      activeEpisode.status === 'Pulang' ||
-      activeEpisode.kondisiTerakhir === 'Pulang' ||
-      activeEpisode.kondisiTerakhir === 'Sudah Pulang'
-    )
-    : Boolean(
-      victim.kondisiTerakhir === 'Sudah Pulang' ||
-      victim.kondisiTerakhir === 'Pulang' ||
-      victim.kondisiTerakhir === 'Selesai' ||
-      victim.status_kondisi === 'Selesai' ||
-      victim.status_kondisi === 'Sudah Pulang' ||
-      victim.status_kondisi === 'Pulang' ||
-      victim.statusPemantauan === 'Selesai Dipantau' ||
-      victim.statusPerawatan === 'Pulang'
-    );
-
-  const isDeceased = Boolean(
-    victim.kondisiTerakhir === 'Meninggal Dunia' ||
-    victim.status_kondisi === 'Meninggal Dunia' ||
-    victim.tanggalMeninggal
-  );
-
-  const isFinished =
-    isDischarged ||
-    isDeceased ||
-    victim.statusPemantauan === 'Selesai Dipantau' ||
-    victim.statusPemantauan === 'Selesai' ||
-    ['Sudah Pulang', 'Pulang', 'Selesai', 'Meninggal Dunia'].includes(victim.kondisiTerakhir) ||
-    ['Sudah Pulang', 'Pulang', 'Selesai', 'Meninggal Dunia'].includes(victim.status_kondisi);
+  const isDeceased = isDeceasedVictim(victim);
+  const isDischarged = isPulangVictim(victim);
+  const isRejectedJr = isPenolakanJaminanVictim(victim);
+  const isFinished = checkVictimFinished(victim);
+  const canReactivate = canReactivateMonitoring(victim);
+  const completionReason = getCompletionReason(victim);
 
   const isReferredOut = isOriginOfficer;
 
-  const firstVisitSla = calculateFirstVisitSla(victim.tanggalInformasiDiterima, victim.kunjunganPertama);
   const monitoringSla = calculateMonitoringSla(victim);
 
-  const handleOpenReferralModal = () => {
-    setTransitionModalType('RUJUKAN');
-    setTransitionModalOpen(true);
-  };
-
-  const handleOpenReadmitModal = () => {
-    setTransitionModalType('RAWAT_LANJUTAN');
-    setTransitionModalOpen(true);
-  };
-
-  // Render badge status utama (4 Kategori Resmi)
-  const renderPrimaryStatusBadge = (v) => {
-    return <MonitoringStatusBadge victim={v} size="md" />;
-  };
+  const isKabagViewer = currentUser?.role === 'kabag';
 
   return (
     <div className="space-y-6 pb-12">
       {/* ── 1. TOP HEADER: NAVIGASI & TOMBOL AKSI UTAMA ── */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200/80 pb-4">
-        <Link
-          to="/petugas/korban"
-          className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-600 hover:text-slate-900 bg-white px-3.5 py-2 rounded-xl border border-slate-200/90 shadow-2xs transition-colors self-start"
+        <button
+          type="button"
+          onClick={() => isKabagViewer ? navigate(-1) : navigate('/petugas/korban')}
+          className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-600 hover:text-slate-900 bg-white px-3.5 py-2 rounded-xl border border-slate-200/90 shadow-2xs transition-colors self-start cursor-pointer"
         >
           <ArrowLeft className="w-4 h-4" />
-          <span>Kembali ke Daftar Korban</span>
-        </Link>
+          <span>{isKabagViewer ? 'Kembali' : 'Kembali ke Daftar Korban'}</span>
+        </button>
 
-        {/* Action Buttons: Catat Kunjungan / Hapus */}
+        {/* Action Buttons: Catat Kunjungan / Hapus (khusus Petugas) */}
         <div className="flex items-center gap-2 flex-wrap">
-          {/* Kondisi 1: Petugas Asal (Mode Arsip Read-Only - Tidak dapat menambah kunjungan/rujukan/hapus) */}
-          {isOriginOfficer ? (
+          {isKabagViewer ? (
+            <div className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold bg-slate-100 text-slate-700 border border-slate-200 shadow-2xs">
+              <Lock className="w-3.5 h-3.5 text-slate-500" />
+              <span>Mode Audit Kepala Bagian (Read-Only)</span>
+            </div>
+          ) : isOriginOfficer ? (
             <div className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold bg-purple-100 text-purple-800 border border-purple-200 shadow-2xs">
               <Lock className="w-3.5 h-3.5 text-purple-700" />
               <span>Arsip Riwayat Penanganan (Read-Only)</span>
@@ -360,6 +316,21 @@ export default function PetugasVictimDetail() {
                 >
                   <Activity className="w-4 h-4" />
                   <span>+ Catat Kunjungan</span>
+                </button>
+              )}
+
+              {/* Jika Selesai Pulang dan kembali berobat/dirawat, izinkan aktivasi pemantauan kembali */}
+              {canReactivate && !isReferredOut && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTransitionModalType('RAWAT_LANJUTAN');
+                    setTransitionModalOpen(true);
+                  }}
+                  className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-bold bg-sky-600 hover:bg-sky-700 text-white shadow-2xs transition-all cursor-pointer"
+                >
+                  <Activity className="w-4 h-4" />
+                  <span>Aktifkan Pemantauan Kembali</span>
                 </button>
               )}
 
@@ -379,13 +350,25 @@ export default function PetugasVictimDetail() {
       </div>
 
       {/* ── 2. CARD IDENTITAS KORBAN (BERSIH, TANPA BADGE MENUMPUK) ── */}
+      {(victim.isPenolakanJaminanJR || String(victim.kondisiTerakhir || '').toLowerCase().includes('tidak bersedia')) && (
+        <div className="p-4 rounded-2xl bg-stone-100 border border-stone-300 text-stone-900 text-xs space-y-1">
+          <div className="font-bold">
+            Status Penanganan: Tidak Bersedia Menggunakan Jaminan Jasa Raharja
+          </div>
+          <div className="text-stone-700">
+            {victim.tanggalPenolakanJaminan ? `Tanggal Penolakan: ${victim.tanggalPenolakanJaminan} • ` : ''}
+            {victim.keteranganPenolakanJaminan || 'Korban / keluarga menyatakan tidak bersedia menggunakan jaminan Jasa Raharja.'}
+          </div>
+        </div>
+      )}
+
       <div className="bg-white rounded-2xl border border-slate-200/90 shadow-2xs p-5 sm:p-6 space-y-4">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
             <div className="flex items-center gap-3 flex-wrap">
               <h1 className="text-2xl font-black text-slate-900 tracking-tight">{victim.nama}</h1>
               {/* STATUS UTAMA TUNGGAL & JELAS */}
-              {renderPrimaryStatusBadge(victim)}
+              <MonitoringStatusBadge victim={victim} size="md" />
             </div>
 
             <p className="text-xs text-slate-500 mt-1.5 flex items-center gap-2 flex-wrap">
@@ -408,14 +391,12 @@ export default function PetugasVictimDetail() {
             <Clock className="w-4 h-4 text-slate-400 shrink-0" />
             <div>
               <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Status Batas Waktu Kunjungan</span>
-              <span className={`font-bold ${isDeceased ? 'text-red-700' : isDischarged ? 'text-emerald-700' : isOriginOfficer ? 'text-purple-700' : (monitoringSla.isOverdue ? 'text-rose-600' : 'text-emerald-700')}`}>
-                {isDeceased
-                  ? 'Pemantauan Selesai (Korban Meninggal Dunia)'
-                  : isDischarged
-                    ? 'Pemantauan Selesai (Pasien Pulang)'
-                    : isOriginOfficer
-                      ? 'Pemantauan Dialihkan ke RS Rujukan'
-                      : (monitoringSla.isOverdue ? 'Melewati Batas Waktu (3 Hari)' : 'Kunjungan Tepat Waktu')}
+              <span className={`font-bold ${isDeceased ? 'text-red-700' : isDischarged ? 'text-emerald-700' : isRejectedJr ? 'text-stone-700' : isOriginOfficer ? 'text-purple-700' : (monitoringSla.isOverdue ? 'text-rose-600' : 'text-emerald-700')}`}>
+                {completionReason
+                  ? `Selesai (${completionReason.label} • ${completionReason.detail})`
+                  : isOriginOfficer
+                    ? 'Pemantauan Dialihkan ke RS Rujukan'
+                    : (monitoringSla.isOverdue ? 'Melewati Batas Waktu (3 Hari)' : 'Kunjungan Tepat Waktu')}
               </span>
             </div>
           </div>
@@ -576,13 +557,6 @@ export default function PetugasVictimDetail() {
             </div>
 
             <div className="py-2.5 flex items-center justify-between gap-4">
-              <span className="text-slate-500 font-medium">Sumber Informasi</span>
-              <span className="text-slate-800 font-semibold text-right">
-                {cleanSumberInformasi(victim.sumberInformasi)}
-              </span>
-            </div>
-
-            <div className="py-2.5 flex items-center justify-between gap-4">
               <span className="text-slate-500 font-medium">Waktu Info Diterima</span>
               <span className="text-slate-800 font-semibold text-right font-mono">
                 {formatDateTime(victim.tanggalInformasiDiterima)}
@@ -617,9 +591,9 @@ export default function PetugasVictimDetail() {
             </div>
 
             <div className="py-2.5 flex items-center justify-between gap-4">
-              <span className="text-slate-500 font-medium">Usia &amp; Jenis Kelamin</span>
+              <span className="text-slate-500 font-medium">Usia</span>
               <span className="text-slate-800 font-semibold text-right">
-                {victim.usia ? `${victim.usia} Tahun` : '—'} / {victim.jenisKelamin || '—'}
+                {victim.usia ? `${victim.usia} Tahun` : '—'}
               </span>
             </div>
 
@@ -669,13 +643,13 @@ export default function PetugasVictimDetail() {
       {/* ── 4. BAGIAN UTAMA: RIWAYAT PERJALANAN KORBAN (BEAD LINE TIMELINE) ── */}
       <RiwayatPerawatanTimeline
         victim={filteredVictimForView}
-        onOpenTransitionModal={isOriginOfficer || isFinished ? null : (type) => {
-          setTransitionModalType(type);
+        onOpenTransitionModal={isKabagViewer || isOriginOfficer || (isFinished && !canReactivate) ? null : (type) => {
+          setTransitionModalType(type || 'RAWAT_LANJUTAN');
           setTransitionModalOpen(true);
         }}
         onSelectVisit={(visit) => setSelectedVisitForDetail(visit)}
-        onOpenMonitoringModal={isOriginOfficer || isFinished ? null : () => setIsMonitoringModalOpen(true)}
-        monitoringSla={isFinished || isOriginOfficer ? null : monitoringSla}
+        onOpenMonitoringModal={isKabagViewer || isOriginOfficer || isFinished ? null : () => setIsMonitoringModalOpen(true)}
+        monitoringSla={isKabagViewer || isFinished || isOriginOfficer ? null : monitoringSla}
       />
 
       {/* Modal Formulir Pemantauan Lanjutan - hanya dimount jika pemantauan belum selesai */}
@@ -839,7 +813,7 @@ export default function PetugasVictimDetail() {
                     tanggalMeninggal: editMdDate,
                     jamMeninggal: editMdTime,
                     dicatatOleh: officerName,
-                    petugasId
+                    petugasId: officerId
                   });
                   if (updated) {
                     setVictim(updated);

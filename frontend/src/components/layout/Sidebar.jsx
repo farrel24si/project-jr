@@ -46,7 +46,7 @@ export default function Sidebar({ isOpen, onClose }) {
     },
     {
       to: '/kabag/profil',
-      label: 'Pengaturan Akun',
+      label: 'Akun Saya',
       icon: User
     }
   ];
@@ -75,7 +75,7 @@ export default function Sidebar({ isOpen, onClose }) {
     },
     {
       to: '/petugas/profil',
-      label: 'Profil Saya',
+      label: 'Akun Saya',
       icon: User
     }
   ];
@@ -92,30 +92,30 @@ export default function Sidebar({ isOpen, onClose }) {
       {/* Mobile Backdrop */}
       {isOpen && (
         <div
-          className="fixed inset-0 z-40 bg-slate-900/40 backdrop-blur-xs md:hidden"
+          className="fixed inset-0 z-40 bg-slate-900/40 backdrop-blur-xs md:hidden print:hidden"
           onClick={onClose}
           aria-hidden="true"
         />
       )}
 
-      {/* Full-Height Left Sidebar - Pure White with Interactive Blue Hover & Active States */}
+      {/* Full-Height Fixed Left Sidebar - Pure White with Interactive Blue Hover & Active States */}
       <aside
-        className={`fixed md:sticky top-0 left-0 z-50 h-screen w-64 bg-white text-slate-800 flex flex-col justify-between transition-transform duration-200 ease-in-out shrink-0 border-r border-slate-200/90 shadow-xs ${
+        className={`fixed top-0 left-0 z-50 h-dvh w-64 bg-white text-slate-800 flex flex-col justify-between transition-transform duration-200 ease-in-out shrink-0 border-r border-slate-200/90 shadow-xs overflow-hidden print:hidden ${
           isOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'
         }`}
       >
         {/* Top: Pure Logo Header (No Extra Text) */}
-        <div>
-          <div className="h-20 px-6 border-b border-slate-100 flex items-center justify-start">
+        <div className="flex-1 flex flex-col min-h-0">
+          <div className="h-16 sm:h-20 px-6 border-b border-slate-100 flex items-center justify-start shrink-0 overflow-hidden">
             <img
-              src="/img/logo-jasa-raharja.png"
-              alt="Logo PT Jasa Raharja"
-              className="h-10 w-auto max-w-[190px] object-contain"
+              src="/img/logo-SIMKORP.png"
+              alt="Logo SIMKORP"
+              className="h-20 sm:h-22 w-auto max-w-[180px] object-contain object-left"
             />
           </div>
 
           {/* Navigation Links */}
-          <div className="p-3.5 pt-5">
+          <div className="p-3.5 pt-5 flex-1 overflow-y-auto">
             <nav className="space-y-1.5">
               {links.map((link, idx) => {
                 const Icon = link.icon;

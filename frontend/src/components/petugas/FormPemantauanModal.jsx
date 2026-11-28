@@ -9,7 +9,9 @@ import CameraCapture from './CameraCapture';
 import GpsCapture from './GpsCapture';
 import ConditionBadge from '../common/ConditionBadge';
 import MonitoringStatusBadge from '../common/MonitoringStatusBadge';
+import HospitalSingleSearchSelect from '../common/HospitalSingleSearchSelect';
 import { isVictimFinished } from '../../utils/monitoringStatus';
+import { getNextEpisodeVisitNumber } from '../../services/careHistoryService';
 import {
   AlertOctagon,
   CheckCircle2,
@@ -163,6 +165,11 @@ export default function FormPemantauanModal({ isOpen, onClose, victim, onMonitor
     // D. Status Tindak Lanjut
     statusTindakLanjut: '',
     checklistKebutuhanLanjutan: [],
+    // Khusus pasien pulang
+    tanggalPulang: new Date().toISOString().split('T')[0],
+    // Khusus penolakan jaminan Jasa Raharja
+    tanggalPenolakan: '',
+    keteranganPenolakan: '',
     // E. Catatan Tambahan
     catatanTambahan: ''
   });
@@ -434,10 +441,7 @@ export default function FormPemantauanModal({ isOpen, onClose, victim, onMonitor
   }, [previousVisitDate, formData.waktuPemantauan]);
 
   const visitNumber = useMemo(() => {
-    const existingCount = Array.isArray(victim?.riwayatAktivitas)
-      ? victim.riwayatAktivitas.filter((a) => a.statusKunjungan !== 'Menunggu').length
-      : (victim?.kunjunganPertama ? 1 : 0);
-    return existingCount + 1;
+    return getNextEpisodeVisitNumber(victim);
   }, [victim]);
 
   const previousActivities = useMemo(() => {
@@ -483,6 +487,15 @@ export default function FormPemantauanModal({ isOpen, onClose, victim, onMonitor
 
       if (formData.kondisi === 'Dirujuk' && !formData.rumahSakitRujukan?.trim()) {
         return { isValid: false, field: 'rumahSakitRujukan', error: 'Pilih fasilitas kesehatan atau rumah sakit tujuan rujukan (*).' };
+      }
+
+      if (formData.kondisi === 'Tidak Bersedia Menggunakan Jaminan Jasa Raharja') {
+        if (!formData.tanggalPenolakan) {
+          return { isValid: false, field: 'tanggalPenolakan', error: 'Tanggal penolakan jaminan Jasa Raharja wajib diisi (*).' };
+        }
+        if (!formData.keteranganPenolakan?.trim()) {
+          return { isValid: false, field: 'keteranganPenolakan', error: 'Keterangan penolakan jaminan Jasa Raharja wajib diisi (*).' };
+        }
       }
 
       // CATATAN: Informasi keluarga/pendamping, perkembangan luka, dan biaya perawatan adalah OPSIONAL.
@@ -665,6 +678,10 @@ export default function FormPemantauanModal({ isOpen, onClose, victim, onMonitor
         rumahSakitRujukan: formData.kondisi === 'Dirujuk' ? formData.rumahSakitRujukan.trim() : null,
         alasanRujukan: formData.kondisi === 'Dirujuk' ? (formData.catatanTambahan.trim() || 'Rujukan perawatan ke rumah sakit lain') : null,
         catatanRujukan: formData.kondisi === 'Dirujuk' ? autoSummary : null,
+        isPenolakanJaminanJR: formData.kondisi === 'Tidak Bersedia Menggunakan Jaminan Jasa Raharja',
+        tanggalPenolakan: formData.kondisi === 'Tidak Bersedia Menggunakan Jaminan Jasa Raharja' ? formData.tanggalPenolakan : null,
+        keteranganPenolakan: formData.kondisi === 'Tidak Bersedia Menggunakan Jaminan Jasa Raharja' ? formData.keteranganPenolakan.trim() : null,
+        tanggalPulang: formData.kondisi === 'Sudah Pulang' ? (formData.tanggalPulang || new Date().toISOString().split('T')[0]) : null,
 
         // Kontak Keluarga / Pendamping (Opsional)
         namaKeluarga: formData.namaKeluarga?.trim() || null,
@@ -1030,6 +1047,7 @@ export default function FormPemantauanModal({ isOpen, onClose, victim, onMonitor
                       { val: 'Rawat Lanjutan', label: 'Rawat Lanjutan', desc: 'Kembali masuk untuk rawat lanjutan / kontrol' }
                     ] : []),
                     { val: 'Meninggal Dunia', label: 'Meninggal Dunia', desc: 'Dinyatakan meninggal dunia oleh medis' },
+                    { val: 'Tidak Bersedia Menggunakan Jaminan Jasa Raharja', label: 'Tidak Bersedia Jaminan JR', desc: 'Korban / keluarga menolak jaminan Jasa Raharja' },
                     { val: 'Belum Dapat Dikonfirmasi', label: 'Belum Dapat Dikonfirmasi', desc: 'Kondisi belum dapat dipastikan' }
                   ].map((opt) => {
                     const isSelected = formData.kondisi === opt.val;
@@ -1071,20 +1089,13 @@ export default function FormPemantauanModal({ isOpen, onClose, victim, onMonitor
                       <label className="block font-semibold text-slate-700 mb-1">
                         Rumah Sakit Tujuan Rujukan <span className="text-red-500">*</span>
                       </label>
-                      <select
+                      <HospitalSingleSearchSelect
                         value={formData.rumahSakitRujukan}
-                        onChange={(e) => updateFormField('rumahSakitRujukan', e.target.value)}
-                        className="w-full text-xs rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-800 font-medium"
-                      >
-                        <option value="">-- Pilih Rumah Sakit Rujukan --</option>
-                        {hospitalsList
-                          .filter((h) => h !== activeHospital)
-                          .map((h) => (
-                            <option key={h} value={h}>
-                              {h}
-                            </option>
-                          ))}
-                      </select>
+                        onChange={(val) => updateFormField('rumahSakitRujukan', val)}
+                        hospitals={hospitalsList}
+                        excludeHospital={activeHospital}
+                        placeholder="Ketik kata kunci nama rumah sakit rujukan..."
+                      />
                     </div>
 
                     {formData.rumahSakitRujukan && (
@@ -1107,6 +1118,73 @@ export default function FormPemantauanModal({ isOpen, onClose, victim, onMonitor
                         )}
                       </div>
                     )}
+                  </div>
+                )}
+
+                {/* Kolom Khusus: Jika Sudah Pulang */}
+                {formData.kondisi === 'Sudah Pulang' && (
+                  <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 space-y-2.5 mt-2">
+                    <div className="flex items-center gap-1.5 font-bold text-emerald-900">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                      <span>Pencatatan Kepulangan Korban (Selesai Pulang)</span>
+                    </div>
+                    <p className="text-[11px] text-emerald-800 leading-relaxed">
+                      Status pemantauan akan berubah menjadi <strong>Selesai Pulang</strong> dan seluruh riwayat kunjungan tetap tersimpan.
+                    </p>
+                    <div className="max-w-xs">
+                      <label className="block font-semibold text-slate-800 mb-1 text-xs">
+                        Tanggal Pulang dari Rumah Sakit <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="date"
+                        required
+                        value={formData.tanggalPulang || new Date().toISOString().split('T')[0]}
+                        max={new Date().toISOString().split('T')[0]}
+                        onChange={(e) => updateFormField('tanggalPulang', e.target.value)}
+                        className="w-full px-3 py-2 border border-emerald-300 bg-white rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 text-xs font-medium"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* Kolom Khusus: Jika Tidak Bersedia Menggunakan Jaminan Jasa Raharja */}
+                {formData.kondisi === 'Tidak Bersedia Menggunakan Jaminan Jasa Raharja' && (
+                  <div className="p-3.5 rounded-xl bg-stone-50 border border-stone-300 space-y-3 mt-2">
+                    <div className="flex items-center gap-1.5 font-bold text-stone-900">
+                      <AlertTriangle className="w-4 h-4 text-amber-600" />
+                      <span>Pencatatan Penolakan Jaminan Jasa Raharja</span>
+                    </div>
+                    <p className="text-[11px] text-stone-600 leading-relaxed">
+                      Data awal dari rumah sakit tetap tersimpan sebagai riwayat. Korban akan ditandai sebagai <strong>Tidak Bersedia Menggunakan Jaminan Jasa Raharja</strong> dan dikeluarkan dari pemantauan aktif.
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 bg-white rounded-xl border border-stone-200">
+                      <div>
+                        <label className="block font-semibold text-slate-800 mb-1 text-xs">
+                          Tanggal Penolakan <span className="text-red-500">*</span>
+                        </label>
+                        <input
+                          type="date"
+                          required
+                          value={formData.tanggalPenolakan}
+                          max={new Date().toISOString().split('T')[0]}
+                          onChange={(e) => updateFormField('tanggalPenolakan', e.target.value)}
+                          className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-stone-500 text-xs font-medium"
+                        />
+                      </div>
+                      <div className="sm:col-span-2">
+                        <label className="block font-semibold text-slate-800 mb-1 text-xs">
+                          Keterangan Penolakan <span className="text-red-500">*</span>
+                        </label>
+                        <textarea
+                          rows={2}
+                          required
+                          value={formData.keteranganPenolakan}
+                          onChange={(e) => updateFormField('keteranganPenolakan', e.target.value)}
+                          placeholder="Contoh: Keluarga korban menyampaikan tidak bersedia menggunakan jaminan Jasa Raharja dan memilih jalur mandiri / asuransi pribadi."
+                          className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-stone-500 text-xs"
+                        />
+                      </div>
+                    </div>
                   </div>
                 )}
 
@@ -1327,10 +1405,10 @@ export default function FormPemantauanModal({ isOpen, onClose, victim, onMonitor
               <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-3">
                 <div>
                   <label className="block font-bold text-slate-900 text-xs uppercase tracking-wider mb-0.5">
-                    D. Status Tindak Lanjut Hasil Pemantauan <span className="text-red-500">*</span>
+                    D. Kebutuhan Tindak Lanjut Kunjungan Ini <span className="text-red-500">*</span>
                   </label>
                   <p className="text-[11px] text-slate-500 mb-2">
-                    Tentukan apakah kebutuhan pemantauan saat ini sudah tuntas atau memerlukan langkah lanjutan.
+                    Pilih apakah masih ada berkas atau urusan tambahan yang perlu ditangani setelah kunjungan ini.
                   </p>
                 </div>
 
@@ -1350,9 +1428,9 @@ export default function FormPemantauanModal({ isOpen, onClose, victim, onMonitor
                       className="mt-0.5 text-amber-600 focus:ring-amber-500"
                     />
                     <div>
-                      <span className="font-bold text-amber-950 block">Masih Perlu Ditindaklanjuti</span>
+                      <span className="font-bold text-amber-950 block">Ada Tindak Lanjut / Berkas Susulan</span>
                       <span className="text-[11px] text-amber-800 leading-snug block mt-0.5">
-                        Terdapat berkas, konfirmasi RS, atau jadwal kunjungan berikutnya yang harus dipantau.
+                        Masih ada berkas, konfirmasi RS, atau urusan lanjutan yang perlu dicatat dan ditangani.
                       </span>
                     </div>
                   </label>
@@ -1372,9 +1450,9 @@ export default function FormPemantauanModal({ isOpen, onClose, victim, onMonitor
                       className="mt-0.5 text-emerald-600 focus:ring-emerald-500"
                     />
                     <div>
-                      <span className="font-bold text-emerald-950 block">Sudah Selesai</span>
+                      <span className="font-bold text-emerald-950 block">Tidak Ada Tindak Lanjut Tambahan</span>
                       <span className="text-[11px] text-emerald-800 leading-snug block mt-0.5">
-                        Seluruh kewajiban dan tindak lanjut pemantauan pada tahapan ini telah selesai.
+                        Semua tugas kunjungan hari ini sudah beres (pemantauan rutin tetap lanjut jika pasien masih dirawat).
                       </span>
                     </div>
                   </label>
@@ -1638,6 +1716,12 @@ export default function FormPemantauanModal({ isOpen, onClose, victim, onMonitor
                   {formData.kondisi === 'Dirujuk' && (
                     <div className="p-2 rounded-lg bg-violet-50 border border-violet-200 text-violet-950 text-[11px]">
                       <strong>Rumah Sakit Rujukan:</strong> {formData.rumahSakitRujukan} (Petugas: {assignedOfficerForRujukan?.nama || 'Belum ada'})
+                    </div>
+                  )}
+
+                  {formData.kondisi === 'Tidak Bersedia Menggunakan Jaminan Jasa Raharja' && (
+                    <div className="p-2 rounded-lg bg-stone-100 border border-stone-300 text-stone-900 text-[11px]">
+                      <strong>Tidak Bersedia Menggunakan Jaminan Jasa Raharja:</strong> Tanggal {formData.tanggalPenolakan} — {formData.keteranganPenolakan}
                     </div>
                   )}
 

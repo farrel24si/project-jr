@@ -2,27 +2,22 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { storageService } from '../../services/storageService';
-import { 
-  calculateMonitoringSla, 
-  getVictimDeadline, 
-  compareByDeadlinePriority,
+import {
+  calculateMonitoringSla,
   compareVictimsBySlaPriority
 } from '../../services/slaService';
-import { formatDateIndo, formatDateTimeIndo } from '../../utils/dateUtils';
+import { formatDateIndo } from '../../utils/dateUtils';
 import { getReferralPerspectiveInfo, matchesHospitalFilter, isSameHospital } from '../../utils/referralUtils';
 import SlaBadge from '../../components/common/SlaBadge';
-import ConditionBadge from '../../components/common/ConditionBadge';
 import MonitoringStatusBadge from '../../components/common/MonitoringStatusBadge';
 import {
   MONITORING_STATUS,
   getMonitoringStatus,
-  isVictimFinished,
-  canRecordVisit
+  isVictimFinished
 } from '../../utils/monitoringStatus';
 import FormPemantauanModal from '../../components/petugas/FormPemantauanModal';
 import SortableHeader from '../../components/common/SortableHeader';
 import {
-  CalendarCheck,
   Search,
   Activity,
   Eye,
@@ -30,25 +25,35 @@ import {
   ArrowUpRight,
   ArrowRight,
   Building2,
-  Calendar,
-  Clock,
-  UserCheck,
   CheckCircle2,
-  Users,
-  Filter,
-  ArrowUpDown
+  Users
 } from 'lucide-react';
 
 function formatDateShort(dateStr) {
   return formatDateIndo(dateStr);
 }
 
-function formatDateTimeShort(dateStr) {
-  return formatDateTimeIndo(dateStr);
-}
-
 function getTlTerakhir(v) {
+  const completedActs = Array.isArray(v.riwayatAktivitas)
+    ? v.riwayatAktivitas.filter((a) => a.statusKunjungan !== 'Menunggu')
+    : [];
+  const hasFirstDone = Boolean(v.kunjunganPertama && v.kunjunganPertama.statusKunjungan !== 'Menunggu');
+  const hasCompletedVisit =
+    completedActs.length > 0 ||
+    (Array.isArray(v.riwayatKunjungan) && v.riwayatKunjungan.length > 0) ||
+    hasFirstDone;
+
+  if (!hasCompletedVisit) {
+    return {
+      dateText: 'Belum Ada',
+      subText: 'Menunggu Kunjungan'
+    };
+  }
+
   const lastDate =
+    completedActs[0]?.waktuAktualKunjungan ||
+    completedActs[0]?.tanggalKunjungan ||
+    completedActs[0]?.tanggal ||
     v.tanggalKunjunganTerakhir ||
     v.waktuPemantauanTerakhir ||
     v.tanggalPemantauanTerakhir ||
@@ -56,9 +61,7 @@ function getTlTerakhir(v) {
     v.kunjunganPertama?.tanggalKunjungan ||
     v.kunjunganPertama?.tanggal;
 
-  const count = Array.isArray(v.riwayatAktivitas)
-    ? v.riwayatAktivitas.filter((a) => a.statusKunjungan !== 'Menunggu').length
-    : (v.kunjunganPertama ? 1 : 0);
+  const count = completedActs.length > 0 ? completedActs.length : (hasFirstDone ? 1 : 0);
 
   if (!lastDate) {
     return {
@@ -121,8 +124,8 @@ export default function PetugasMonitoringList() {
   };
 
   const loadData = () => {
-    const activeOfficerIdent = officerId || currentUser?.profile?.id || currentUser?.profile?.backendOfficerId || currentUser?.profile?.nama;
-    const myVictims = storageService.getVictimsByOfficer(activeOfficerIdent);
+    const activeOfficerIdent = currentUser?.profile || officerId || currentUser?.profile?.id || currentUser?.profile?.backendOfficerId || currentUser?.profile?.nama;
+    const myVictims = storageService.getOfficerVictimsForPortal(activeOfficerIdent);
     setVictims(myVictims);
   };
 
@@ -179,7 +182,6 @@ export default function PetugasMonitoringList() {
   // 2. Tab Pasien Rujukan Masuk (korban dari RS lain yang dirujuk ke RS petugas ini)
   const incomingReferralVictims = useMemo(() => {
     return victims.filter((v) => {
-      if (isVictimFinished(v)) return false;
       const refInfo = getReferralPerspectiveInfo(v, null, currentUser);
 
       // Terdaftar sebagai rujukan dan faskes petugas ini adalah faskes penerima / tujuan
@@ -497,10 +499,11 @@ export default function PetugasMonitoringList() {
               className="px-3 py-2 text-xs rounded-xl border border-slate-200 bg-slate-50/70 focus:bg-white text-slate-700 flex-1 sm:flex-initial font-medium"
             >
               <option value="ALL">Semua Status</option>
-              <option value={MONITORING_STATUS.MENUNGGU_KUNJUNGAN}>Menunggu Kunjungan</option>
+              <option value={MONITORING_STATUS.BELUM_DIPANTAU}>Belum Dipantau</option>
               <option value={MONITORING_STATUS.DALAM_PEMANTAUAN}>Dalam Pemantauan</option>
-              <option value={MONITORING_STATUS.MENUNGGU_TINDAK_LANJUT}>Menunggu Tindak Lanjut</option>
-              <option value={MONITORING_STATUS.SELESAI}>Selesai (Pulang / MD)</option>
+              <option value={MONITORING_STATUS.SELESAI_PULANG}>Selesai Pulang</option>
+              <option value={MONITORING_STATUS.SELESAI_MD}>Selesai MD</option>
+              <option value={MONITORING_STATUS.SELESAI_TIDAK_BERSEDIA}>Selesai Tidak Bersedia</option>
             </select>
 
             <select
@@ -633,19 +636,11 @@ export default function PetugasMonitoringList() {
                 </tr>
               ) : (
                 filtered.map((v, idx) => {
-                  const monSla = calculateMonitoringSla(v);
                   const refInfo = getReferralPerspectiveInfo(v, hospitalFilter, currentUser);
                   const isIncoming = refInfo.isReferred && refInfo.isDestinationView;
                   const isReferredOut = refInfo.isReferred && refInfo.isOriginView;
                   const isFinished = isVictimFinished(v);
                   const tlInfo = getTlTerakhir(v);
-
-                  const initials = (v.nama || 'K')
-                    .split(' ')
-                    .map((n) => n[0])
-                    .slice(0, 2)
-                    .join('')
-                    .toUpperCase();
 
                   return (
                     <tr key={v.id} className="hover:bg-slate-50/70 transition-colors">
@@ -772,12 +767,6 @@ export default function PetugasMonitoringList() {
               const isIncoming = refInfo.isReferred && refInfo.isDestinationView;
               const isReferredOut = refInfo.isReferred && refInfo.isOriginView;
               const isFinished = isVictimFinished(v);
-              const initials = (v.nama || 'K')
-                .split(' ')
-                .map((n) => n[0])
-                .slice(0, 2)
-                .join('')
-                .toUpperCase();
 
               return (
                 <div key={v.id} className="p-4 space-y-3">

@@ -1,50 +1,57 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { storageService } from '../../services/storageService';
 import { calculateFirstVisitSla, calculateMonitoringSla, compareVictimsBySlaPriority } from '../../services/slaService';
-import { formatDateIndo, formatTimeIndo } from '../../utils/dateUtils';
+import { formatDateIndo as formatDateShort } from '../../utils/dateUtils';
 import { getReferralPerspectiveInfo, matchesHospitalFilter } from '../../utils/referralUtils';
+import { exportVictimsExcelByHospital } from '../../services/excelReportService';
 import FormInputKorbanModal from '../../components/petugas/FormInputKorbanModal';
 import FormPemantauanModal from '../../components/petugas/FormPemantauanModal';
 import MonitoringStatusBadge from '../../components/common/MonitoringStatusBadge';
 import SortableHeader from '../../components/common/SortableHeader';
 import {
   MONITORING_STATUS,
-  ALL_MONITORING_STATUSES,
   getMonitoringStatus,
-  isVictimFinished,
-  canRecordVisit
+  isVictimFinished
 } from '../../utils/monitoringStatus';
 import {
   Search,
   Eye,
   Building2,
-  Calendar,
   CheckCircle2,
   Clock,
-  Filter,
   ChevronLeft,
   ChevronRight,
   RotateCcw,
   Users,
   UserPlus,
   Activity,
-  HeartPulse,
-  UserCheck,
   ArrowUpRight,
   ArrowRight,
   User,
   AlertCircle,
-  ArrowUpDown
+  FileSpreadsheet
 } from 'lucide-react';
 
-function formatDateShort(dateStr) {
-  return formatDateIndo(dateStr);
-}
-
 function getTlTerakhir(v) {
+  const completedActs = Array.isArray(v.riwayatAktivitas)
+    ? v.riwayatAktivitas.filter((a) => a.statusKunjungan !== 'Menunggu')
+    : [];
+  const hasFirstDone = Boolean(v.kunjunganPertama && v.kunjunganPertama.statusKunjungan !== 'Menunggu');
+  const hasCompletedVisit =
+    completedActs.length > 0 ||
+    (Array.isArray(v.riwayatKunjungan) && v.riwayatKunjungan.length > 0) ||
+    hasFirstDone;
+
+  if (!hasCompletedVisit) {
+    return 'Belum Ada';
+  }
+
   const lastDate =
+    completedActs[0]?.waktuAktualKunjungan ||
+    completedActs[0]?.tanggalKunjungan ||
+    completedActs[0]?.tanggal ||
     v.tanggalKunjunganTerakhir ||
     v.waktuPemantauanTerakhir ||
     v.tanggalPemantauanTerakhir ||
@@ -52,21 +59,7 @@ function getTlTerakhir(v) {
     v.kunjunganPertama?.tanggalKunjungan ||
     v.kunjunganPertama?.tanggal;
 
-  const count = Array.isArray(v.riwayatAktivitas)
-    ? v.riwayatAktivitas.filter((a) => a.statusKunjungan !== 'Menunggu').length
-    : (v.kunjunganPertama ? 1 : 0);
-
-  if (!lastDate) {
-    return {
-      dateText: 'Belum Ada',
-      subText: 'Menunggu Kunjungan'
-    };
-  }
-
-  return {
-    dateText: formatDateShort(lastDate),
-    subText: count > 0 ? `Kunjungan ke-${count}` : 'Kunjungan Awal'
-  };
+  return lastDate ? formatDateShort(lastDate) : 'Belum Ada';
 }
 
 const PAGE_SIZE = 10;
@@ -132,48 +125,42 @@ export default function PetugasVictimList() {
     } catch (e) { }
   }, [victims, selectedVictimForMonitoring]);
 
-  // Tab counters selaras dengan 4 kategori resmi
-  const tabCounts = useMemo(() => {
-    let all = victims.length;
-    let menungguKunjungan = 0;
-    let dalamPemantauan = 0;
-    let menungguTindakLanjut = 0;
-    let selesai = 0;
-
-    victims.forEach((v) => {
-      const st = getMonitoringStatus(v);
-      if (st === MONITORING_STATUS.MENUNGGU_KUNJUNGAN) menungguKunjungan++;
-      else if (st === MONITORING_STATUS.DALAM_PEMANTAUAN) dalamPemantauan++;
-      else if (st === MONITORING_STATUS.MENUNGGU_TINDAK_LANJUT) menungguTindakLanjut++;
-      else if (st === MONITORING_STATUS.SELESAI) selesai++;
-    });
-
-    return { all, menungguKunjungan, dalamPemantauan, menungguTindakLanjut, selesai };
-  }, [victims]);
-
-  // Aggregate metrics selaras 4 kategori
+  // Aggregate metrics & tab counters selaras 5 kategori resmi (kecualikan pasien yang sudah dirujuk keluar)
   const metrics = useMemo(() => {
-    let menungguKunjungan = 0;
+    let belumDipantau = 0;
     let dalamPemantauan = 0;
-    let menungguTindakLanjut = 0;
-    let selesai = 0;
+    let selesaiPulang = 0;
+    let selesaiMd = 0;
+    let selesaiTidakBersedia = 0;
 
     victims.forEach((v) => {
+      const refInfo = getReferralPerspectiveInfo(v, null, currentUser);
+      const isReferredOut = refInfo.isReferred && refInfo.isOriginView;
       const st = getMonitoringStatus(v);
-      if (st === MONITORING_STATUS.MENUNGGU_KUNJUNGAN) menungguKunjungan++;
-      else if (st === MONITORING_STATUS.DALAM_PEMANTAUAN) dalamPemantauan++;
-      else if (st === MONITORING_STATUS.MENUNGGU_TINDAK_LANJUT) menungguTindakLanjut++;
-      else if (st === MONITORING_STATUS.SELESAI) selesai++;
+
+      if (st === MONITORING_STATUS.SELESAI_PULANG) {
+        selesaiPulang++;
+      } else if (st === MONITORING_STATUS.SELESAI_MD) {
+        selesaiMd++;
+      } else if (st === MONITORING_STATUS.SELESAI_TIDAK_BERSEDIA) {
+        selesaiTidakBersedia++;
+      } else if (!isReferredOut) {
+        if (st === MONITORING_STATUS.BELUM_DIPANTAU) belumDipantau++;
+        else if (st === MONITORING_STATUS.DALAM_PEMANTAUAN) dalamPemantauan++;
+      }
     });
 
     return {
+      all: victims.length,
       total: victims.length,
-      menungguKunjungan,
+      belumDipantau,
       dalamPemantauan,
-      menungguTindakLanjut,
-      selesai
+      selesaiPulang,
+      selesaiMd,
+      selesaiTidakBersedia
     };
-  }, [victims]);
+  }, [victims, currentUser]);
+  const tabCounts = metrics;
 
   const hospitals = useMemo(() => {
     const list = [];
@@ -190,8 +177,12 @@ export default function PetugasVictimList() {
       const currentStatus = getMonitoringStatus(v);
       const isFinished = isVictimFinished(v);
 
-      // 0. Filter Tab Utama (4 Kategori Status)
+      // 0. Filter Tab Utama (5 Kategori Status Resmi)
       if (activeTab !== 'all') {
+        const refTabInfo = getReferralPerspectiveInfo(v, null, currentUser);
+        if (refTabInfo.isReferred && refTabInfo.isOriginView && !isFinished) {
+          return false;
+        }
         if (currentStatus !== activeTab) return false;
       }
 
@@ -306,21 +297,6 @@ export default function PetugasVictimList() {
     setCurrentPage(1);
   };
 
-  // Helper render badge status tunggal (4 Kategori Resmi)
-  const renderStatusBadge = (v) => {
-    return <MonitoringStatusBadge victim={v} size="sm" />;
-  };
-
-  const getInitials = (name) => {
-    if (!name) return 'KR';
-    return name
-      .split(' ')
-      .map((n) => n[0])
-      .slice(0, 2)
-      .join('')
-      .toUpperCase();
-  };
-
   return (
     <div className="space-y-6">
       {/* ── 1. PAGE HEADER ── */}
@@ -332,7 +308,40 @@ export default function PetugasVictimList() {
           </p>
         </div>
 
-        <div className="w-full sm:w-auto shrink-0">
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto shrink-0">
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                const prof = currentUser?.profile || currentUser;
+                let officerHospitals = [];
+                if (Array.isArray(prof?.plottingRs) && prof.plottingRs.length > 0) {
+                  officerHospitals = prof.plottingRs;
+                } else if (Array.isArray(prof?.hospitals) && prof.hospitals.length > 0) {
+                  officerHospitals = prof.hospitals.map((h) => h.nama_rs).filter(Boolean);
+                } else {
+                  const storedOfficer = storageService.getOfficerById(prof?.id || prof?.backendOfficerId || officerId);
+                  if (Array.isArray(storedOfficer?.plottingRs)) {
+                    officerHospitals = storedOfficer.plottingRs;
+                  }
+                }
+                await exportVictimsExcelByHospital({
+                  victims,
+                  officerHospitals,
+                  currentUser,
+                  fileNamePrefix: 'Laporan_Daftar_Korban'
+                });
+              } catch (err) {
+                console.error('Gagal download Excel:', err);
+                alert(err?.message || 'Gagal mengunduh laporan Excel.');
+              }
+            }}
+            className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-2xs transition-all cursor-pointer"
+          >
+            <FileSpreadsheet className="w-4 h-4" />
+            <span>Download Excel</span>
+          </button>
+
           <button
             type="button"
             onClick={() => setIsInputModalOpen(true)}
@@ -357,21 +366,19 @@ export default function PetugasVictimList() {
           <span className="text-3xl font-black font-mono tracking-tight text-slate-900 block mt-2">
             {metrics.total}
           </span>
-          <span className="text-[11px] text-slate-400 block mt-0.5">Seluruh korban ditangani</span>
         </div>
 
-        {/* 2. Menunggu Kunjungan */}
+        {/* 2. Belum Dipantau */}
         <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs hover:shadow-xs transition-shadow">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Menunggu Kunjungan</span>
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Belum Dipantau</span>
             <div className="w-9 h-9 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center border border-amber-100 shrink-0">
               <Clock className="w-4 h-4" />
             </div>
           </div>
           <span className="text-3xl font-black font-mono tracking-tight text-amber-600 block mt-2">
-            {metrics.menungguKunjungan}
+            {metrics.belumDipantau}
           </span>
-          <span className="text-[11px] text-slate-400 block mt-0.5">Belum kunjungan awal</span>
         </div>
 
         {/* 3. Dalam Pemantauan */}
@@ -385,35 +392,32 @@ export default function PetugasVictimList() {
           <span className="text-3xl font-black font-mono tracking-tight text-[#145DA0] block mt-2">
             {metrics.dalamPemantauan}
           </span>
-          <span className="text-[11px] text-slate-400 block mt-0.5">Kunjungan awal sudah dilakukan</span>
         </div>
 
-        {/* 4. Menunggu Tindak Lanjut */}
+        {/* 4. Selesai Pulang */}
         <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs hover:shadow-xs transition-shadow">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Menunggu Tindak Lanjut</span>
-            <div className="w-9 h-9 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center border border-rose-100 shrink-0">
-              <AlertCircle className="w-4 h-4" />
-            </div>
-          </div>
-          <span className="text-3xl font-black font-mono tracking-tight text-rose-600 block mt-2">
-            {metrics.menungguTindakLanjut}
-          </span>
-          <span className="text-[11px] text-slate-400 block mt-0.5">Jadwal kunjungan lanjutan tiba</span>
-        </div>
-
-        {/* 5. Selesai */}
-        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs hover:shadow-xs transition-shadow">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Selesai</span>
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Selesai Pulang</span>
             <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center border border-emerald-100 shrink-0">
               <CheckCircle2 className="w-4 h-4" />
             </div>
           </div>
           <span className="text-3xl font-black font-mono tracking-tight text-emerald-600 block mt-2">
-            {metrics.selesai}
+            {metrics.selesaiPulang}
           </span>
-          <span className="text-[11px] text-slate-400 block mt-0.5">Pasien pulang / MD</span>
+        </div>
+
+        {/* 5. Selesai MD & Tidak Bersedia */}
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs hover:shadow-xs transition-shadow">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Selesai MD / Tolak JR</span>
+            <div className="w-9 h-9 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center border border-rose-100 shrink-0">
+              <AlertCircle className="w-4 h-4" />
+            </div>
+          </div>
+          <span className="text-3xl font-black font-mono tracking-tight text-rose-600 block mt-2">
+            {metrics.selesaiMd + metrics.selesaiTidakBersedia}
+          </span>
         </div>
       </div>
 
@@ -437,17 +441,17 @@ export default function PetugasVictimList() {
 
         <button
           type="button"
-          onClick={() => { setActiveTab(MONITORING_STATUS.MENUNGGU_KUNJUNGAN); setCurrentPage(1); }}
-          className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap shadow-2xs ${activeTab === MONITORING_STATUS.MENUNGGU_KUNJUNGAN
+          onClick={() => { setActiveTab(MONITORING_STATUS.BELUM_DIPANTAU); setCurrentPage(1); }}
+          className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap shadow-2xs ${activeTab === MONITORING_STATUS.BELUM_DIPANTAU
             ? 'bg-[#145DA0] text-white'
             : 'bg-white text-slate-600 hover:text-slate-900 hover:bg-slate-50 border border-slate-200/90'
             }`}
         >
           <Clock className="w-3.5 h-3.5" />
-          <span>Menunggu Kunjungan</span>
-          <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${activeTab === MONITORING_STATUS.MENUNGGU_KUNJUNGAN ? 'bg-white/20 text-white' : 'bg-amber-50 text-amber-800 border border-amber-200'
+          <span>Belum Dipantau</span>
+          <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${activeTab === MONITORING_STATUS.BELUM_DIPANTAU ? 'bg-white/20 text-white' : 'bg-amber-50 text-amber-800 border border-amber-200'
             }`}>
-            {tabCounts.menungguKunjungan}
+            {tabCounts.belumDipantau}
           </span>
         </button>
 
@@ -469,33 +473,49 @@ export default function PetugasVictimList() {
 
         <button
           type="button"
-          onClick={() => { setActiveTab(MONITORING_STATUS.MENUNGGU_TINDAK_LANJUT); setCurrentPage(1); }}
-          className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap shadow-2xs ${activeTab === MONITORING_STATUS.MENUNGGU_TINDAK_LANJUT
-            ? 'bg-[#145DA0] text-white'
-            : 'bg-white text-slate-600 hover:text-slate-900 hover:bg-slate-50 border border-slate-200/90'
-            }`}
-        >
-          <AlertCircle className="w-3.5 h-3.5" />
-          <span>Menunggu Tindak Lanjut</span>
-          <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${activeTab === MONITORING_STATUS.MENUNGGU_TINDAK_LANJUT ? 'bg-white/20 text-white' : 'bg-rose-50 text-rose-700 border border-rose-200'
-            }`}>
-            {tabCounts.menungguTindakLanjut}
-          </span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => { setActiveTab(MONITORING_STATUS.SELESAI); setCurrentPage(1); }}
-          className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap shadow-2xs ${activeTab === MONITORING_STATUS.SELESAI
+          onClick={() => { setActiveTab(MONITORING_STATUS.SELESAI_PULANG); setCurrentPage(1); }}
+          className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap shadow-2xs ${activeTab === MONITORING_STATUS.SELESAI_PULANG
             ? 'bg-[#145DA0] text-white'
             : 'bg-white text-slate-600 hover:text-slate-900 hover:bg-slate-50 border border-slate-200/90'
             }`}
         >
           <CheckCircle2 className="w-3.5 h-3.5" />
-          <span>Selesai</span>
-          <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${activeTab === MONITORING_STATUS.SELESAI ? 'bg-white/20 text-white' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+          <span>Selesai Pulang</span>
+          <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${activeTab === MONITORING_STATUS.SELESAI_PULANG ? 'bg-white/20 text-white' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
             }`}>
-            {tabCounts.selesai}
+            {tabCounts.selesaiPulang}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => { setActiveTab(MONITORING_STATUS.SELESAI_MD); setCurrentPage(1); }}
+          className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap shadow-2xs ${activeTab === MONITORING_STATUS.SELESAI_MD
+            ? 'bg-[#145DA0] text-white'
+            : 'bg-white text-slate-600 hover:text-slate-900 hover:bg-slate-50 border border-slate-200/90'
+            }`}
+        >
+          <AlertCircle className="w-3.5 h-3.5" />
+          <span>Selesai MD</span>
+          <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${activeTab === MONITORING_STATUS.SELESAI_MD ? 'bg-white/20 text-white' : 'bg-rose-50 text-rose-700 border border-rose-200'
+            }`}>
+            {tabCounts.selesaiMd}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => { setActiveTab(MONITORING_STATUS.SELESAI_TIDAK_BERSEDIA); setCurrentPage(1); }}
+          className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap shadow-2xs ${activeTab === MONITORING_STATUS.SELESAI_TIDAK_BERSEDIA
+            ? 'bg-[#145DA0] text-white'
+            : 'bg-white text-slate-600 hover:text-slate-900 hover:bg-slate-50 border border-slate-200/90'
+            }`}
+        >
+          <AlertCircle className="w-3.5 h-3.5" />
+          <span>Selesai Tidak Bersedia</span>
+          <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${activeTab === MONITORING_STATUS.SELESAI_TIDAK_BERSEDIA ? 'bg-white/20 text-white' : 'bg-stone-100 text-stone-700 border border-stone-200'
+            }`}>
+            {tabCounts.selesaiTidakBersedia}
           </span>
         </button>
       </div>
@@ -565,10 +585,11 @@ export default function PetugasVictimList() {
               className="w-full px-2.5 py-1.5 rounded-xl border border-slate-200 bg-slate-50/70 text-slate-700 focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#145DA0]"
             >
               <option value="ALL">Semua Status Pemantauan</option>
-              <option value={MONITORING_STATUS.MENUNGGU_KUNJUNGAN}>Menunggu Kunjungan</option>
+              <option value={MONITORING_STATUS.BELUM_DIPANTAU}>Belum Dipantau</option>
               <option value={MONITORING_STATUS.DALAM_PEMANTAUAN}>Dalam Pemantauan</option>
-              <option value={MONITORING_STATUS.MENUNGGU_TINDAK_LANJUT}>Menunggu Tindak Lanjut</option>
-              <option value={MONITORING_STATUS.SELESAI}>Selesai</option>
+              <option value={MONITORING_STATUS.SELESAI_PULANG}>Selesai Pulang</option>
+              <option value={MONITORING_STATUS.SELESAI_MD}>Selesai MD</option>
+              <option value={MONITORING_STATUS.SELESAI_TIDAK_BERSEDIA}>Selesai Tidak Bersedia</option>
             </select>
           </div>
 
@@ -626,17 +647,10 @@ export default function PetugasVictimList() {
               <p className="text-[11px] text-slate-400 mt-0.5">Coba ubah kata kunci atau reset filter pencarian di atas.</p>
             </div>
           ) : (
-            paginated.map((v, idx) => {
-              const initials = getInitials(v.nama);
+            paginated.map((v) => {
               const role = storageService.getOfficerVictimRole(activeOfficerIdent, v);
               const isOrigin = role === 'ORIGIN_OFFICER';
               const isFinished = isVictimFinished(v);
-              const isIncoming =
-                !isOrigin &&
-                !v.isRawatLanjutan &&
-                !v.rawatLanjutanDariPulang &&
-                v.statusPerawatan !== 'Rawat Lanjutan' &&
-                (v.isRujukanMasuk || v.statusPerawatan === 'Rujukan' || (v.rumahSakitAsal && v.rumahSakit && v.rumahSakitAsal !== v.rumahSakit));
               const refInfo = getReferralPerspectiveInfo(v, filterHospital, currentUser);
 
               return (
@@ -659,7 +673,7 @@ export default function PetugasVictimList() {
                       </div>
                     </div>
                     <div className="shrink-0">
-                      {renderStatusBadge(v)}
+                      <MonitoringStatusBadge victim={v} size="sm" />
                     </div>
                   </div>
 
@@ -806,11 +820,10 @@ export default function PetugasVictimList() {
               ) : (
                 paginated.map((v, idx) => {
                   const number = String((currentPage - 1) * PAGE_SIZE + idx + 1).padStart(2, '0');
-                  const initials = getInitials(v.nama);
                   const role = storageService.getOfficerVictimRole(activeOfficerIdent, v);
                   const isOrigin = role === 'ORIGIN_OFFICER';
                   const isFinished = isVictimFinished(v);
-                  const tlInfo = getTlTerakhir(v);
+                  const tlDateText = getTlTerakhir(v);
                   const refInfo = getReferralPerspectiveInfo(v, filterHospital, currentUser);
 
                   return (
@@ -870,13 +883,13 @@ export default function PetugasVictimList() {
                       {/* TL Terakhir */}
                       <td className="py-3.5 px-3.5 text-slate-800 whitespace-nowrap text-xs">
                         <span className="text-slate-800 font-medium block">
-                          {tlInfo.dateText}
+                          {tlDateText}
                         </span>
                       </td>
 
                       {/* Status (4 Kategori Resmi: Selesai jika pulang/MD) */}
                       <td className="py-3.5 px-3.5 text-center whitespace-nowrap">
-                        {renderStatusBadge(v)}
+                        <MonitoringStatusBadge victim={v} size="sm" />
                       </td>
 
                       {/* Aksi: Jika korban Pulang/Selesai, tidak bisa catat pemantauan lagi */}

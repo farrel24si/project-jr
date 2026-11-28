@@ -5,7 +5,6 @@
 
 import { getCachedPhoto, cachePhoto } from './photoService.js';
 import { MONITORING_STATUS } from '../utils/monitoringStatus.js';
-import { getRealVisitPhoto } from '../utils/realPhotos.js';
 import { isSameHospital } from '../utils/referralUtils.js';
 
 const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_URL) || '';
@@ -63,8 +62,14 @@ export function parseDateToTimestamp(dateVal) {
   const s = String(dateVal).trim();
   if (!s) return 0;
 
+  // Format ISO timestamp (mengandung 'T', mis. 2026-11-28T15:30:00.000Z)
+  if (s.includes('T')) {
+    const isoTime = new Date(s).getTime();
+    if (!isNaN(isoTime)) return isoTime;
+  }
+
   // Format DD/MM/YYYY atau DD-MM-YYYY (standar umum Indonesia dan input WhatsApp Bot)
-  const dmyMatch = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/);
+  const dmyMatch = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?$/);
   if (dmyMatch) {
     const day = parseInt(dmyMatch[1], 10);
     const month = parseInt(dmyMatch[2], 10) - 1;
@@ -75,8 +80,8 @@ export function parseDateToTimestamp(dateVal) {
     return new Date(year, month, day, hour, minute, second).getTime();
   }
 
-  // Format YYYY-MM-DD (standar SQL date)
-  const ymdMatch = s.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/);
+  // Format YYYY-MM-DD (standar SQL date / datetime tanpa T)
+  const ymdMatch = s.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?$/);
   if (ymdMatch) {
     const year = parseInt(ymdMatch[1], 10);
     const month = parseInt(ymdMatch[2], 10) - 1;
@@ -105,7 +110,7 @@ export function normalizeStatusToBackend(statusRaw) {
   if (s === 'Dirujuk' || s === 'Dirujuk ke RS Lain') {
     return 'Dirujuk ke RS Lain';
   }
-  if (s === 'Sudah Pulang' || s === 'Pulang') {
+  if (s === 'Sudah Pulang' || s === 'Pulang' || s.toLowerCase().includes('tidak bersedia')) {
     return 'Selesai';
   }
   if (s === 'Masih Dirawat') {
@@ -148,13 +153,15 @@ export function dataUrlToFile(dataUrl, filename = 'visit.jpg') {
  */
 export function resolvePhotoUrl(fotoUrl) {
   if (!fotoUrl) return null;
-  const isUploadPath = typeof fotoUrl === 'string' && (fotoUrl.includes('/uploads/') || fotoUrl.startsWith('uploads/'));
-  const cached = getCachedPhoto(fotoUrl);
-  if (cached && (!isUploadPath || (typeof cached === 'string' && cached.startsWith('blob:')))) {
-    return cached;
-  }
   if (typeof fotoUrl === 'string' && (fotoUrl.includes('images.unsplash.com') || fotoUrl.includes('unsplash.com') || fotoUrl.includes('default-visit-photo') || fotoUrl.includes('.svg'))) {
-    return getRealVisitPhoto(fotoUrl);
+    return null;
+  }
+  const isUploadPath = typeof fotoUrl === 'string' && (fotoUrl.includes('/uploads/') || fotoUrl.startsWith('uploads/'));
+  if (!isUploadPath) {
+    const cached = getCachedPhoto(fotoUrl);
+    if (cached && typeof cached === 'string' && !cached.includes('/img/visits/')) {
+      return cached;
+    }
   }
   if (fotoUrl.startsWith('http://') || fotoUrl.startsWith('https://') || fotoUrl.startsWith('data:') || fotoUrl.startsWith('blob:')) {
     return fotoUrl;
@@ -164,12 +171,33 @@ export function resolvePhotoUrl(fotoUrl) {
 }
 
 /**
+ * Memeriksa apakah teks catatan hanya merupakan pengulangan daftar checklist tindakan
+ * sehingga tidak tampil ganda di kartu riwayat kunjungan.
+ */
+export function isNoteDuplicateOfActions(noteText, actionsList) {
+  if (!noteText || !Array.isArray(actionsList) || actionsList.length === 0) return false;
+  const normNote = String(noteText).toLowerCase().replace(/[.,;\s]+/g, ' ').trim();
+  const normActions = actionsList.join(' ').toLowerCase().replace(/[.,;\s]+/g, ' ').trim();
+  if (!normNote || normNote === normActions) return true;
+
+  const parts = String(noteText)
+    .split(/[,;\n]+/)
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const actionsLower = actionsList.map((a) => String(a || '').trim().toLowerCase()).filter(Boolean);
+  if (parts.length === 0 || actionsLower.length === 0) return false;
+
+  return parts.every((p) => actionsLower.some((a) => a === p || a.includes(p) || p.includes(a)));
+}
+
+/**
  * Memecah catatan kondisi terstruktur dari backend/kunjungan menjadi komponen ringkas
  * (Mencegah teks panjang berulang dua kali di tampilan riwayat)
  */
 export function parseCatatanKondisi(rawText) {
   if (!rawText || typeof rawText !== 'string') {
     return {
+      kondisi: null,
       tindakanList: [],
       statusTindakLanjut: null,
       kebutuhanLanjutanList: [],
@@ -184,7 +212,27 @@ export function parseCatatanKondisi(rawText) {
   }
 
   const s = rawText.trim();
+  let kondisi = null;
   let tindakanList = [];
+
+  // 0. Ekstrak Penolakan Jaminan Jasa Raharja atau Kondisi Korban
+  let isPenolakanJaminanJR = false;
+  let tanggalPenolakan = null;
+  let keteranganPenolakan = null;
+
+  if (/\[TOLAK_JAMINAN_JR\]/i.test(s) || /tidak bersedia menggunakan jaminan jasa raharja/i.test(s)) {
+    isPenolakanJaminanJR = true;
+    kondisi = 'Tidak Bersedia Menggunakan Jaminan Jasa Raharja';
+    const tMatch = s.match(/Tanggal:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}|[^\s|]+)/i);
+    const kMatch = s.match(/Keterangan:\s*([^.\n]+(?:\.[^.\n]+)*?)(?=\s*Kondisi:|\s*$)/i);
+    if (tMatch && tMatch[1]) tanggalPenolakan = tMatch[1].trim();
+    if (kMatch && kMatch[1]) keteranganPenolakan = kMatch[1].trim();
+  }
+
+  const kondisiMatch = s.match(/(?:^|\.\s*)Kondisi:\s*([^.]+)/i);
+  if (kondisiMatch && kondisiMatch[1] && !isPenolakanJaminanJR) {
+    kondisi = kondisiMatch[1].trim();
+  }
   let statusTindakLanjut = null;
   let kebutuhanLanjutanList = [];
   let catatanTambahan = null;
@@ -253,6 +301,10 @@ export function parseCatatanKondisi(rawText) {
   }
 
   return {
+    kondisi,
+    isPenolakanJaminanJR,
+    tanggalPenolakan,
+    keteranganPenolakan,
     tindakanList,
     statusTindakLanjut,
     kebutuhanLanjutanList,
@@ -305,10 +357,12 @@ export function mapBackendCaseToVictim(caseData, visitsData = [], registeredOffi
     }
   }
 
-  // 2. Tentukan penanggung jawab kanonikal berdasarkan penugasan Rumah Sakit (ID Rumah Sakit & Master Plotting)
+  // 2. Gunakan assigned_officer_id dari backend sebagai sumber kebenaran utama.
+  // Hanya fallback ke plotting rumah sakit jika data tidak memiliki field assigned_officer_id (misal data lokal).
+  const hasExplicitBackendAssignmentField = Object.prototype.hasOwnProperty.call(caseData, 'assigned_officer_id');
   const caseHid = Number(caseData.hospital_id);
   const caseRs = (caseData.rumah_sakit || '').toLowerCase().trim();
-  if (Array.isArray(registeredOfficers) && registeredOfficers.length > 0) {
+  if (!rawOfficerId && !hasExplicitBackendAssignmentField && Array.isArray(registeredOfficers) && registeredOfficers.length > 0) {
     const matchedByHospital = registeredOfficers.find(
       (o) => o.status !== 'Nonaktif' && (
         (caseHid && Array.isArray(o.hospitals) && o.hospitals.some((h) => Number(h.hospital_id || h.id) === caseHid)) ||
@@ -321,7 +375,6 @@ export function mapBackendCaseToVictim(caseData, visitsData = [], registeredOffi
       petugasId = matchedByHospital.id;
       namaPetugas = matchedByHospital.nama;
     } else if (caseHid || caseRs) {
-      // Rumah sakit ini belum memiliki petugas penanggung jawab
       petugasId = null;
       namaPetugas = 'Belum ada Petugas';
     }
@@ -333,6 +386,28 @@ export function mapBackendCaseToVictim(caseData, visitsData = [], registeredOffi
 
   const rawVisits = Array.isArray(visitsData) ? visitsData : (caseData.visits || []);
   const sortedVisits = [...rawVisits].sort((a, b) => (a.kunjungan_ke || 0) - (b.kunjungan_ke || 0));
+  const refsForVisits = (Array.isArray(referralsData) && referralsData.length > 0)
+    ? referralsData
+    : (Array.isArray(caseData.referrals) ? caseData.referrals : []);
+
+  const findOfficerByHospOrId = (hospName, offId) => {
+    if (!Array.isArray(registeredOfficers)) return null;
+    if (offId) {
+      const byId = registeredOfficers.find(
+        (o) => String(o.backendOfficerId) === String(offId) || String(o.backendId) === String(offId) || String(o.id) === String(offId)
+      );
+      if (byId) return byId;
+    }
+    if (hospName) {
+      return registeredOfficers.find(
+        (o) => o.status !== 'Nonaktif' && (
+          (Array.isArray(o.plottingRs) && o.plottingRs.some((rs) => isSameHospital(rs, hospName))) ||
+          (Array.isArray(o.hospitals) && o.hospitals.some((h) => isSameHospital(h.nama_rs, hospName)))
+        )
+      ) || null;
+    }
+    return null;
+  };
 
   // Mapping baris tabel `visits` ke aktivitas riwayat
   const mappedActivities = sortedVisits.map((vis) => {
@@ -341,12 +416,9 @@ export function mapBackendCaseToVictim(caseData, visitsData = [], registeredOffi
     let fullPhotoUrl = null;
     if (vis.foto_bukti_url) {
       fullPhotoUrl = resolvePhotoUrl(vis.foto_bukti_url);
-    } else {
-      fullPhotoUrl = (vis.id ? getCachedPhoto(`VISIT-${vis.id}`) : null) ||
-        (vis.id ? getCachedPhoto(`visit_${vis.id}`) : null);
-    }
-    if (!fullPhotoUrl && isCompleted) {
-      fullPhotoUrl = getRealVisitPhoto(vis.id || vis.case_id || vis.kunjungan_ke);
+    } else if (vis.id) {
+      const cachedVisitPhoto = getCachedPhoto(`VISIT-${vis.id}`) || getCachedPhoto(`visit_${vis.id}`);
+      fullPhotoUrl = cachedVisitPhoto && !String(cachedVisitPhoto).includes('/img/visits/') ? cachedVisitPhoto : null;
     }
 
     const parsed = parseCatatanKondisi(vis.catatan_kondisi);
@@ -359,9 +431,10 @@ export function mapBackendCaseToVictim(caseData, visitsData = [], registeredOffi
     let visitKondisi = parsed.kondisi || vis.kondisi_korban;
     if (!visitKondisi) {
       if (isCompleted) {
-        if (vis.catatan_kondisi && /pulang|selesai/i.test(vis.catatan_kondisi)) {
+        const noteWithoutFollowUp = String(vis.catatan_kondisi || '').replace(/Status tindak lanjut:\s*[^.]+/gi, '');
+        if (noteWithoutFollowUp && /\bpulang\b|sudah pulang/i.test(noteWithoutFollowUp)) {
           visitKondisi = 'Pulang';
-        } else if (vis.catatan_kondisi && /rujuk/i.test(vis.catatan_kondisi)) {
+        } else if (noteWithoutFollowUp && /rujuk/i.test(noteWithoutFollowUp)) {
           visitKondisi = 'Dirujuk';
         } else if (isLatestVisit) {
           visitKondisi = caseData.status_kondisi || 'Rawat Inap';
@@ -373,7 +446,36 @@ export function mapBackendCaseToVictim(caseData, visitsData = [], registeredOffi
       }
     }
 
-    const visitHospital = vis.nama_rs || vis.rumah_sakit || caseData.rumah_sakit || null;
+    // Tentukan RS & petugas aktual untuk kunjungan ini (mempertahankan data RS asal & petugas asal sebelum rujukan)
+    let visitHospital = vis.nama_rs || vis.rumah_sakit || null;
+    let visitOfficerName = vis.officer_nama || vis.petugas_nama || null;
+    let visitOfficerId = vis.officer_id ? String(vis.officer_id) : null;
+
+    if (refsForVisits.length > 0) {
+      const vTs = parseDateToTimestamp(visitDate || vis.created_at);
+      // Cari rujukan yang terjadi pada/setelah kunjungan ini atau kunjungan yang mencatat status Dirujuk
+      const subsequentRef = refsForVisits.find((r) => {
+        const refTs = parseDateToTimestamp(r.created_at);
+        return (refTs > 0 && vTs > 0 && vTs <= refTs + 60000) || visitKondisi === 'Dirujuk' || String(visitKondisi || '').startsWith('Dirujuk');
+      });
+      if (subsequentRef) {
+        const srcHosp = subsequentRef.source_hospital_nama || subsequentRef.source_hospital?.nama_rs || null;
+        if (srcHosp) {
+          visitHospital = srcHosp;
+        }
+        const matchedPrevOff = findOfficerByHospOrId(visitHospital, subsequentRef.prev_officer_id || vis.officer_id);
+        visitOfficerName = subsequentRef.prev_officer_nama || matchedPrevOff?.nama || visitOfficerName;
+        if (!visitOfficerId && matchedPrevOff) visitOfficerId = matchedPrevOff.id;
+      }
+    }
+
+    if (!visitHospital) {
+      visitHospital = caseData.rumah_sakit || null;
+    }
+    if (!visitOfficerName) {
+      const matchedVisOff = findOfficerByHospOrId(visitHospital, visitOfficerId);
+      visitOfficerName = matchedVisOff?.nama || namaPetugas;
+    }
 
     return {
       id: `VISIT-${vis.id}`,
@@ -423,7 +525,8 @@ export function mapBackendCaseToVictim(caseData, visitsData = [], registeredOffi
       status_sla: vis.status_kunjungan,
       is_overdue: Boolean(vis.is_overdue),
       isOverdue: Boolean(vis.is_overdue),
-      petugasNama: namaPetugas
+      petugasId: visitOfficerId || petugasId,
+      petugasNama: visitOfficerName || namaPetugas
     };
   });
 
@@ -512,26 +615,39 @@ export function mapBackendCaseToVictim(caseData, visitsData = [], registeredOffi
     }
   }
 
-  // 4 Kategori Resmi Status Pemantauan:
-  // 1. Menunggu Kunjungan: Korban sudah masuk ke sistem, tetapi belum dilakukan kunjungan awal.
-  // 2. Dalam Pemantauan: Kunjungan awal sudah dilakukan dan korban masih membutuhkan pemantauan.
-  // 3. Menunggu Tindak Lanjut: Sudah waktunya melakukan kunjungan berikutnya, tetapi petugas belum melakukan kunjungan.
-  // 4. Selesai: Pemantauan berakhir karena korban sudah pulang atau meninggal dunia (MD).
-  let statusPemantauan = MONITORING_STATUS.MENUNGGU_KUNJUNGAN;
-  const isCaseFinished = ['Selesai', 'Meninggal Dunia', 'Sudah Pulang', 'Pulang'].includes(caseData.status_kondisi);
+  const rejectNote = allNotes.find((n) => typeof n === 'string' && (n.includes('[TOLAK_JAMINAN_JR]') || n.toLowerCase().includes('tidak bersedia menggunakan jaminan jasa raharja')));
+  const isPenolakanJaminanJR = Boolean(
+    caseData.isPenolakanJaminanJR ||
+    rejectNote ||
+    sortedVisits.some((v) => v.kondisi_korban === 'Tidak Bersedia Menggunakan Jaminan Jasa Raharja')
+  );
+  let tanggalPenolakanJaminan = caseData.tanggalPenolakanJaminan || null;
+  let keteranganPenolakanJaminan = caseData.keteranganPenolakanJaminan || null;
+  if (rejectNote) {
+    const parsedRej = parseCatatanKondisi(rejectNote);
+    if (!tanggalPenolakanJaminan) tanggalPenolakanJaminan = parsedRej.tanggalPenolakan;
+    if (!keteranganPenolakanJaminan) keteranganPenolakanJaminan = parsedRej.keteranganPenolakan;
+  }
 
-  if (isCaseFinished || isDeceased) {
-    statusPemantauan = MONITORING_STATUS.SELESAI;
+  // 5 Kategori Resmi Status Pemantauan:
+  // 1. Belum Dipantau
+  // 2. Dalam Pemantauan
+  // 3. Selesai Pulang
+  // 4. Selesai MD
+  // 5. Selesai Tidak Bersedia
+  let statusPemantauan = MONITORING_STATUS.BELUM_DIPANTAU;
+  const isPulangCase = ['Selesai', 'Sudah Pulang', 'Pulang', 'Selesai Pulang'].includes(caseData.status_kondisi);
+
+  if (isPenolakanJaminanJR) {
+    statusPemantauan = MONITORING_STATUS.SELESAI_TIDAK_BERSEDIA;
+  } else if (isDeceased || caseData.status_kondisi === 'Meninggal Dunia') {
+    statusPemantauan = MONITORING_STATUS.SELESAI_MD;
+  } else if (isPulangCase) {
+    statusPemantauan = MONITORING_STATUS.SELESAI_PULANG;
   } else if (completedVisits.length === 0 && !firstCompleted) {
-    statusPemantauan = MONITORING_STATUS.MENUNGGU_KUNJUNGAN;
+    statusPemantauan = MONITORING_STATUS.BELUM_DIPANTAU;
   } else {
-    // Kunjungan awal sudah dilakukan, evaluasi apakah sudah waktunya kunjungan berikutnya
-    const isNextDue = Boolean(
-      (activePendingVisit && (activePendingVisit.isOverdue3Days || (activePendingVisit.jadwalKunjungan && new Date(activePendingVisit.jadwalKunjungan).getTime() <= Date.now()))) ||
-      Boolean(caseData.is_overdue) ||
-      (latestCompleted && (Date.now() - new Date(latestCompleted.tanggalKunjungan).getTime()) >= 72 * 60 * 60 * 1000)
-    );
-    statusPemantauan = isNextDue ? MONITORING_STATUS.MENUNGGU_TINDAK_LANJUT : MONITORING_STATUS.DALAM_PEMANTAUAN;
+    statusPemantauan = MONITORING_STATUS.DALAM_PEMANTAUAN;
   }
 
   // Kategori Perawatan (Rawat Pertama, Rawat Lanjutan, Rujukan, Pulang, Monitoring Berjalan)
@@ -568,7 +684,6 @@ export function mapBackendCaseToVictim(caseData, visitsData = [], registeredOffi
 
   // Deteksi cerdas rujukan dari riwayat kunjungan faskes sebelumnya, catatan, atau data pasien
   const caseNotesLower = `${caseData.kronologi || ''} ${caseData.catatan_kondisi || ''} ${caseData.keterangan || ''}`.toLowerCase();
-  const caseVictimNameLower = (caseData.nama_korban || '').toLowerCase().trim();
 
   // Jika status_kondisi bertuliskan rujukan tujuan, misal "Dirujuk ke RS Tabrani Rab"
   if (!targetHospitalFromReferral && typeof caseData.status_kondisi === 'string' && caseData.status_kondisi.startsWith('Dirujuk ke ')) {
@@ -576,7 +691,7 @@ export function mapBackendCaseToVictim(caseData, visitsData = [], registeredOffi
     if (parsedTarget && parsedTarget !== 'RS Lain') {
       targetHospitalFromReferral = parsedTarget;
       if (!sourceHospitalFromReferral) {
-        sourceHospitalFromReferral = caseData.rumah_sakit || 'RS Syafira Pekanbaru';
+        sourceHospitalFromReferral = caseData.rumah_sakit || null;
       }
     }
   }
@@ -587,19 +702,7 @@ export function mapBackendCaseToVictim(caseData, visitsData = [], registeredOffi
     if (parsedSource) {
       sourceHospitalFromReferral = parsedSource;
       if (!targetHospitalFromReferral) {
-        targetHospitalFromReferral = caseData.rumah_sakit || 'RS Tabrani Rab';
-      }
-    }
-  }
-
-  // Kasus rujukan terdeteksi antar faskes (contoh: pasien dari RS Tabrani dipindahkan ke RS Syafira)
-  if (!sourceHospitalFromReferral || !targetHospitalFromReferral) {
-    if (caseVictimNameLower.includes('yui') || caseNotesLower.includes('tabrani') || (rawReferrals.length > 0 && rawVisits.some((v) => (v.nama_rs || v.rumah_sakit || '').toLowerCase().includes('tabrani')))) {
-      if (!sourceHospitalFromReferral) {
-        sourceHospitalFromReferral = 'RS Tabrani Rab';
-      }
-      if (!targetHospitalFromReferral) {
-        targetHospitalFromReferral = caseData.rumah_sakit || 'RS Syafira Pekanbaru';
+        targetHospitalFromReferral = caseData.rumah_sakit || null;
       }
     }
   }
@@ -622,7 +725,7 @@ export function mapBackendCaseToVictim(caseData, visitsData = [], registeredOffi
   }
 
   if (hasOfficialReferralContext && sourceHospitalFromReferral && !targetHospitalFromReferral) {
-    targetHospitalFromReferral = caseData.rumah_sakit || 'RS Syafira Pekanbaru';
+    targetHospitalFromReferral = caseData.rumah_sakit || null;
   }
 
   // Pastikan source dan target tidak identik
@@ -686,7 +789,7 @@ export function mapBackendCaseToVictim(caseData, visitsData = [], registeredOffi
     ...referralCareItems
   ];
 
-  if (caseData.status_kondisi === 'Selesai' && latestCompleted) {
+  if (caseData.status_kondisi === 'Selesai' && latestCompleted && !isPenolakanJaminanJR) {
     initialCareHistory.push({
       id: `CARE-CASE-${caseData.id}-DISCHARGE`,
       tanggal: latestCompleted.tanggalKunjungan,
@@ -696,6 +799,19 @@ export function mapBackendCaseToVictim(caseData, visitsData = [], registeredOffi
       petugasId: petugasId,
       petugasNama: namaPetugas,
       catatan: latestCompleted.catatan_kondisi || 'Pasien telah dinyatakan pulang / selesai perawatan.'
+    });
+  }
+
+  if (isPenolakanJaminanJR) {
+    initialCareHistory.push({
+      id: `CARE-CASE-${caseData.id}-REJECT-JR`,
+      tanggal: tanggalPenolakanJaminan || latestCompleted?.tanggalKunjungan || new Date().toISOString(),
+      rumahSakit: caseData.rumah_sakit,
+      jenisPerawatan: 'Penolakan Jaminan JR',
+      status: 'Tidak Bersedia Jaminan JR',
+      petugasId: petugasId,
+      petugasNama: namaPetugas,
+      catatan: keteranganPenolakanJaminan || 'Korban / keluarga menyatakan tidak bersedia menggunakan jaminan Jasa Raharja.'
     });
   }
 
@@ -839,22 +955,35 @@ export function mapBackendCaseToVictim(caseData, visitsData = [], registeredOffi
     petugasAsalNama: riwayatRujukan[0]?.petugasAsalNama || caseData.petugasAsalNama || originOfficer?.nama || null,
     petugasTujuanId: riwayatRujukan[0]?.petugasTujuanId || caseData.petugasTujuanId || destOfficer?.id || null,
     petugasTujuanNama: riwayatRujukan[0]?.petugasTujuanNama || caseData.petugasTujuanNama || destOfficer?.nama || null,
-    kondisiTerakhir: isDeceased ? 'Meninggal Dunia' : (isCaseFinished ? (caseData.status_kondisi === 'Selesai' ? 'Pulang' : caseData.status_kondisi) : (caseData.status_kondisi || 'Rawat Inap')),
-    status_kondisi: isDeceased ? 'Meninggal Dunia' : (caseData.status_kondisi || 'Rawat Inap'),
+    kondisiTerakhir: isPenolakanJaminanJR
+      ? 'Tidak Bersedia Menggunakan Jaminan Jasa Raharja'
+      : (isDeceased ? 'Meninggal Dunia' : (isPulangCase ? (caseData.status_kondisi === 'Selesai' ? 'Pulang' : caseData.status_kondisi) : (caseData.status_kondisi || 'Rawat Inap'))),
+    status_kondisi: isPenolakanJaminanJR
+      ? 'Tidak Bersedia Menggunakan Jaminan Jasa Raharja'
+      : (isDeceased ? 'Meninggal Dunia' : (caseData.status_kondisi || 'Rawat Inap')),
     statusKonfirmasiKondisi: 'Terkonfirmasi',
-    statusPemantauan: caseData.status_pemantauan === 'Diarsipkan' ? 'Diarsipkan' : ((isDeceased || isCaseFinished) ? MONITORING_STATUS.SELESAI : statusPemantauan),
-    status_pemantauan: caseData.status_pemantauan || ((isDeceased || isCaseFinished) ? 'Selesai Dipantau' : 'Pemantauan Aktif'),
-    statusPerawatan: isDeceased ? 'Meninggal Dunia' : statusPerawatan,
-    jadwalPemantauanBerikutnya: (isDeceased || isCaseFinished || caseData.status_pemantauan === 'Diarsipkan') ? null : (caseData.jadwal_berikutnya || (activePendingVisit ? activePendingVisit.jadwalKunjungan : null)),
+    statusPemantauan: caseData.status_pemantauan === 'Diarsipkan'
+      ? 'Diarsipkan'
+      : (isPenolakanJaminanJR
+        ? MONITORING_STATUS.SELESAI_TIDAK_BERSEDIA
+        : (isDeceased
+          ? MONITORING_STATUS.SELESAI_MD
+          : (isPulangCase ? MONITORING_STATUS.SELESAI_PULANG : statusPemantauan))),
+    status_pemantauan: isPenolakanJaminanJR ? 'Tidak Bersedia Jaminan JR' : (caseData.status_pemantauan || ((isDeceased || isPulangCase) ? 'Selesai Dipantau' : 'Pemantauan Aktif')),
+    statusPerawatan: isPenolakanJaminanJR ? 'Tidak Bersedia Jaminan JR' : (isDeceased ? 'Meninggal Dunia' : statusPerawatan),
+    isPenolakanJaminanJR,
+    tanggalPenolakanJaminan,
+    keteranganPenolakanJaminan,
+    jadwalPemantauanBerikutnya: (isDeceased || isPulangCase || isPenolakanJaminanJR || caseData.status_pemantauan === 'Diarsipkan') ? null : (caseData.jadwal_berikutnya || (activePendingVisit ? activePendingVisit.jadwalKunjungan : null)),
     jadwal_berikutnya: caseData.jadwal_berikutnya || null,
     tanggalMeninggal,
     jamMeninggal,
     waktuMeninggal: (tanggalMeninggal && jamMeninggal) ? `${tanggalMeninggal}T${jamMeninggal}:00` : null,
     dicatatOleh,
     waktuPencatatanMD,
-    tugasMenunggu: (isDeceased || isCaseFinished) ? 0 : (caseData.tugas_menunggu !== undefined ? Number(caseData.tugas_menunggu) : pendingVisits.length),
-    activePendingVisit: (isDeceased || isCaseFinished) ? null : activePendingVisit,
-    activeVisitId: (isDeceased || isCaseFinished) ? null : (activePendingVisit ? activePendingVisit.visitId : null),
+    tugasMenunggu: (isDeceased || isPulangCase || isPenolakanJaminanJR) ? 0 : (caseData.tugas_menunggu !== undefined ? Number(caseData.tugas_menunggu) : pendingVisits.length),
+    activePendingVisit: (isDeceased || isPulangCase || isPenolakanJaminanJR) ? null : activePendingVisit,
+    activeVisitId: (isDeceased || isPulangCase || isPenolakanJaminanJR) ? null : (activePendingVisit ? activePendingVisit.visitId : null),
     kunjunganPertama: firstCompleted,
     tanggalKunjunganTerakhir: latestCompleted ? latestCompleted.tanggalKunjungan : null,
     waktuPemantauanTerakhir: latestCompleted ? latestCompleted.tanggalKunjungan : null,
@@ -868,10 +997,10 @@ export function mapBackendCaseToVictim(caseData, visitsData = [], registeredOffi
     riwayatPemantauan: completedVisits.filter((v) => v.kunjunganKe > 1),
     riwayatAktivitas,
     riwayatPerawatan: initialCareHistory,
-    statusTindakLanjut: (isDeceased || isCaseFinished)
+    statusTindakLanjut: (isDeceased || isPulangCase || isPenolakanJaminanJR)
       ? 'Sudah Selesai'
       : ((caseData.tugas_menunggu > 0 || pendingVisits.length > 0) ? 'Masih Perlu Ditindaklanjuti' : 'Sudah Selesai'),
-    tindakLanjut: (isDeceased || isCaseFinished)
+    tindakLanjut: (isDeceased || isPulangCase || isPenolakanJaminanJR)
       ? 'Seluruh pemantauan korban telah selesai'
       : ((caseData.tugas_menunggu > 0 || pendingVisits.length > 0) ? 'Kunjungan verifikasi menunggu pelaksanaan' : 'Seluruh kunjungan pemantauan selesai'),
     santunanSelesai: ['Selesai', 'Meninggal Dunia'].includes(caseData.status_kondisi),

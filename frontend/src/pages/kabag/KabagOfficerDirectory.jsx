@@ -1,12 +1,9 @@
-import React, { useState, useMemo, useEffect } from 'react';
-import { Link, useNavigate, useLocation } from 'react-router-dom';
+import { useState, useMemo, useEffect } from 'react';
+import { Link, useLocation } from 'react-router-dom';
 import {
   Users,
-  User,
-  UserCheck,
   Building2,
   Search,
-  Download,
   MapPin,
   ChevronRight,
   RotateCcw,
@@ -17,14 +14,9 @@ import {
   Table as TableIcon,
   X,
   Eye,
-  Activity,
   ShieldCheck,
   AlertCircle,
   AlertTriangle,
-  Clock,
-  ArrowUpRight,
-  Filter,
-  CheckCircle2,
   ExternalLink,
   Plus,
   Check,
@@ -36,7 +28,6 @@ import {
   Key,
   Copy,
   EyeOff,
-  Lock,
   Loader2
 } from 'lucide-react';
 import { api } from '../../services/api';
@@ -58,7 +49,6 @@ function isVictimActive(victim) {
 }
 
 export default function KabagOfficerDirectory() {
-  const navigate = useNavigate();
   const location = useLocation();
 
   // Storage data
@@ -87,11 +77,7 @@ export default function KabagOfficerDirectory() {
       radius_meter: 200
     }));
   });
-  const [isLoadingData, setIsLoadingData] = useState(false);
-
   // Detail Modal & Hospital Popover states
-  const [detailOfficerModal, setDetailOfficerModal] = useState(null);
-  const [detailModalTab, setDetailModalTab] = useState('hospitals'); // 'hospitals' | 'victims' | 'history'
   const [showAllHospitalsOfficer, setShowAllHospitalsOfficer] = useState(null);
 
   // Single Hospital Assignment Modal (POV Data Rumah Sakit)
@@ -105,7 +91,6 @@ export default function KabagOfficerDirectory() {
 
   // Live backend data loading function
   const loadFreshBackendData = async () => {
-    setIsLoadingData(true);
     try {
       // 1. Ambil seluruh RS master dari MySQL & gabungkan dengan daftar resmi 69 faskes
       const masterHs = await api.getHospitals(true).catch(() => []);
@@ -212,8 +197,6 @@ export default function KabagOfficerDirectory() {
       setVictims(storageService.getVictims());
     } catch (err) {
       console.warn('[loadFreshBackendData] Warning:', err.message);
-    } finally {
-      setIsLoadingData(false);
     }
   };
 
@@ -310,30 +293,6 @@ export default function KabagOfficerDirectory() {
   const [isSubmittingOfficer, setIsSubmittingOfficer] = useState(false);
   const [createdAccountModal, setCreatedAccountModal] = useState(null);
   const [copiedCredential, setCopiedCredential] = useState(false);
-
-  const handleToggleHospitalSelection = (rsName) => {
-    setNewOfficerForm((prev) => {
-      const exists = prev.plottingRs.includes(rsName);
-      const nextList = exists
-        ? prev.plottingRs.filter((r) => r !== rsName)
-        : [...prev.plottingRs, rsName];
-      return { ...prev, plottingRs: nextList };
-    });
-  };
-
-  const handleAddCustomHospital = () => {
-    const custom = (newOfficerForm.newRsInput || '').trim();
-    if (!custom) return;
-    if (!newOfficerForm.plottingRs.includes(custom)) {
-      setNewOfficerForm((prev) => ({
-        ...prev,
-        plottingRs: [...prev.plottingRs, custom],
-        newRsInput: ''
-      }));
-    } else {
-      setNewOfficerForm((prev) => ({ ...prev, newRsInput: '' }));
-    }
-  };
 
   const syncOfficerHospitalsToBackend = async (officerIdOrLocalId, hospitalNames = []) => {
     if (!officerIdOrLocalId) return;
@@ -573,30 +532,6 @@ export default function KabagOfficerDirectory() {
     setIsEditModalOpen(true);
   };
 
-  const handleToggleEditHospital = (rsName) => {
-    setEditForm((prev) => {
-      const exists = prev.plottingRs.includes(rsName);
-      const nextList = exists
-        ? prev.plottingRs.filter((r) => r !== rsName)
-        : [...prev.plottingRs, rsName];
-      return { ...prev, plottingRs: nextList };
-    });
-  };
-
-  const handleAddCustomEditHospital = () => {
-    const custom = (editForm.newRsInput || '').trim();
-    if (!custom) return;
-    if (!editForm.plottingRs.includes(custom)) {
-      setEditForm((prev) => ({
-        ...prev,
-        plottingRs: [...prev.plottingRs, custom],
-        newRsInput: ''
-      }));
-    } else {
-      setEditForm((prev) => ({ ...prev, newRsInput: '' }));
-    }
-  };
-
   const handleSaveEdit = async (e) => {
     e.preventDefault();
     if (!editingOfficer) return;
@@ -676,9 +611,6 @@ export default function KabagOfficerDirectory() {
     setOfficers((prev) =>
       prev.map((o) => (String(o.id) === String(editingOfficer.id) ? { ...o, ...updated } : o))
     );
-    if (detailOfficerModal && String(detailOfficerModal.id) === String(editingOfficer.id)) {
-      setDetailOfficerModal((prev) => (prev ? { ...prev, ...updated } : null));
-    }
     if (activeOfficerModal && String(activeOfficerModal.id) === String(editingOfficer.id)) {
       setActiveOfficerModal((prev) => (prev ? { ...prev, ...updated } : null));
     }
@@ -847,14 +779,6 @@ export default function KabagOfficerDirectory() {
       setOfficers(freshOfficers);
       storageService.saveOfficers(freshOfficers);
 
-      if (detailOfficerModal && String(detailOfficerModal.id) === String(assignmentOfficer.id)) {
-        setDetailOfficerModal((prev) => ({
-          ...prev,
-          plottingRs: freshRsNames,
-          hospitals: freshPlots
-        }));
-      }
-
       await storageService.syncWithBackend(true);
       if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
         window.dispatchEvent(new Event('jr_officers_updated'));
@@ -869,55 +793,6 @@ export default function KabagOfficerDirectory() {
       alert(`Gagal menyimpan penugasan rumah sakit: ${err.message}`);
     } finally {
       setIsSavingAssignment(false);
-    }
-  };
-
-  // Mengakhiri penugasan rumah sakit
-  const handleEndAssignment = async (officer, hospitalId, hospitalName) => {
-    const officerBackendId = officer.backendOfficerId || officer.backendId || Number(String(officer.id).replace(/\D/g, ''));
-    const hid = Number(String(hospitalId).replace(/\D/g, ''));
-    if (!officerBackendId || !hid) return;
-
-    if (!window.confirm(`Yakin ingin mengakhiri penugasan ${officer.nama} untuk ${hospitalName}? Status RS ini akan menjadi "Belum ada Petugas".`)) {
-      return;
-    }
-
-    try {
-      await api.removeHospitalFromOfficer(officerBackendId, hid);
-      const freshPlots = await api.getOfficerHospitals(officerBackendId).catch(() => []);
-      const freshRsNames = freshPlots.map((p) => p.nama_rs);
-
-      storageService.updateOfficer(officer.id, {
-        plottingRs: freshRsNames,
-        hospitals: freshPlots
-      });
-
-      const nextOfficers = officers.map((o) =>
-        String(o.id) === String(officer.id)
-          ? { ...o, plottingRs: freshRsNames, hospitals: freshPlots }
-          : o
-      );
-      setOfficers(nextOfficers);
-      storageService.saveOfficers(nextOfficers);
-
-      if (detailOfficerModal && String(detailOfficerModal.id) === String(officer.id)) {
-        setDetailOfficerModal((prev) => ({
-          ...prev,
-          plottingRs: freshRsNames,
-          hospitals: freshPlots
-        }));
-      }
-
-      await storageService.syncWithBackend(true);
-      if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
-        window.dispatchEvent(new Event('jr_officers_updated'));
-        window.dispatchEvent(new Event('jr_victims_updated'));
-      }
-
-      setToastMessage(`Penugasan di ${hospitalName} berhasil diakhiri. Rumah sakit kini berstatus "Belum ada Petugas".`);
-      setTimeout(() => setToastMessage(null), 4500);
-    } catch (err) {
-      alert(`Gagal mengakhiri penugasan: ${err.message}`);
     }
   };
 
@@ -1098,11 +973,6 @@ export default function KabagOfficerDirectory() {
     return null;
   };
 
-  // Rumah sakit yang belum memiliki petugas penanggung jawab
-  const unassignedHospitals = useMemo(() => {
-    return masterHospitals.filter((h) => !getHospitalAssignedOfficer(h.id, h.nama_rs));
-  }, [officers, masterHospitals]);
-
   // Filtered Master Hospitals untuk POV Data Rumah Sakit
   const filteredMasterHospitals = useMemo(() => {
     return masterHospitals.filter((h) => {
@@ -1117,37 +987,6 @@ export default function KabagOfficerDirectory() {
       return matchName || matchAddr || matchOff;
     });
   }, [masterHospitals, hospitalSearch, hospitalStatusFilter, officers]);
-
-  // Pemetaan RS ke petugas yang menangani (ID-based & Name-based)
-  const hospitalAssignedOfficersMap = useMemo(() => {
-    const map = new Map();
-    officers.forEach((off) => {
-      (off.hospitals || []).forEach((h) => {
-        const hid = h.hospital_id || h.id;
-        if (hid) {
-          if (!map.has(hid)) map.set(hid, []);
-          if (!map.get(hid).some((o) => String(o.id) === String(off.id))) {
-            map.get(hid).push(off);
-          }
-        }
-        if (h.nama_rs) {
-          const lower = h.nama_rs.toLowerCase().trim();
-          if (!map.has(lower)) map.set(lower, []);
-          if (!map.get(lower).some((o) => String(o.id) === String(off.id))) {
-            map.get(lower).push(off);
-          }
-        }
-      });
-      (off.plottingRs || []).forEach((rsName) => {
-        const lower = (rsName || '').toLowerCase().trim();
-        if (!map.has(lower)) map.set(lower, []);
-        if (!map.get(lower).some((o) => String(o.id) === String(off.id))) {
-          map.get(lower).push(off);
-        }
-      });
-    });
-    return map;
-  }, [officers]);
 
   // Extract distinct regions & hospitals for filter options
   const uniqueRegions = useMemo(() => {
@@ -1246,7 +1085,6 @@ export default function KabagOfficerDirectory() {
   // Filtered officers list
   const filteredOfficers = useMemo(() => {
     return officers.filter((off) => {
-      const workload = officerWorkloads[off.id] || { activeCount: 0 };
       const q = search.toLowerCase().trim();
 
       // Search matches
@@ -1284,52 +1122,6 @@ export default function KabagOfficerDirectory() {
     setRegionFilter('ALL');
     setStatusFilter('ALL');
     setHospitalFilter('ALL');
-  };
-
-  // Export to CSV
-  const handleExportCSV = () => {
-    const headers = [
-      'No',
-      'Nama Petugas',
-      'NIP',
-      'Jabatan',
-      'Status Petugas',
-      'Wilayah Tugas',
-      'Rumah Sakit Ditangani',
-      'Total Korban Ditangani',
-      'Korban Aktif',
-      'Nomor Telepon',
-      'Email'
-    ];
-
-    const rows = filteredOfficers.map((off, index) => {
-      const wl = officerWorkloads[off.id] || { activeCount: 0, totalCount: 0 };
-      const rsList = (off.plottingRs || []).join('; ');
-      return [
-        index + 1,
-        `"${off.nama}"`,
-        `"'\t${off.nip}"`, // prevent excel exponential format
-        `"${off.jabatan || 'Mobile Service Officer'}"`,
-        `"${off.status || 'Aktif Lapangan'}"`,
-        `"${off.wilayah || '—'}"`,
-        `"${rsList}"`,
-        wl.totalCount,
-        wl.activeCount,
-        `"${off.telepon || '—'}"`,
-        `"${off.email || '—'}"`
-      ];
-    });
-
-    const csvContent = '\uFEFF' + [headers.join(','), ...rows.map((r) => r.join(','))].join('\r\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `Data_Petugas_Jasa_Raharja_${new Date().toISOString().slice(0, 10)}.csv`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
   };
 
   // Open Assigned Victims modal
@@ -2283,7 +2075,7 @@ export default function KabagOfficerDirectory() {
                         );
                         const monitoringSla = calculateMonitoringSla(vic);
                         const currentSla = !vic.kunjunganPertama ? firstVisitSla : monitoringSla;
-                        const refInfo = getReferralPerspectiveInfo(vic, selectedHospital?.nama_rs || null, selectedOfficer);
+                        const refInfo = getReferralPerspectiveInfo(vic, null, activeOfficerModal);
 
                         return (
                           <tr key={vic.id} className="hover:bg-slate-50/80 transition-colors">

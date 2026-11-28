@@ -1,4 +1,4 @@
-import { toCanonicalHospitalName } from '../services/storageService.js';
+import { storageService, toCanonicalHospitalName } from '../services/storageService.js';
 
 /**
  * Cek apakah dua nama rumah sakit merujuk pada entitas faskes yang sama,
@@ -105,31 +105,39 @@ export function getReferralPerspectiveInfo(victim, viewingHospital = null, curre
     rsAsal = victim.statusPemantauan.replace(/^Rujukan dari\s+/i, '').trim();
   }
 
-  if (Array.isArray(victim.riwayatRujukan) && victim.riwayatRujukan.length > 0) {
-    const lastRef = victim.riwayatRujukan[victim.riwayatRujukan.length - 1];
-    if (!rsAsal && lastRef.dariRs) rsAsal = lastRef.dariRs;
-    if (!rsTujuan && lastRef.keRs) rsTujuan = lastRef.keRs;
+  const refList = Array.isArray(victim.riwayatRujukan) && victim.riwayatRujukan.length > 0
+    ? victim.riwayatRujukan
+    : (Array.isArray(victim.referrals) ? victim.referrals : []);
+
+  if (refList.length > 0) {
+    const lastRef = refList[refList.length - 1];
+    if (!rsAsal && (lastRef.dariRs || lastRef.source_hospital_nama)) {
+      rsAsal = lastRef.dariRs || lastRef.source_hospital_nama;
+    }
+    if (!rsTujuan && (lastRef.keRs || lastRef.target_hospital_nama)) {
+      rsTujuan = lastRef.keRs || lastRef.target_hospital_nama;
+    }
   }
 
-  // Khusus kasus referensi terdeteksi Tabrani -> Syafira (seperti pasien yuiyui)
-  const allNotes = `${victim.nama || ''} ${victim.catatanKondisi || ''} ${victim.keterangan || ''} ${victim.kronologi || ''}`.toLowerCase();
-  if (allNotes.includes('yui') || (rsAsal && rsAsal.toLowerCase().includes('syafira') && (rsTujuan || '').toLowerCase().includes('tabrani'))) {
-    rsAsal = 'RS Tabrani Rab';
-    rsTujuan = 'RS Syafira Pekanbaru';
-  } else if ((!rsAsal || !rsTujuan) && allNotes.includes('tabrani')) {
-    rsAsal = 'RS Tabrani Rab';
-    rsTujuan = 'RS Syafira Pekanbaru';
+  const isNonReferralReadmission = Boolean(
+    (victim.isRawatLanjutan || victim.rawatLanjutanDariPulang || victim.statusPerawatan === 'Rawat Lanjutan') &&
+    refList.length === 0 &&
+    !victim.isRujukanMasuk &&
+    !(typeof victim.kondisiTerakhir === 'string' && victim.kondisiTerakhir.startsWith('Dirujuk')) &&
+    !(typeof victim.statusPemantauan === 'string' && victim.statusPemantauan.startsWith('Dirujuk'))
+  );
+
+  // Jika ada salah satu tapi belum keduanya (hanya untuk kasus rujukan, bukan rawat ulang mandiri)
+  if (!isNonReferralReadmission) {
+    if (rsAsal && !rsTujuan && !isSameHospital(currentRs, rsAsal)) {
+      rsTujuan = currentRs;
+    }
+    if (rsTujuan && !rsAsal && !isSameHospital(currentRs, rsTujuan)) {
+      rsAsal = currentRs;
+    }
   }
 
-  // Jika ada salah satu tapi belum keduanya
-  if (rsAsal && !rsTujuan && !isSameHospital(currentRs, rsAsal)) {
-    rsTujuan = currentRs;
-  }
-  if (rsTujuan && !rsAsal && !isSameHospital(currentRs, rsTujuan)) {
-    rsAsal = currentRs;
-  }
-
-  const isReferred = Boolean(
+  const isReferred = !isNonReferralReadmission && Boolean(
     (rsAsal && rsTujuan && !isSameHospital(rsAsal, rsTujuan)) ||
     (rsAsal && !isSameHospital(rsAsal, currentRs)) ||
     (rsTujuan && !isSameHospital(rsTujuan, currentRs)) ||
@@ -168,14 +176,20 @@ export function getReferralPerspectiveInfo(victim, viewingHospital = null, curre
   }
 
   // 2. Jika belum ditentukan, cek penugasan faskes petugas yang sedang login
-  if (!isOriginView && !isDestinationView && currentUser?.profile) {
-    const officerHospitals = (
-      Array.isArray(currentUser.profile.plottingRs) && currentUser.profile.plottingRs.length > 0
-        ? currentUser.profile.plottingRs
-        : Array.isArray(currentUser.profile.hospitals)
-          ? currentUser.profile.hospitals.map((h) => h.nama_rs)
-          : []
-    );
+  const prof = currentUser?.profile || currentUser;
+  if (!isOriginView && !isDestinationView && prof) {
+    let officerHospitals = [];
+    if (Array.isArray(prof.plottingRs) && prof.plottingRs.length > 0) {
+      officerHospitals = prof.plottingRs;
+    } else if (Array.isArray(prof.hospitals) && prof.hospitals.length > 0) {
+      officerHospitals = prof.hospitals.map((h) => h.nama_rs).filter(Boolean);
+    } else {
+      const offId = prof.id || prof.backendOfficerId || prof.backendId;
+      const storedOfficer = offId ? storageService.getOfficerById(offId) : null;
+      if (storedOfficer && Array.isArray(storedOfficer.plottingRs)) {
+        officerHospitals = storedOfficer.plottingRs;
+      }
+    }
 
     const matchesOfficer = (target) => officerHospitals.some((h) => isSameHospital(h, target));
     const handlesAsal = matchesOfficer(rsAsal);

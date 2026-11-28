@@ -17,6 +17,7 @@ import {
   Info
 } from 'lucide-react';
 import { formatCareDate, formatCareDateTime } from '../../services/careHistoryService';
+import { isNoteDuplicateOfActions } from '../../services/backendMapper';
 import AuthenticatedImage from './AuthenticatedImage';
 import { getRealVisitPhoto } from '../../utils/realPhotos';
 
@@ -283,9 +284,15 @@ export default function RiwayatPerawatanAntarRs({
                                   </span>
                                 </div>
 
-                                <p className="text-xs text-slate-600 line-clamp-2 leading-relaxed">
-                                  {vis.cleanCatatan || vis.catatan_kondisi || vis.hasilKunjungan || 'Kunjungan telah selesai.'}
-                                </p>
+                                {(() => {
+                                  const noteText = vis.cleanCatatan || vis.catatan_kondisi || vis.hasilKunjungan || 'Kunjungan telah selesai.';
+                                  if (isNoteDuplicateOfActions(noteText, vis.tindakanList)) return null;
+                                  return (
+                                    <p className="text-xs text-slate-600 line-clamp-2 leading-relaxed">
+                                      {noteText}
+                                    </p>
+                                  );
+                                })()}
 
                                 {/* Tindakan checklist */}
                                 {Array.isArray(vis.tindakanList) && vis.tindakanList.length > 0 && (

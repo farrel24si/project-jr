@@ -26,7 +26,7 @@ export function parseDateSafe(dateInput) {
   if (!s) return null;
 
   // 1. Format DD/MM/YYYY atau DD-MM-YYYY (contoh: 31/10/2026 atau 31-10-2026 09:30)
-  const dmyMatch = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})(?:\s+(\d{1,2})[:.](\d{1,2})(?:[:.](\d{1,2}))?)?/);
+  const dmyMatch = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})(?:\s+(\d{1,2})[:.](\d{1,2})(?:[:.](\d{1,2}))?)?$/);
   if (dmyMatch) {
     const day = parseInt(dmyMatch[1], 10);
     const month = parseInt(dmyMatch[2], 10) - 1; // 0-based
@@ -38,8 +38,8 @@ export function parseDateSafe(dateInput) {
     if (!isNaN(d.getTime())) return d;
   }
 
-  // 2. Format YYYY-MM-DD atau YYYY/MM/DD
-  const ymdMatch = s.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})(?:\s+(\d{1,2})[:.](\d{1,2})(?:[:.](\d{1,2}))?)?/);
+  // 2. Format YYYY-MM-DD atau YYYY/MM/DD (hanya jika bukan ISO string dengan 'T' / zona waktu)
+  const ymdMatch = s.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})(?:\s+(\d{1,2})[:.](\d{1,2})(?:[:.](\d{1,2}))?)?$/);
   if (ymdMatch) {
     const year = parseInt(ymdMatch[1], 10);
     const month = parseInt(ymdMatch[2], 10) - 1;

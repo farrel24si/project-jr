@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -9,7 +9,6 @@ import {
   EyeOff,
   AlertCircle,
   Clock,
-  ShieldCheck,
   X
 } from 'lucide-react';
 
@@ -59,7 +58,7 @@ export default function LoginPage() {
     const emailLower = trimmedIdentifier.toLowerCase();
     const companyDomainRegex = /^[a-z0-9._%+-]+@jasaraharja\.co\.id$/;
     if (!companyDomainRegex.test(emailLower)) {
-      setErrorMessage('Email harus menggunakan domain resmi perusahaan (@jasaraharja.co.id).');
+      setErrorMessage('Email harus menggunakan email resmi perusahaan.');
       return;
     }
 
@@ -142,7 +141,7 @@ export default function LoginPage() {
         {/* Top brand badge */}
         <div className="relative z-10">
           <span className="inline-block bg-white/15 border border-white/25 text-white text-[11px] sm:text-xs font-bold px-3 py-1 rounded-full tracking-widest uppercase">
-            JR-MONITORING
+            SIMKORP
           </span>
         </div>
 
@@ -152,7 +151,7 @@ export default function LoginPage() {
             SELAMAT<br />DATANG
           </h1>
           <p className="text-white font-bold text-sm sm:text-base mt-2.5 tracking-wide">
-            JR-MONITORING
+            SIMKORP
           </p>
           <p className="text-blue-200 text-xs sm:text-sm mt-1.5 leading-relaxed max-w-xs">
             Sistem Monitoring Kinerja Petugas &amp; Pemantauan Korban Kecelakaan PT Jasa Raharja (Persero)
@@ -162,11 +161,10 @@ export default function LoginPage() {
         {/* Footer */}
         <div className="relative z-10 mt-6 md:mt-0">
           <p className="text-blue-300 text-[11px] sm:text-xs">
-            &copy; 2026 JR-MONITORING &nbsp;&bull;&nbsp; PT Jasa Raharja (Persero)
+            &copy; 2026 &nbsp;&bull;&nbsp; PT Jasa Raharja (Persero) Kantor Wilayah Riau
           </p>
         </div>
       </div>
-
       
       <div className="flex-1 bg-white flex flex-col justify-center px-6 py-8 sm:px-10 md:px-14 lg:px-20 relative overflow-hidden">
 
@@ -176,12 +174,12 @@ export default function LoginPage() {
 
         <div className="relative z-10 w-full max-w-sm mx-auto">
 
-          {/* Logo Jasa Raharja */}
-          <div className="mb-6">
+          {/* Logo SIMKORP */}
+          <div className="mb-3">
             <img
-              src="/img/logo-jasa-raharja.png"
-              alt="Logo PT Jasa Raharja"
-              className="h-11 w-auto object-contain"
+              src="/img/logo-SIMKORP.png"
+              alt="Logo SIMKORP"
+              className="h-20 sm:h-24 w-auto object-contain object-left -my-3"
             />
           </div>
 
@@ -314,12 +312,6 @@ export default function LoginPage() {
               <ArrowRight className="w-4 h-4" />
             </button>
           </form>
-
-          {/* Footer note */}
-          <p className="text-[11px] text-slate-400 text-center mt-8 leading-relaxed">
-            Sistem ini hanya dapat diakses oleh pegawai PT Jasa Raharja (Persero) yang memiliki hak akses resmi.<br />
-            Prototipe Internal &copy; 2026
-          </p>
         </div>
       </div>
     </div>

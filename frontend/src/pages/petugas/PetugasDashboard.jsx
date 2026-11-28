@@ -7,14 +7,13 @@ import FormPemantauanModal from '../../components/petugas/FormPemantauanModal';
 import Modal from '../../components/common/Modal';
 import MonitoringStatusBadge from '../../components/common/MonitoringStatusBadge';
 import SortableHeader from '../../components/common/SortableHeader';
-import { isVictimFinished, getMonitoringStatus } from '../../utils/monitoringStatus';
+import { isVictimFinished, getMonitoringStatus, MONITORING_STATUS } from '../../utils/monitoringStatus';
 import { evaluateOfficerKpi, compareVictimsBySlaPriority } from '../../services/slaService';
 import { formatDateIndo, formatTimeIndo, formatDateTimeIndo, parseDateSafe } from '../../utils/dateUtils';
 import { getReferralPerspectiveInfo } from '../../utils/referralUtils';
 import {
   ListChecks,
   Calendar,
-  BarChart3,
   Clock,
   Building2,
   Eye,
@@ -26,7 +25,6 @@ import {
   RotateCcw,
   FileText,
   CalendarCheck,
-  ArrowRight,
   ShieldCheck,
   CheckCircle2,
   Users,
@@ -39,13 +37,6 @@ function formatDateShort(dateStr) {
 
 function formatTime(dateStr, defaultTime = '') {
   return formatTimeIndo(dateStr, defaultTime);
-}
-
-function getInitials(name) {
-  if (!name) return 'JR';
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
 const MONTH_NAMES_SHORT = [
@@ -135,36 +126,30 @@ export default function PetugasDashboard() {
     return storageService.getAggregatedMetrics(officerId);
   }, [victims, officerId]);
 
-  // Helper info tanggal kunjungan terakhir
+  // Helper info tanggal kunjungan terakhir (hanya dari kunjungan yang sudah selesai dilaksanakan)
   const getVictimLastVisitInfo = (v) => {
+    const completedActs = Array.isArray(v.riwayatAktivitas)
+      ? v.riwayatAktivitas.filter((a) => a.statusKunjungan !== 'Menunggu')
+      : [];
+    const completedVisits = Array.isArray(v.riwayatKunjungan)
+      ? v.riwayatKunjungan.filter((a) => a.statusKunjungan !== 'Menunggu')
+      : [];
+    const visits = completedActs.length > 0 ? completedActs : completedVisits;
+    const hasFirstDone = Boolean(v.kunjunganPertama && v.kunjunganPertama.statusKunjungan !== 'Menunggu');
+
     let rawDate = null;
-
-    if (Array.isArray(v.riwayatAktivitas) && v.riwayatAktivitas.length > 0) {
-      const sorted = [...v.riwayatAktivitas].sort((a, b) => {
-        const da = new Date(a.waktuAktualKunjungan || a.tanggalKunjungan || a.tanggal || a.waktuFoto || 0).getTime();
-        const db = new Date(b.waktuAktualKunjungan || b.tanggalKunjungan || b.tanggal || b.waktuFoto || 0).getTime();
-        return db - da;
-      });
-      rawDate = sorted[0].waktuAktualKunjungan || sorted[0].tanggalKunjungan || sorted[0].tanggal || sorted[0].waktuFoto;
+    if (visits.length > 0) {
+      const getTs = (a) => new Date(a.waktuAktualKunjungan || a.tanggalKunjungan || a.tanggal || a.waktuFoto || 0).getTime();
+      const latest = [...visits].sort((a, b) => getTs(b) - getTs(a))[0];
+      rawDate = latest.waktuAktualKunjungan || latest.tanggalKunjungan || latest.tanggal || latest.waktuFoto;
     }
 
-    if (!rawDate && Array.isArray(v.riwayatKunjungan) && v.riwayatKunjungan.length > 0) {
-      const sorted = [...v.riwayatKunjungan].sort((a, b) => {
-        const da = new Date(a.waktuAktualKunjungan || a.tanggalKunjungan || a.tanggal || 0).getTime();
-        const db = new Date(b.waktuAktualKunjungan || b.tanggalKunjungan || b.tanggal || 0).getTime();
-        return db - da;
-      });
-      rawDate = sorted[0].waktuAktualKunjungan || sorted[0].tanggalKunjungan || sorted[0].tanggal;
-    }
-
-    if (!rawDate) {
+    if (!rawDate && (visits.length > 0 || hasFirstDone)) {
       rawDate =
         v.tanggalKunjunganTerakhir ||
         v.waktuPemantauanTerakhir ||
         v.kunjunganPertama?.waktuAktualKunjungan ||
-        v.kunjunganPertama?.tanggalKunjungan ||
-        v.tanggalMasukRs ||
-        v.tanggalInformasiDiterima;
+        v.kunjunganPertama?.tanggalKunjungan;
     }
 
     const d = rawDate ? parseDateSafe(rawDate) : null;
@@ -172,10 +157,10 @@ export default function PetugasDashboard() {
 
     return {
       dateObj: isValid ? d : null,
-      rawDate,
+      rawDate: isValid ? rawDate : null,
       tglHari: isValid ? String(d.getDate()).padStart(2, '0') : '—',
       bulan: isValid ? d.toLocaleDateString('id-ID', { month: 'short' }).toUpperCase() : '—',
-      waktu: isValid ? formatTimeIndo(d) : '09.30 WIB',
+      waktu: isValid ? formatTimeIndo(d) : '—',
       fullFormatted: isValid
         ? formatDateTimeIndo(d)
         : 'Belum ada kunjungan'
@@ -256,20 +241,8 @@ export default function PetugasDashboard() {
     return allActualActivities.filter((a) => a.date.toDateString() === todayStr).length;
   }, [allActualActivities, now]);
 
-  const kunjunganBulanIniValue = useMemo(() => {
-    return allActualActivities.filter(
-      (a) => a.date.getFullYear() === currentYear && a.date.getMonth() === currentMonthIdx
-    ).length;
-  }, [allActualActivities, currentYear, currentMonthIdx]);
-
   const perluTindakLanjutValue = useMemo(() => {
-    const fromList = victims.filter(
-      (v) =>
-        v.statusPemantauan === 'Pemantauan Aktif' ||
-        v.statusTindakLanjut === 'Masih Perlu Ditindaklanjuti' ||
-        v.kondisiTerakhir === 'Masih Dirawat' ||
-        v.statusPemantauan === 'Belum Dikunjungi'
-    ).length;
+    const fromList = victims.filter((v) => !isVictimFinished(v)).length;
     return Math.max(fromList, metrics.perluTindakLanjut || 0);
   }, [victims, metrics.perluTindakLanjut]);
 
@@ -290,31 +263,12 @@ export default function PetugasDashboard() {
           m += 12;
           y -= 1;
         }
-        slots.push({
-          month: MONTH_NAMES_SHORT[m],
-          monthIdx: m,
-          year: y,
-          label: MONTH_NAMES_SHORT[m]
-        });
-      }
-    } else if (chartPeriod === 'Tahun Sebelumnya') {
-      const prevY = currentYear - 1;
-      for (let m = 0; m < 12; m++) {
-        slots.push({
-          month: MONTH_NAMES_SHORT[m],
-          monthIdx: m,
-          year: prevY,
-          label: MONTH_NAMES_SHORT[m]
-        });
+        slots.push({ month: MONTH_NAMES_SHORT[m], monthIdx: m, year: y, label: MONTH_NAMES_SHORT[m] });
       }
     } else {
+      const targetYear = chartPeriod === 'Tahun Sebelumnya' ? currentYear - 1 : currentYear;
       for (let m = 0; m < 12; m++) {
-        slots.push({
-          month: MONTH_NAMES_SHORT[m],
-          monthIdx: m,
-          year: currentYear,
-          label: MONTH_NAMES_SHORT[m]
-        });
+        slots.push({ month: MONTH_NAMES_SHORT[m], monthIdx: m, year: targetYear, label: MONTH_NAMES_SHORT[m] });
       }
     }
 
@@ -403,14 +357,10 @@ export default function PetugasDashboard() {
   const agendaList = useMemo(() => {
     if (!victims || victims.length === 0) return [];
 
-    const activePatients = victims.filter(
-      (v) =>
-        v.statusPemantauan === 'Pemantauan Aktif' ||
-        v.kondisiTerakhir === 'Masih Dirawat' ||
-        v.kondisiTerakhir === 'Rawat Inap' ||
-        v.statusTindakLanjut === 'Masih Perlu Ditindaklanjuti' ||
-        v.statusPemantauan === 'Belum Dikunjungi'
-    );
+    const activePatients = victims.filter((v) => {
+      const st = getMonitoringStatus(v);
+      return st === MONITORING_STATUS.BELUM_DIPANTAU || st === MONITORING_STATUS.DALAM_PEMANTAUAN;
+    });
 
     const candidates = activePatients.length > 0 ? activePatients : victims;
 
@@ -534,11 +484,6 @@ export default function PetugasDashboard() {
       {/* ── 1. HEADER UTAMA DASHBOARD ── */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200/80 pb-4">
         <div>
-          <div className="flex items-center gap-2 mb-1">
-            <span className="text-[10px] font-bold text-sky-700 bg-sky-50 border border-sky-200/80 px-2 py-0.5 rounded-full uppercase tracking-wider">
-              {formattedHeaderDate}
-            </span>
-          </div>
           <h1 className="text-2xl font-black text-slate-900 tracking-tight">
             Dashboard Petugas
           </h1>
@@ -602,7 +547,7 @@ export default function PetugasDashboard() {
         <div className="bg-white rounded-2xl border border-slate-200/90 p-4 sm:p-5 shadow-2xs hover:shadow-xs transition-shadow">
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-              Kepatuhan SLA (3 Hari)
+              Kepatuhan SLA 
             </span>
             <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-600 border border-emerald-100 flex items-center justify-center shrink-0">
               <ShieldCheck className="w-4 h-4" />
@@ -949,7 +894,6 @@ export default function PetugasDashboard() {
             </div>
           ) : (
             tableData.map((v, idx) => {
-              const initials = getInitials(v.nama);
               const lastVisitInfo = getVictimLastVisitInfo(v);
 
               return (
@@ -998,11 +942,13 @@ export default function PetugasDashboard() {
                       <div className="text-right">
                         <span className="text-slate-400 block text-[10px]">Tgl Kunjungan:</span>
                         <span className="font-semibold text-slate-700 block">
-                          {formatDateShort(lastVisitInfo.rawDate)}
+                          {lastVisitInfo.rawDate ? formatDateShort(lastVisitInfo.rawDate) : 'Belum Ada'}
                         </span>
-                        <span className="text-[10px] text-slate-400 block">
-                          {lastVisitInfo.waktu}
-                        </span>
+                        {lastVisitInfo.rawDate && (
+                          <span className="text-[10px] text-slate-400 block">
+                            {lastVisitInfo.waktu}
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -1106,7 +1052,6 @@ export default function PetugasDashboard() {
                 </tr>
               ) : (
                 tableData.map((v, idx) => {
-                  const initials = getInitials(v.nama);
                   const nomorUrut = String(idx + 1).padStart(2, '0');
                   const lastVisitInfo = getVictimLastVisitInfo(v);
                   const isFinished = isVictimFinished(v);
@@ -1169,7 +1114,7 @@ export default function PetugasDashboard() {
                       {/* TL Terakhir (Tanggal & Keterangan Kunjungan) */}
                       <td className="py-3.5 px-3.5 text-slate-800 whitespace-nowrap text-xs">
                         <span className="text-slate-800 font-medium block">
-                          {formatDateIndo(lastVisitInfo.rawDate)}
+                          {lastVisitInfo.rawDate ? formatDateIndo(lastVisitInfo.rawDate) : 'Belum Ada'}
                         </span>
                       </td>
 

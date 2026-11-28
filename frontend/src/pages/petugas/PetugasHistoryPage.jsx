@@ -13,7 +13,6 @@ import {
   Activity,
   Eye,
   RotateCcw,
-  Clock,
   User,
   ChevronLeft,
   ChevronRight,
@@ -57,114 +56,51 @@ export default function PetugasHistoryPage() {
     const list = [];
     const seen = new Set();
 
+    const pushActivity = (v, item, rawDate, fallbackKey, defaultJenis) => {
+      if (!item || item.statusKunjungan === 'Menunggu' || !rawDate) return;
+      const uniqueKey = item.id || fallbackKey;
+      if (seen.has(uniqueKey)) return;
+      seen.add(uniqueKey);
+      list.push({
+        ...item,
+        id: uniqueKey,
+        rawDate: new Date(rawDate),
+        jenisAktivitas: defaultJenis,
+        victimId: v.id,
+        korbanNama: v.nama,
+        nik: v.nik,
+        nomorLaporan: v.nomorLaporan,
+        rumahSakit: item.rumahSakit || v.rumahSakit,
+        kondisiKorban: item.kondisiKorban || item.kondisi || v.kondisiTerakhir
+      });
+    };
+
     victims.forEach((v) => {
-      // 1. Kunjungan Pertama
-      if (v.kunjunganPertama && v.kunjunganPertama.statusKunjungan !== 'Menunggu') {
-        const rawDate =
-          v.kunjunganPertama.waktuAktualKunjungan ||
-          v.kunjunganPertama.tanggalKunjungan ||
-          v.kunjunganPertama.waktuFoto ||
-          v.tanggalKunjunganTerakhir ||
-          v.kunjunganPertama.tanggal;
-        if (rawDate) {
-          const uniqueKey = v.kunjunganPertama.id || `${v.id}-kp-${rawDate}`;
-          if (!seen.has(uniqueKey)) {
-            seen.add(uniqueKey);
-            list.push({
-              ...v.kunjunganPertama,
-              id: uniqueKey,
-              rawDate: new Date(rawDate),
-              jenisAktivitas: 'Kunjungan Pertama',
-              victimId: v.id,
-              korbanNama: v.nama,
-              nik: v.nik,
-              nomorLaporan: v.nomorLaporan,
-              rumahSakit: v.kunjunganPertama.rumahSakit || v.rumahSakit,
-              kondisiKorban: v.kunjunganPertama.kondisiKorban || v.kunjunganPertama.kondisi || v.kondisiTerakhir
-            });
-          }
-        }
+      if (v.kunjunganPertama) {
+        const kp = v.kunjunganPertama;
+        const kpDate = kp.waktuAktualKunjungan || kp.tanggalKunjungan || kp.waktuFoto || v.tanggalKunjunganTerakhir || kp.tanggal;
+        pushActivity(v, kp, kpDate, `${v.id}-kp-${kpDate}`, 'Kunjungan Pertama');
       }
 
-      // 2. Riwayat Aktivitas
       if (Array.isArray(v.riwayatAktivitas)) {
-        v.riwayatAktivitas
-          .filter((act) => act.statusKunjungan !== 'Menunggu')
-          .forEach((act) => {
-            const rawDate = act.waktuAktualKunjungan || act.tanggalKunjungan || act.tanggal || act.waktuFoto;
-            if (rawDate) {
-              const uniqueKey = act.id || `${v.id}-${rawDate}`;
-              if (!seen.has(uniqueKey)) {
-                seen.add(uniqueKey);
-                list.push({
-                  ...act,
-                  id: uniqueKey,
-                  rawDate: new Date(rawDate),
-                  jenisAktivitas: act.jenisAktivitas || 'Kunjungan Pemantauan',
-                  victimId: v.id,
-                  korbanNama: v.nama,
-                  nik: v.nik,
-                  nomorLaporan: v.nomorLaporan,
-                  rumahSakit: act.rumahSakit || v.rumahSakit,
-                  kondisiKorban: act.kondisiKorban || act.kondisi || v.kondisiTerakhir
-                });
-              }
-            }
-          });
+        v.riwayatAktivitas.forEach((act) => {
+          const d = act?.waktuAktualKunjungan || act?.tanggalKunjungan || act?.tanggal || act?.waktuFoto;
+          pushActivity(v, act, d, `${v.id}-${d}`, act?.jenisAktivitas || 'Kunjungan Pemantauan');
+        });
       }
 
-      // 3. Riwayat Kunjungan
       if (Array.isArray(v.riwayatKunjungan)) {
-        v.riwayatKunjungan
-          .filter((vis) => vis.statusKunjungan !== 'Menunggu')
-          .forEach((vis, idx) => {
-            const rawDate = vis.waktuAktualKunjungan || vis.tanggalKunjungan || vis.tanggal;
-            if (rawDate) {
-              const uniqueKey = vis.id || `${v.id}-vis-${rawDate}`;
-              if (!seen.has(uniqueKey)) {
-                seen.add(uniqueKey);
-                list.push({
-                  ...vis,
-                  id: uniqueKey,
-                  rawDate: new Date(rawDate),
-                  jenisAktivitas: vis.jenisAktivitas || (idx === 0 ? 'Kunjungan Pertama' : 'Kunjungan Pemantauan'),
-                  victimId: v.id,
-                  korbanNama: v.nama,
-                  nik: v.nik,
-                  nomorLaporan: v.nomorLaporan,
-                  rumahSakit: vis.rumahSakit || v.rumahSakit,
-                  kondisiKorban: vis.kondisiKorban || vis.kondisi || v.kondisiTerakhir
-                });
-              }
-            }
-          });
+        v.riwayatKunjungan.forEach((vis, idx) => {
+          const d = vis?.waktuAktualKunjungan || vis?.tanggalKunjungan || vis?.tanggal;
+          pushActivity(v, vis, d, `${v.id}-vis-${d}`, vis?.jenisAktivitas || (idx === 0 ? 'Kunjungan Pertama' : 'Kunjungan Pemantauan'));
+        });
       }
 
-      // 4. Riwayat Pemantauan
       if (Array.isArray(v.riwayatPemantauan)) {
-        v.riwayatPemantauan
-          .filter((mon) => mon.statusKunjungan !== 'Menunggu')
-          .forEach((mon, idx) => {
-            const rawDate = mon.waktuAktualKunjungan || mon.tanggal;
-            if (rawDate) {
-              const uniqueKey = mon.id || `${v.id}-mon-${rawDate}`;
-              if (!seen.has(uniqueKey)) {
-                seen.add(uniqueKey);
-                list.push({
-                  ...mon,
-                  id: uniqueKey,
-                  rawDate: new Date(rawDate),
-                  jenisAktivitas: mon.jenisAktivitas || 'Pemantauan Berkala',
-                  victimId: v.id,
-                  korbanNama: v.nama,
-                  nik: v.nik,
-                  nomorLaporan: v.nomorLaporan,
-                  rumahSakit: mon.rumahSakit || v.rumahSakit,
-                  kondisiKorban: mon.kondisiKorban || mon.kondisi || v.kondisiTerakhir
-                });
-              }
-            }
-          });
+        v.riwayatPemantauan.forEach((mon) => {
+          const d = mon?.waktuAktualKunjungan || mon?.tanggal;
+          pushActivity(v, mon, d, `${v.id}-mon-${d}`, mon?.jenisAktivitas || 'Pemantauan Berkala');
+        });
       }
     });
 
@@ -262,16 +198,6 @@ export default function PetugasHistoryPage() {
         <span>{kondisi || 'Masih Dirawat'}</span>
       </span>
     );
-  };
-
-  const getInitials = (name) => {
-    if (!name) return 'KR';
-    return name
-      .split(' ')
-      .map((n) => n[0])
-      .slice(0, 2)
-      .join('')
-      .toUpperCase();
   };
 
   return (
@@ -440,7 +366,6 @@ export default function PetugasHistoryPage() {
               ) : (
                 paginated.map((act, idx) => {
                   const number = String((currentPage - 1) * PAGE_SIZE + idx + 1).padStart(2, '0');
-                  const initials = getInitials(act.korbanNama);
                   const isFirstVisit = act.jenisAktivitas === 'Kunjungan Pertama';
 
                   return (
@@ -545,7 +470,6 @@ export default function PetugasHistoryPage() {
           ) : (
             paginated.map((act, idx) => {
               const number = String((currentPage - 1) * PAGE_SIZE + idx + 1).padStart(2, '0');
-              const initials = getInitials(act.korbanNama);
               const isFirstVisit = act.jenisAktivitas === 'Kunjungan Pertama';
 
               return (

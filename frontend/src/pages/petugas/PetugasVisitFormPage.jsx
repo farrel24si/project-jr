@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { storageService } from '../../services/storageService';
 import { cachePhoto } from '../../services/photoService';
@@ -15,14 +15,15 @@ import {
   AlertCircle,
   AlertTriangle,
   Save,
-  Activity,
-  FileText,
-  Camera,
-  MapPin,
   ShieldCheck,
   AlertOctagon,
   Lock
 } from 'lucide-react';
+
+const DEFAULT_PENYAMPAIAN_HAK =
+  'Telah disampaikan informasi hak santunan biaya perawatan RS maksimal Rp20.000.000,- (atau santunan Rp50.000.000,- bagi ahli waris jika korban meninggal dunia).';
+const DEFAULT_ARAHAN_LP =
+  'Koordinasi dengan pihak keluarga perihal pengesahan Laporan Polisi (LP) Laka Lantas dari unit laka setempat.';
 
 export default function PetugasVisitFormPage() {
   const { id } = useParams();
@@ -30,7 +31,7 @@ export default function PetugasVisitFormPage() {
   const { currentUser } = useAuth();
 
   const [victim, setVictim] = useState(null);
-  const [waktuKunjungan, setWaktuKunjungan] = useState(() => {
+  const [waktuKunjungan] = useState(() => {
     const now = new Date();
     const tzOffset = now.getTimezoneOffset() * 60000;
     return new Date(now.getTime() - tzOffset).toISOString().slice(0, 16);
@@ -44,12 +45,6 @@ export default function PetugasVisitFormPage() {
   const [cekArahanLp, setCekArahanLp] = useState(true);
   const [perkembanganKondisi, setPerkembanganKondisi] = useState('');
   const [komunikasiKeluarga, setKomunikasiKeluarga] = useState('');
-  const [penyampaianHak, setPenyampaianHak] = useState(
-    'Telah disampaikan informasi hak santunan biaya perawatan RS maksimal Rp20.000.000,- (atau santunan Rp50.000.000,- bagi ahli waris jika korban meninggal dunia).'
-  );
-  const [arahanLp, setArahanLp] = useState(
-    'Koordinasi dengan pihak keluarga perihal pengesahan Laporan Polisi (LP) Laka Lantas dari unit laka setempat.'
-  );
   const [catatanTindakLanjut, setCatatanTindakLanjut] = useState('');
 
   const [photoData, setPhotoData] = useState(null);
@@ -202,8 +197,8 @@ export default function PetugasVisitFormPage() {
         catatan_kondisi: perkembanganKondisi,
         hasilKunjungan: perkembanganKondisi,
         komunikasiKeluarga,
-        penyampaianHak,
-        arahanLp,
+        penyampaianHak: DEFAULT_PENYAMPAIAN_HAK,
+        arahanLp: DEFAULT_ARAHAN_LP,
         tindakLanjut: catatanTindakLanjut || `Kunjungan selesai: kondisi ${kondisiKorban}`,
         fotoUrl: photoData,
         latitude: Number(gpsData.latitude ?? gpsData.lat_petugas),
@@ -218,16 +213,14 @@ export default function PetugasVisitFormPage() {
         waktuFoto: gpsData.waktu || new Date().toISOString()
       };
 
-      if (photoData) {
-        cachePhoto(victim.id, photoData);
-        if (victim.caseId) {
-          cachePhoto(victim.caseId, photoData);
-          cachePhoto(`case_${victim.caseId}`, photoData);
-        }
-        if (victim.activeVisitId) {
-          cachePhoto(victim.activeVisitId, photoData);
-          cachePhoto(`VISIT-${victim.activeVisitId}`, photoData);
-        }
+      cachePhoto(victim.id, photoData);
+      if (victim.caseId) {
+        cachePhoto(victim.caseId, photoData);
+        cachePhoto(`case_${victim.caseId}`, photoData);
+      }
+      if (victim.activeVisitId) {
+        cachePhoto(victim.activeVisitId, photoData);
+        cachePhoto(`VISIT-${victim.activeVisitId}`, photoData);
       }
 
       const updated = await storageService.addVisit(victim.id, visitPayload);

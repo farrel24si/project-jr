@@ -11,7 +11,7 @@
  *    - TEPAT_WAKTU: Masih memiliki sisa waktu > 24 jam.
  */
 
-import { isVictimFinished } from '../utils/monitoringStatus';
+import { isVictimFinished, isActualPhysicalVisit, hasPhysicalVisit } from '../utils/monitoringStatus';
 
 export const SLA_FIRST_VISIT_HOURS = 72; // 3 hari
 export const SLA_MONITORING_INTERVAL_HOURS = 72; // 3 hari
@@ -213,32 +213,27 @@ export function calculateMonitoringSla(victim, referenceDate = new Date()) {
     };
   }
 
-  // Jika korban sudah meninggal dunia atau pulang dan tidak perlu pantau
-  if (
-    victim.kondisiTerakhir === 'Meninggal Dunia' ||
-    victim.kondisiTerakhir === 'Pulang' ||
-    victim.kondisiTerakhir === 'Sudah Pulang' ||
-    victim.kondisiTerakhir === 'Selesai'
-  ) {
+  // Jika korban sudah selesai pemantauannya (Selesai Pulang / Selesai MD / Selesai Tidak Bersedia)
+  if (isVictimFinished(victim)) {
     return {
       status: 'SELESAI',
       label: 'Pemantauan Ditutup',
       colorClass: 'bg-slate-100 text-slate-700 border-slate-300',
       badgeColor: 'slate',
-      description: `Kondisi akhir: ${victim.kondisiTerakhir}`,
+      description: `Kondisi akhir: ${victim.kondisiTerakhir || 'Selesai'}`,
       isOverdue: false,
       isCompleted: true,
       needed: false
     };
   }
 
-  // Cari tanggal aktivitas terakhir yang SUDAH SELESAI dari riwayat
+  // Cari tanggal aktivitas terakhir yang SUDAH SELESAI dari riwayat kunjungan fisik aktual
   const completedActivityDates = [
     ...(victim.riwayatAktivitas || []),
     ...(victim.riwayatKunjungan || []),
     ...(victim.riwayatPemantauan || [])
   ]
-    .filter((a) => a && a.statusKunjungan !== 'Menunggu')
+    .filter((a) => isActualPhysicalVisit(a))
     .map((a) => a.tanggal || a.tanggalKunjungan || a.waktuAktualKunjungan || a.waktuFoto)
     .filter(Boolean);
 
@@ -525,11 +520,7 @@ export function getVictimSlaUrgencyTier(victim, referenceDate = new Date()) {
     return { tier: 5, remainingHours: Infinity, status: 'SELESAI', deadline: null, time: closedTime };
   }
 
-  const hasFirstVisit = Boolean(
-    victim.kunjunganPertama ||
-    (Array.isArray(victim.riwayatKunjungan) && victim.riwayatKunjungan.length > 0) ||
-    (Array.isArray(victim.riwayatAktivitas) && victim.riwayatAktivitas.some((a) => a.kunjunganKe === 1 || (a.statusKunjungan && a.statusKunjungan !== 'Menunggu')))
-  );
+  const hasFirstVisit = hasPhysicalVisit(victim);
 
   const fSla = calculateFirstVisitSla(victim.tanggalInformasiDiterima, victim.kunjunganPertama, referenceDate);
   const mSla = calculateMonitoringSla(victim, referenceDate);
@@ -725,8 +716,14 @@ export function evaluateOfficerKpi(victims = [], referenceDate = new Date(), tar
   let kunjunganLengkap = 0;
 
   victims.forEach((v) => {
+    if (!v) return;
+    if (v.statusPemantauan === 'Diarsipkan' || v.status_pemantauan === 'Diarsipkan') {
+      return;
+    }
+
     let patientHasLate = false;
     const isDischarged = Boolean(
+      isVictimFinished(v) ||
       v.kondisiTerakhir === 'Sudah Pulang' ||
       v.kondisiTerakhir === 'Pulang' ||
       v.kondisiTerakhir === 'Selesai' ||
@@ -735,9 +732,11 @@ export function evaluateOfficerKpi(victims = [], referenceDate = new Date(), tar
       v.kondisiTerakhir === 'Meninggal Dunia'
     );
 
+    const hasFirstDone = Boolean(v.kunjunganPertama && isActualPhysicalVisit(v.kunjunganPertama));
+
     // 1. Kunjungan Pertama (Awal Pemantauan)
-    const fSla = calculateFirstVisitSla(v.tanggalInformasiDiterima, v.kunjunganPertama, referenceDate);
-    if (v.kunjunganPertama && v.kunjunganPertama.statusKunjungan !== 'Menunggu') {
+    const fSla = calculateFirstVisitSla(v.tanggalInformasiDiterima, hasFirstDone ? v.kunjunganPertama : null, referenceDate);
+    if (hasFirstDone) {
       if (isVisitByOfficer(v.kunjunganPertama, v.rumahSakitAsal || v.rumahSakit)) {
         const kId = v.kunjunganPertama.id || `INIT-${v.id}`;
         if (!seenVisits.has(kId)) {
@@ -763,7 +762,7 @@ export function evaluateOfficerKpi(victims = [], referenceDate = new Date(), tar
     // 2. Kunjungan Lanjutan Berkala (Aturan Maksimal 3 Hari / 72 Jam)
     const acts = v.riwayatAktivitas || v.riwayatKunjungan || [];
     const sortedActs = [...acts]
-      .filter((a) => a && a.statusKunjungan !== 'Menunggu' && a.id !== v.kunjunganPertama?.id)
+      .filter((a) => isActualPhysicalVisit(a) && a.id !== v.kunjunganPertama?.id)
       .sort((a, b) => new Date(a.tanggal || a.tanggalKunjungan).getTime() - new Date(b.tanggal || b.tanggalKunjungan).getTime());
 
     let prevVisitTime = v.kunjunganPertama?.tanggalKunjungan
@@ -809,11 +808,25 @@ export function evaluateOfficerKpi(victims = [], referenceDate = new Date(), tar
       }
     });
 
-    // 3. Evaluasi pemantauan berjalan: jika pasien belum pulang dan pemantauan aktif sudah lewat 3 hari
-    if (!isDischarged && v.kunjunganPertama) {
-      const mSla = calculateMonitoringSla(v, referenceDate);
-      if (mSla.isOverdue && mSla.status === 'TERLAMBAT') {
+    // 3. Evaluasi tugas aktif yang sedang terlambat (belum dikunjungi awal / pemantauan lanjutan lewat 72 jam)
+    if (!isDischarged) {
+      const mSla = hasFirstDone ? calculateMonitoringSla(v, referenceDate) : null;
+      const isPendingOverdue =
+        (!hasFirstDone && fSla.isOverdue) ||
+        (hasFirstDone && mSla?.isOverdue) ||
+        Boolean(v.isOverdue) ||
+        Boolean(v.activePendingVisit?.isOverdue3Days);
+
+      if (isPendingOverdue) {
         patientHasLate = true;
+        const isCurrentHolder = !targetOfficer || isVisitByOfficer({
+          petugasId: v.petugasId || v.backendOfficerId,
+          petugasNama: v.namaPetugas,
+          rumahSakit: v.rumahSakit
+        }, v.rumahSakit);
+        if (isCurrentHolder) {
+          kunjunganTerlambat++;
+        }
       }
     }
 
@@ -822,16 +835,18 @@ export function evaluateOfficerKpi(victims = [], referenceDate = new Date(), tar
     }
   });
 
-  const isZeroCase = totalKunjungan === 0;
-  // Jika tidak ada korban/kunjungan pada periode ini, nilai kepatuhan & skor akhir berstatus N/A (bukan 100%)
-  const slaKunjungan = isZeroCase ? null : calculateSlaByTotalVisits(kunjunganTepat, totalKunjungan);
-  const slaPasien = isZeroCase ? null : calculateSlaByTotalPatients(pasienTanpaKeterlambatan, totalPasien);
-  const kelengkapanLaporan = isZeroCase ? null : Math.round((kunjunganLengkap / totalKunjungan) * 100);
+  const totalEvaluated = kunjunganTepat + kunjunganTerlambat;
+  const isZeroCase = totalEvaluated === 0;
+  // Jika belum ada kunjungan maupun keterlambatan SLA pada periode ini, nilai berstatus N/A (bukan 100%)
+  const slaKunjungan = isZeroCase ? null : calculateSlaByTotalVisits(kunjunganTepat, totalEvaluated);
+  const slaPasien = totalPasien === 0 ? null : calculateSlaByTotalPatients(pasienTanpaKeterlambatan, totalPasien);
+  const kelengkapanLaporan = totalKunjungan === 0 ? null : Math.round((kunjunganLengkap / totalKunjungan) * 100);
   const skorAkhir = isZeroCase ? null : calculateOfficerFinalScore(slaKunjungan, targetSla, bobotPoin, true);
 
   return {
     isZeroCase,
     totalKunjungan,
+    totalEvaluated,
     kunjunganTepat,
     kunjunganTerlambat,
     kunjunganLengkap,
@@ -840,13 +855,13 @@ export function evaluateOfficerKpi(victims = [], referenceDate = new Date(), tar
     bebanKerjaKorban: totalPasien, // Beban kerja (bukan target atau kuota)
     pasienTanpaKeterlambatan,
     pasienDenganKeterlambatan: totalPasien - pasienTanpaKeterlambatan,
-    slaKunjungan, // Rumus 1 (Total Kunjungan %) -> null jika 0 kunjungan (N/A)
+    slaKunjungan, // Rumus 1 (Total Kunjungan %) -> null jika 0 evaluasi (N/A)
     slaPasien,    // Rumus 2 (Total Pasien %) -> null jika 0 pasien (N/A)
-    skorAkhir,    // Skor Akhir Rapor (Poin) -> null jika 0 kunjungan (N/A)
+    skorAkhir,    // Skor Akhir Rapor (Poin) -> null jika 0 evaluasi (N/A)
     statusEvaluasi: isZeroCase ? 'N/A' : 'TEREVALUASI',
     keteranganEvaluasi: isZeroCase
-      ? 'Tidak ada korban yang dirawat (N/A)'
-      : `${kunjunganTepat} dari ${totalKunjungan} kunjungan tepat waktu (Beban: ${totalPasien} korban)`,
+      ? 'Belum ada kunjungan atau keterlambatan SLA (N/A)'
+      : `${kunjunganTepat} tepat waktu dari ${totalEvaluated} evaluasi SLA (Beban: ${totalPasien} korban)`,
     targetSla,
     bobotPoin
   };

@@ -36,8 +36,9 @@ function getDb() {
               const records = getAllReq.result || [];
               records.forEach((rec) => {
                 if (rec && rec.key && rec.data) {
-                  // Cegah memuat key berupa angka murni (seperti '1') yang dapat menyebabkan tabrakan foto antar korban berbeda
-                  if (!/^\d+$/.test(String(rec.key).trim())) {
+                  const keyStr = String(rec.key).trim();
+                  const isDeadBlob = typeof rec.data === 'string' && rec.data.startsWith('blob:');
+                  if (!/^\d+$/.test(keyStr) && !isDeadBlob) {
                     memoryPhotoCache.set(rec.key, rec.data);
                   }
                 }
@@ -90,6 +91,7 @@ if (typeof window !== 'undefined') {
               const kStr = String(row.key);
               if (
                 /^\d+$/.test(kStr) ||
+                (typeof row.data === 'string' && row.data.startsWith('blob:')) ||
                 ((kStr.includes('VISIT') || kStr.includes('uploads') || kStr.includes('visit_')) &&
                   typeof row.data === 'string' &&
                   row.data.startsWith('data:'))
@@ -137,20 +139,24 @@ export function cachePhoto(key, dataUrlOrBlob) {
     memoryPhotoCache.set(normalizedKey, dataUrlOrBlob);
   }
 
-  // Simpan ke IndexedDB untuk persistensi permanen
-  getDb()
-    .then((db) => {
-      if (!db) return;
-      try {
-        const tx = db.transaction(STORE_NAME, 'readwrite');
-        const store = tx.objectStore(STORE_NAME);
-        store.put({ key: rawKey, data: dataUrlOrBlob, updatedAt: Date.now() });
-        if (normalizedKey && normalizedKey !== rawKey) {
-          store.put({ key: normalizedKey, data: dataUrlOrBlob, updatedAt: Date.now() });
-        }
-      } catch (_) {}
-    })
-    .catch(() => {});
+  const isBlobUrl = typeof dataUrlOrBlob === 'string' && dataUrlOrBlob.startsWith('blob:');
+
+  // Simpan ke IndexedDB untuk persistensi permanen (hanya data: URL, JANGAN simpan blob: yang mati setelah refresh)
+  if (!isBlobUrl) {
+    getDb()
+      .then((db) => {
+        if (!db) return;
+        try {
+          const tx = db.transaction(STORE_NAME, 'readwrite');
+          const store = tx.objectStore(STORE_NAME);
+          store.put({ key: rawKey, data: dataUrlOrBlob, updatedAt: Date.now() });
+          if (normalizedKey && normalizedKey !== rawKey) {
+            store.put({ key: normalizedKey, data: dataUrlOrBlob, updatedAt: Date.now() });
+          }
+        } catch (_) {}
+      })
+      .catch(() => {});
+  }
 
   // Simpan ke sessionStorage & localStorage jika memungkinkan
   if (typeof dataUrlOrBlob === 'string' && dataUrlOrBlob.startsWith('data:')) {
@@ -274,44 +280,60 @@ export async function loadAuthenticatedPhoto(src) {
   const filename = normalizePhotoKey(src);
   if (!filename) return src;
 
-  // Pastikan target URL mengarah ke endpoint /uploads/:filename di origin saat ini
+  // Pastikan target URL mengarah ke endpoint /uploads/:filename
   const targetPath = `/uploads/${filename}`;
-
-  try {
-    const token = getAuthToken();
-    const headers = {};
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
+  const apiBase = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_URL) || '';
+  const candidateUrls = [targetPath];
+  if (apiBase) {
+    candidateUrls.push(`${apiBase}${targetPath}`);
+  } else if (typeof window !== 'undefined' && window.location?.hostname) {
+    const directBackendUrl = `http://${window.location.hostname}:5000${targetPath}`;
+    if (!candidateUrls.includes(directBackendUrl)) {
+      candidateUrls.push(directBackendUrl);
     }
-
-    const fetchUrl = token ? `${targetPath}?token=${encodeURIComponent(token)}` : targetPath;
-
-    const res = await fetch(fetchUrl, {
-      method: 'GET',
-      headers
-    });
-
-    if (!res.ok) {
-      console.warn(`[photoService] Gagal memuat foto ${src}: HTTP ${res.status}`);
-      // Jika fetch gagal (misal 403 atau 404), prioritaskan foto asli yang ada di cache/IndexedDB
-      return getCachedPhoto(src) || getCachedPhoto(filename) || null;
-    }
-
-    const blob = await res.blob();
-    if (!blob || blob.size === 0) {
-      return getCachedPhoto(src) || getCachedPhoto(filename) || null;
-    }
-
-    const objectUrl = URL.createObjectURL(blob);
-    cachePhoto(src, objectUrl);
-    cachePhoto(targetPath, objectUrl);
-    if (filename) cachePhoto(filename, objectUrl);
-
-    return objectUrl;
-  } catch (err) {
-    console.warn(`[photoService] Error fetching authenticated photo ${src}:`, err.message);
-    return getCachedPhoto(src) || getCachedPhoto(filename) || null;
   }
+
+  const token = getAuthToken();
+  const headers = {};
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+
+  for (const baseUrl of candidateUrls) {
+    try {
+      const res = await fetch(baseUrl, {
+        method: 'GET',
+        headers
+      });
+
+      if (!res.ok) {
+        console.warn(`[photoService] Gagal memuat foto ${baseUrl}: HTTP ${res.status}`);
+        continue;
+      }
+
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType && !contentType.startsWith('image/')) {
+        console.warn(`[photoService] Respons bukan gambar untuk ${baseUrl}: ${contentType}`);
+        continue;
+      }
+
+      const blob = await res.blob();
+      if (!blob || blob.size === 0) {
+        continue;
+      }
+
+      const objectUrl = URL.createObjectURL(blob);
+      cachePhoto(src, objectUrl);
+      cachePhoto(targetPath, objectUrl);
+      if (filename) cachePhoto(filename, objectUrl);
+
+      return objectUrl;
+    } catch (err) {
+      console.warn(`[photoService] Error fetching authenticated photo ${baseUrl}:`, err.message);
+    }
+  }
+
+  return getCachedPhoto(src) || getCachedPhoto(filename) || null;
 }
 
 export default {

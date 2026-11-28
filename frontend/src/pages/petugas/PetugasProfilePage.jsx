@@ -4,7 +4,6 @@ import { useAuth } from '../../context/AuthContext';
 import { storageService } from '../../services/storageService';
 import ModalConfirmChangePhone from '../../components/common/ModalConfirmChangePhone';
 import {
-  User,
   ShieldCheck,
   Key,
   CheckCircle2,
@@ -49,7 +48,6 @@ export default function PetugasProfilePage() {
   const officerPlottingRs = (Array.isArray(officerData.plottingRs) && officerData.plottingRs.length > 0)
     ? officerData.plottingRs
     : (Array.isArray(profile.plottingRs) ? profile.plottingRs : []);
-  const username = profile.username || (officerEmail.includes('@') ? officerEmail.split('@')[0] : 'petugas');
 
   // State untuk Nomor HP & Modal Konfirmasi
   const [isEditingPhone, setIsEditingPhone] = useState(false);
@@ -163,18 +161,11 @@ export default function PetugasProfilePage() {
       {/* ── BREADCRUMB & HEADER ── */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
-          <div className="flex items-center gap-2 text-xs text-slate-500 mb-1">
-            <Link to="/petugas" className="hover:text-[#0A3981] transition-colors">
-              Petugas Lapangan
-            </Link>
-            <span>/</span>
-            <span className="text-slate-800 font-semibold">Profil Saya</span>
-          </div>
           <h1 className="text-2xl font-black text-slate-900 tracking-tight">
-            Profil &amp; Akun Saya
+            Akun Saya
           </h1>
           <p className="text-xs text-slate-500 mt-0.5">
-            Informasi personil kedinasan dan pengaturan keamanan akses akun
+            Informasi personil dan pengaturan keamanan akun
           </p>
         </div>
 
@@ -182,34 +173,30 @@ export default function PetugasProfilePage() {
           to="/petugas"
           className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 transition-colors shadow-2xs self-start sm:self-auto"
         >
-          <ArrowLeft className="w-3.5 h-3.5" />
           <span>Kembali ke Dashboard</span>
         </Link>
       </div>
 
-      {/* ── KARTU IDENTITAS PROFIL (SIMPEL & ELEGAN, TANPA FOTO/AVATAR) ── */}
+      {/* ── KARTU IDENTITAS PROFIL (BERSIH TANPA IKON/INISIAL) ── */}
       <div className="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 shadow-xs">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="space-y-1">
-            <div className="flex flex-wrap items-center gap-2.5">
-              <h2 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
-                {officerName}
-              </h2>
-              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                <span>Petugas Aktif Lapangan</span>
-              </span>
-            </div>
+        <div className="space-y-1.5">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <h2 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
+              {officerName}
+            </h2>
+            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+              Petugas Aktif Lapangan
+            </span>
+          </div>
 
-            <div className="text-xs text-slate-500 flex flex-wrap items-center gap-2 pt-0.5">
-              <span className="font-mono font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
-                NIP. {officerNip}
-              </span>
-              <span className="text-slate-300">•</span>
-              <span className="font-semibold text-slate-700">{officerJabatan}</span>
-              <span className="text-slate-300">•</span>
-              <span className="font-medium text-slate-600">{officerWilayah}</span>
-            </div>
+          <div className="text-xs text-slate-500 flex flex-wrap items-center gap-2 pt-0.5">
+            <span className="font-mono font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
+              NIP. {officerNip}
+            </span>
+            <span className="text-slate-300">•</span>
+            <span className="font-semibold text-slate-700">{officerJabatan}</span>
+            <span className="text-slate-300">•</span>
+            <span className="font-medium text-slate-600">{officerWilayah}</span>
           </div>
         </div>
       </div>
@@ -221,43 +208,19 @@ export default function PetugasProfilePage() {
         <div className="lg:col-span-2 space-y-6">
           <div className="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 shadow-xs space-y-5">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <div className="flex items-center gap-2.5">
-                <ShieldCheck className="w-5 h-5 text-[#0A3981]" />
-                <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wider">
-                  Informasi Personil &amp; Akses Sistem
-                </h3>
-              </div>
+              <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wider">
+                Informasi Personil
+              </h3>
               <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
-                Terverifikasi Kedinasan
+                Terverifikasi
               </span>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-              {/* Username Akses */}
-              <div>
-                <label className="block text-slate-400 font-semibold mb-1 text-[11px] uppercase tracking-wider">
-                  Username Sistem
-                </label>
-                <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 font-mono font-bold text-slate-800">
-                  {username}
-                </div>
-              </div>
-
-              {/* Peran Akun */}
-              <div>
-                <label className="block text-slate-400 font-semibold mb-1 text-[11px] uppercase tracking-wider">
-                  Peran Sistem
-                </label>
-                <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 font-bold text-[#0A3981] flex items-center gap-1.5">
-                  <User className="w-3.5 h-3.5 text-[#0A3981]" />
-                  <span>Petugas Lapangan</span>
-                </div>
-              </div>
-
               {/* Nama Lengkap */}
               <div>
                 <label className="block text-slate-400 font-semibold mb-1 text-[11px] uppercase tracking-wider">
-                  Nama Lengkap Pegawai
+                  Nama
                 </label>
                 <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 font-bold text-slate-900">
                   {officerName}
@@ -267,7 +230,7 @@ export default function PetugasProfilePage() {
               {/* NIP */}
               <div>
                 <label className="block text-slate-400 font-semibold mb-1 text-[11px] uppercase tracking-wider">
-                  NIP / NRP Pegawai
+                  NIP
                 </label>
                 <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 font-mono font-bold text-slate-800">
                   {officerNip}
@@ -277,7 +240,7 @@ export default function PetugasProfilePage() {
               {/* Jabatan */}
               <div>
                 <label className="block text-slate-400 font-semibold mb-1 text-[11px] uppercase tracking-wider">
-                  Jabatan Kedinasan
+                  Jabatan
                 </label>
                 <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 font-semibold text-slate-800">
                   {officerJabatan}
@@ -287,40 +250,36 @@ export default function PetugasProfilePage() {
               {/* Wilayah Kerja */}
               <div>
                 <label className="block text-slate-400 font-semibold mb-1 text-[11px] uppercase tracking-wider">
-                  Wilayah Kerja Operasional
+                  Wilayah Kerja
                 </label>
-                <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 font-semibold text-slate-800 flex items-center gap-1.5">
-                  <MapPin className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                  <span>{officerWilayah}</span>
+                <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 font-semibold text-slate-800">
+                  {officerWilayah}
                 </div>
               </div>
 
-              {/* Email Kedinasan */}
-              <div className="sm:col-span-2">
-                <label className="block text-slate-400 font-semibold mb-1 text-[11px] uppercase tracking-wider flex items-center gap-1.5">
-                  <Mail className="w-3 h-3 text-slate-400" />
-                  <span>Email Kedinasan</span>
+              {/* Email */}
+              <div>
+                <label className="block text-slate-400 font-semibold mb-1 text-[11px] uppercase tracking-wider">
+                  Email
                 </label>
-                <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 font-medium text-slate-800">
+                <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 font-medium text-slate-800 truncate" title={officerEmail}>
                   {officerEmail}
                 </div>
               </div>
 
-              {/* Nomor HP / WhatsApp */}
-              <div className="sm:col-span-2 pt-1">
+              {/* Nomor HP / WhatsApp (Sejajar dengan Email) */}
+              <div>
                 <div className="flex items-center justify-between mb-1">
-                  <label className="block text-slate-500 font-bold flex items-center gap-1.5 text-xs">
-                    <Phone className="w-3.5 h-3.5 text-[#0A3981]" />
-                    <span>Nomor HP / WhatsApp Notifikasi</span>
+                  <label className="block text-slate-400 font-semibold text-[11px] uppercase tracking-wider">
+                    No. HP / WhatsApp
                   </label>
                   {!isEditingPhone && (
                     <button
                       type="button"
                       onClick={handleStartEditPhone}
-                      className="inline-flex items-center gap-1 text-[11px] font-bold text-[#0A3981] hover:text-blue-900 transition-colors cursor-pointer"
+                      className="text-[11px] font-bold text-[#0A3981] hover:text-blue-900 transition-colors cursor-pointer"
                     >
-                      <Edit2 className="w-3 h-3" />
-                      <span>Ubah Nomor</span>
+                      Ubah Nomor
                     </button>
                   )}
                 </div>
@@ -393,10 +352,9 @@ export default function PetugasProfilePage() {
                     officerPlottingRs.map((rs, idx) => (
                       <span
                         key={idx}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-blue-50 text-[#0A3981] border border-blue-200 shadow-2xs"
+                        className="inline-flex items-center px-3 py-1.5 rounded-lg text-xs font-bold bg-blue-50 text-[#0A3981] border border-blue-200 shadow-2xs"
                       >
-                        <Building2 className="w-3.5 h-3.5 text-blue-500" />
-                        <span>{rs}</span>
+                        {rs}
                       </span>
                     ))
                   ) : (
@@ -414,12 +372,9 @@ export default function PetugasProfilePage() {
         <div className="space-y-6">
           <div className="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 shadow-xs space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <div className="flex items-center gap-2.5">
-                <Key className="w-5 h-5 text-amber-600" />
-                <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wider">
-                  Keamanan Kata Sandi
-                </h3>
-              </div>
+              <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wider">
+                Keamanan Kata Sandi
+              </h3>
             </div>
 
             <p className="text-xs text-slate-500 leading-relaxed">
@@ -478,11 +433,10 @@ export default function PetugasProfilePage() {
                     placeholder="Ulangi kata sandi baru..."
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
-                    className={`w-full px-3 py-2 pr-9 text-xs rounded-xl border focus:outline-none focus:ring-2 font-mono bg-white ${
-                      confirmPassword && confirmPassword !== newPassword
-                        ? 'border-rose-300 focus:ring-rose-400 text-rose-800'
-                        : 'border-slate-300 focus:ring-blue-500'
-                    }`}
+                    className={`w-full px-3 py-2 pr-9 text-xs rounded-xl border focus:outline-none focus:ring-2 font-mono bg-white ${confirmPassword && confirmPassword !== newPassword
+                      ? 'border-rose-300 focus:ring-rose-400 text-rose-800'
+                      : 'border-slate-300 focus:ring-blue-500'
+                      }`}
                   />
                   <button
                     type="button"

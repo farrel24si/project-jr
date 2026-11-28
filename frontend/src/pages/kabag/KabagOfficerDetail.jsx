@@ -1,16 +1,14 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { useParams, Link, useNavigate } from 'react-router-dom';
-import { 
+import { useState, useEffect, useMemo } from 'react';
+import { useParams, Link } from 'react-router-dom';
+import {
   ArrowLeft,
   User,
-  MapPin, 
-  CheckCircle2, 
-  Clock, 
-  AlertTriangle, 
-  Calendar, 
-  Search, 
-  Eye, 
-  Building2, 
+  CheckCircle2,
+  Clock,
+  AlertTriangle,
+  Search,
+  Eye,
+  Building2,
   RotateCcw,
   Filter,
   Check,
@@ -18,48 +16,49 @@ import {
   TrendingUp,
   X,
   ExternalLink,
-  Camera,
   Navigation
 } from 'lucide-react';
-import { 
-  ResponsiveContainer, 
-  BarChart, 
-  Bar, 
-  XAxis, 
-  YAxis, 
-  Tooltip, 
-  Legend, 
-  CartesianGrid 
+import {
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  Legend,
+  CartesianGrid
 } from 'recharts';
 import { storageService } from '../../services/storageService';
-import { calculateFirstVisitSla, calculateMonitoringSla } from '../../services/slaService';
+import { calculateFirstVisitSla } from '../../services/slaService';
 import ConditionBadge from '../../components/common/ConditionBadge';
 import AuthenticatedImage from '../../components/common/AuthenticatedImage';
+import SortableHeader from '../../components/common/SortableHeader';
 import { getReferralPerspectiveInfo } from '../../utils/referralUtils';
 import { getRealVisitPhoto } from '../../utils/realPhotos';
-import { formatDateIndo, formatDateTimeIndo } from '../../utils/dateUtils';
-
-const formatIndoDate = (dateStr) => {
-  return formatDateIndo(dateStr);
-};
-
-const formatIndoDateTime = (dateStr) => {
-  return formatDateTimeIndo(dateStr);
-};
+import { formatDateIndo as formatIndoDate, formatDateTimeIndo as formatIndoDateTime, parseDateSafe } from '../../utils/dateUtils';
 
 export default function KabagOfficerDetail() {
   const { id } = useParams();
-  const navigate = useNavigate();
 
   const [victims, setVictims] = useState([]);
   const [officers, setOfficers] = useState([]);
 
   // ── FILTER STATE ──
   const [periodFilter, setPeriodFilter] = useState('ALL'); // ALL, THIS_YEAR, THIS_MONTH, LAST_MONTH
-  const [selectedYear, setSelectedYear] = useState('2026');
   const [searchQuery, setSearchQuery] = useState('');
   const [slaFilter, setSlaFilter] = useState('ALL'); // ALL, TEPAT, TERLAMBAT, MENUNGGU
   const [conditionFilter, setConditionFilter] = useState('ALL'); // ALL, Dirawat, Pulang, Meninggal
+  const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
+
+  const handleSort = (key) => {
+    setSortConfig((prev) => {
+      if (prev.key === key) {
+        if (prev.direction === 'asc') return { key, direction: 'desc' };
+        return { key: null, direction: 'asc' };
+      }
+      return { key, direction: 'asc' };
+    });
+  };
 
   // ── MODAL DETAIL KUNJUNGAN KORBAN ──
   const [selectedVictim, setSelectedVictim] = useState(null);
@@ -344,7 +343,7 @@ export default function KabagOfficerDetail() {
 
   // 6. Filter Korban Berdasarkan Pencarian, Status SLA, dan Kondisi (Bagian D)
   const filteredVictims = useMemo(() => {
-    return victimRows.filter((v) => {
+    const filteredVictimsList = victimRows.filter((v) => {
       const matchSearch =
         v.nama.toLowerCase().includes(searchQuery.toLowerCase()) ||
         v.rumahSakit.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -366,7 +365,40 @@ export default function KabagOfficerDetail() {
 
       return true;
     });
-  }, [victimRows, searchQuery, slaFilter, conditionFilter]);
+
+    if (!sortConfig.key) return filteredVictimsList;
+
+    const dir = sortConfig.direction === 'asc' ? 1 : -1;
+    const toTime = (val) => {
+      const d = parseDateSafe(val);
+      return d ? d.getTime() : 0;
+    };
+    const getSlaRank = (v) => {
+      if (v.totalKunjungan === 0) return 'Menunggu';
+      return v.isLate ? 'Pernah Terlambat' : 'Tepat Waktu';
+    };
+
+    return [...filteredVictimsList].sort((a, b) => {
+      switch (sortConfig.key) {
+        case 'nama':
+          return dir * (a.nama || '').trim().localeCompare((b.nama || '').trim(), 'id', { sensitivity: 'base', numeric: true });
+        case 'rumahSakit':
+          return dir * (a.rumahSakit || '').trim().localeCompare((b.rumahSakit || '').trim(), 'id', { sensitivity: 'base', numeric: true });
+        case 'tanggalKecelakaan':
+          return dir * (toTime(a.tanggalKecelakaan) - toTime(b.tanggalKecelakaan));
+        case 'tanggalMasukRs':
+          return dir * (toTime(a.tanggalMasukRs) - toTime(b.tanggalMasukRs));
+        case 'totalKunjungan':
+          return dir * ((a.totalKunjungan || 0) - (b.totalKunjungan || 0));
+        case 'sla':
+          return dir * getSlaRank(a).localeCompare(getSlaRank(b), 'id', { sensitivity: 'base', numeric: true });
+        case 'kondisiTerakhir':
+          return dir * (a.kondisiTerakhir || '').trim().localeCompare((b.kondisiTerakhir || '').trim(), 'id', { sensitivity: 'base', numeric: true });
+        default:
+          return 0;
+      }
+    });
+  }, [victimRows, searchQuery, slaFilter, conditionFilter, sortConfig]);
 
   // Label periode untuk UI
   const nowRef = new Date();
@@ -663,15 +695,63 @@ export default function KabagOfficerDetail() {
         <div className="hidden md:block overflow-x-auto">
           <table className="w-full text-left border-collapse text-xs">
             <thead>
-              <tr className="bg-slate-50/80 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
-                <th className="py-3 px-4">Nama Korban</th>
-                <th className="py-3 px-4">RS</th>
-                <th className="py-3 px-4">Tgl Kecelakaan</th>
-                <th className="py-3 px-4">Tgl Masuk RS</th>
-                <th className="py-3 px-4 text-center">Total Kunjungan</th>
-                <th className="py-3 px-4 text-center">SLA</th>
-                <th className="py-3 px-4">Status</th>
-                <th className="py-3 px-4 text-right">Aksi</th>
+              <tr className="bg-slate-50/80 border-b border-slate-200">
+                <SortableHeader
+                  label="Nama Korban"
+                  sortKey="nama"
+                  currentSortKey={sortConfig.key}
+                  currentSortDirection={sortConfig.direction}
+                  onSort={handleSort}
+                />
+                <SortableHeader
+                  label="RS Saat Ini"
+                  sortKey="rumahSakit"
+                  currentSortKey={sortConfig.key}
+                  currentSortDirection={sortConfig.direction}
+                  onSort={handleSort}
+                />
+                <SortableHeader
+                  label="Tgl Kecelakaan"
+                  sortKey="tanggalKecelakaan"
+                  currentSortKey={sortConfig.key}
+                  currentSortDirection={sortConfig.direction}
+                  onSort={handleSort}
+                />
+                <SortableHeader
+                  label="Tgl Masuk RS"
+                  sortKey="tanggalMasukRs"
+                  currentSortKey={sortConfig.key}
+                  currentSortDirection={sortConfig.direction}
+                  onSort={handleSort}
+                />
+                <SortableHeader
+                  label="Total Kunjungan"
+                  sortKey="totalKunjungan"
+                  currentSortKey={sortConfig.key}
+                  currentSortDirection={sortConfig.direction}
+                  onSort={handleSort}
+                  align="center"
+                  className="text-center"
+                />
+                <SortableHeader
+                  label="SLA"
+                  sortKey="sla"
+                  currentSortKey={sortConfig.key}
+                  currentSortDirection={sortConfig.direction}
+                  onSort={handleSort}
+                  align="center"
+                  className="text-center"
+                />
+                <SortableHeader
+                  label="Status"
+                  sortKey="kondisiTerakhir"
+                  currentSortKey={sortConfig.key}
+                  currentSortDirection={sortConfig.direction}
+                  onSort={handleSort}
+                />
+                <th className="py-3 px-4 font-bold text-slate-700 uppercase tracking-wider text-[11px] text-right">
+                  Aksi
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">

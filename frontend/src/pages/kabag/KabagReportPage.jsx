@@ -1,19 +1,23 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { 
-  Download, 
-  Printer, 
-  Calendar, 
-  Filter, 
-  CheckCircle2, 
-  AlertCircle,
-  FileText
+import { useState, useEffect, useMemo } from 'react';
+import {
+  Printer,
+  Filter
 } from 'lucide-react';
+import {
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  LabelList
+} from 'recharts';
 import { useAuth } from '../../context/AuthContext';
 import { storageService } from '../../services/storageService';
-import { calculateFirstVisitSla, calculateMonitoringSla } from '../../services/slaService';
+import { calculateFirstVisitSla, calculateMonitoringSla, evaluateOfficerKpi } from '../../services/slaService';
 import { isVictimFinished } from '../../utils/monitoringStatus';
-import { formatDateIndo, formatDateTimeIndo, parseDateSafe } from '../../utils/dateUtils';
-import { generateOfficialKabagReportPdf } from '../../services/pdfReportService';
+import { formatDateIndo, parseDateSafe } from '../../utils/dateUtils';
 import { api } from '../../services/api';
 
 const MONTH_NAMES = [
@@ -31,8 +35,6 @@ export default function KabagReportPage({ embedded = false }) {
   const [officers, setOfficers] = useState([]);
   const [selectedMonth, setSelectedMonth] = useState(currentMonthNum);
   const [selectedYear, setSelectedYear] = useState(currentYearNum);
-  const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
-  const [toastMessage, setToastMessage] = useState('');
   const [apiUserData, setApiUserData] = useState(null);
 
   // Ambil profil user aktual yang sedang login secara dinamis dari API & session
@@ -42,7 +44,7 @@ export default function KabagReportPage({ embedded = false }) {
       if (isMounted && res) {
         setApiUserData(res);
       }
-    }).catch(() => {});
+    }).catch(() => { });
     return () => { isMounted = false; };
   }, []);
 
@@ -103,7 +105,7 @@ export default function KabagReportPage({ embedded = false }) {
   };
 
   useEffect(() => {
-    storageService.syncWithBackend(true).catch(() => {});
+    storageService.syncWithBackend(true).catch(() => { });
     loadData();
     window.addEventListener('jr_victims_updated', loadData);
     window.addEventListener('jr_officers_updated', loadData);
@@ -212,62 +214,21 @@ export default function KabagReportPage({ embedded = false }) {
   }, [periodVictims]);
 
   // 2. PERINGKAT KINERJA PETUGAS
-  // Diurutkan berdasarkan penilaian KPI dan SLA yang sebenarnya. Jumlah korban hanya beban kerja.
+  // Diurutkan berdasarkan penilaian KPI dan SLA yang sebenarnya (sinkron dengan Dashboard & Kinerja Petugas).
   const officerRankings = useMemo(() => {
-    const targetMonth = Number(selectedMonth);
-    const targetYear = Number(selectedYear);
-
     const list = officers.map((off) => {
-      const assignedVictims = periodVictims.filter(
-        (v) => v.petugasId === off.id || (v.namaPetugas && v.namaPetugas.toLowerCase().includes(off.nama.toLowerCase()))
+      const assignedVictims = periodVictims.filter((v) =>
+        storageService.isOfficerAssignedToVictim(off, v, officers)
       );
+      const kpi = evaluateOfficerKpi(assignedVictims, new Date(), 90, 30, off);
 
       const jumlahKorbanDitangani = assignedVictims.length;
-      let jumlahKunjungan = 0;
-      let tepatWaktu = 0;
-      let terlambat = 0;
-
-      assignedVictims.forEach((v) => {
-        // Evaluasi Kunjungan Pertama
-        if (v.kunjunganPertama) {
-          const visitDate = v.kunjunganPertama.tanggalKunjungan || v.kunjunganPertama.waktuAktualKunjungan || v.kunjunganPertama.tanggal;
-          const d = parseDateSafe(visitDate);
-          if (d && d.getFullYear() === targetYear && d.getMonth() === targetMonth) {
-            jumlahKunjungan++;
-            const firstSla = calculateFirstVisitSla(v.tanggalInformasiDiterima, v.kunjunganPertama);
-            if (firstSla.wasLate) terlambat++;
-            else tepatWaktu++;
-          }
-        } else {
-          const firstSla = calculateFirstVisitSla(v.tanggalInformasiDiterima, null);
-          if (firstSla.isOverdue) terlambat++;
-        }
-
-        // Evaluasi Pemantauan Berkala
-        const acts = [...(v.riwayatAktivitas || []), ...(v.riwayatKunjungan || [])];
-        acts.forEach((a) => {
-          if (a.jenisAktivitas !== 'Kunjungan Pertama' && a.kunjunganKe !== 1) {
-            const actDate = a.waktuAktualKunjungan || a.tanggalKunjungan || a.tanggal || a.waktuSelesai;
-            const d = parseDateSafe(actDate);
-            if (d && d.getFullYear() === targetYear && d.getMonth() === targetMonth) {
-              jumlahKunjungan++;
-              if (a.terlambat || a.wasLate) terlambat++;
-              else tepatWaktu++;
-            }
-          }
-        });
-
-        // Pemantauan aktif yang terlambat
-        const monSla = calculateMonitoringSla(v);
-        if (v.kunjunganPertama && !checkIsFinished(v) && monSla.isOverdue) {
-          terlambat++;
-        }
-      });
-
-      const totalEvaluated = tepatWaktu + terlambat;
-      const persentaseSla = totalEvaluated > 0 ? Math.round((tepatWaktu / totalEvaluated) * 100) : 100;
-      const ketepatanWaktuKunjungan = terlambat > 0 
-        ? `${tepatWaktu} Tepat (${terlambat} Terlambat)` 
+      const jumlahKunjungan = kpi.totalKunjungan;
+      const tepatWaktu = kpi.kunjunganTepat;
+      const terlambat = kpi.kunjunganTerlambat;
+      const persentaseSla = kpi.slaKunjungan;
+      const ketepatanWaktuKunjungan = terlambat > 0
+        ? `${tepatWaktu} Tepat (${terlambat} Terlambat)`
         : `${tepatWaktu} Tepat Waktu`;
 
       return {
@@ -284,11 +245,12 @@ export default function KabagReportPage({ embedded = false }) {
     });
 
     // Urutkan berdasarkan SLA & ketepatan (jumlah korban hanya informasi beban kerja)
-    list.sort((a, b) => b.persentaseSla - a.persentaseSla || b.tepatWaktu - a.tepatWaktu || b.jumlahKunjungan - a.jumlahKunjungan);
+    list.sort((a, b) => (b.persentaseSla ?? -1) - (a.persentaseSla ?? -1) || b.tepatWaktu - a.tepatWaktu || b.jumlahKunjungan - a.jumlahKunjungan);
 
-    return list.map((item, idx) => ({
+    let rankCounter = 0;
+    return list.map((item) => ({
       ...item,
-      peringkat: idx + 1
+      peringkat: item.jumlahKorbanDitangani > 0 ? ++rankCounter : '-'
     }));
   }, [officers, periodVictims, selectedMonth, selectedYear]);
 
@@ -340,45 +302,12 @@ export default function KabagReportPage({ embedded = false }) {
     return formatDateIndo(new Date());
   }, []);
 
-  const handleDownloadPdf = async () => {
-    setIsGeneratingPdf(true);
-    setToastMessage('Menyiapkan dokumen PDF Laporan...');
-    try {
-      await generateOfficialKabagReportPdf({
-        periodMonthName: MONTH_NAMES[selectedMonth],
-        periodYear: String(selectedYear),
-        createdDateStr: currentDateFormatted,
-        summary: summaryReport,
-        overdueVictims: overdueVictims.map((v) => ({
-          ...v,
-          tanggalKecelakaanFormatted: formatDateIndo(v.tanggalKecelakaan),
-          tanggalMasukFormatted: formatDateIndo(v.tanggalMasukRs),
-          keteranganKeterlambatan: v._overdueReason || 'Perlu pemantauan lanjutan'
-        })),
-        officerRankings,
-        kabagProfile: {
-          nama: resolvedKabag.nama,
-          nip: resolvedKabag.nip,
-          jabatan: resolvedKabag.jabatan,
-          wilayah: resolvedKabag.wilayah
-        }
-      });
-      setToastMessage('Dokumen Laporan PDF berhasil diunduh!');
-    } catch (err) {
-      console.error(err);
-      setToastMessage('Gagal mengunduh PDF. Silakan coba lagi.');
-    } finally {
-      setIsGeneratingPdf(false);
-      setTimeout(() => setToastMessage(''), 4000);
-    }
-  };
-
   const handlePrint = () => {
     window.print();
   };
 
   return (
-    <div className={`space-y-6 ${embedded ? '' : 'p-4 sm:p-6 lg:p-8'}`}>
+    <div className={`space-y-6 print:space-y-0 ${embedded ? '' : 'p-4 sm:p-6 lg:p-8 print:p-0'}`}>
       {/* ── TOOLBAR KONTROL & FILTER (Hidden during print) ── */}
       <div className="print:hidden bg-white rounded-2xl border border-slate-200 shadow-2xs p-4 sm:p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="flex flex-wrap items-center gap-3">
@@ -418,39 +347,21 @@ export default function KabagReportPage({ embedded = false }) {
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={handleDownloadPdf}
-            disabled={isGeneratingPdf}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold bg-[#145DA0] hover:bg-[#0A3981] text-white shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>{isGeneratingPdf ? 'Membuat PDF...' : 'Unduh PDF'}</span>
-          </button>
-
-          <button
-            type="button"
             onClick={handlePrint}
-            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 shadow-2xs transition-colors cursor-pointer"
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold bg-[#145DA0] hover:bg-[#0A3981] text-white shadow-2xs transition-colors cursor-pointer"
           >
-            <Printer className="w-3.5 h-3.5 text-slate-600" />
+            <Printer className="w-3.5 h-3.5" />
             <span>Cetak</span>
           </button>
         </div>
       </div>
 
-      {/* Toast Notification */}
-      {toastMessage && (
-        <div className="print:hidden p-3 bg-blue-50 border border-blue-200 rounded-xl text-xs font-semibold text-[#145DA0] flex items-center justify-between animate-fade-in">
-          <span>{toastMessage}</span>
-          <button type="button" onClick={() => setToastMessage('')} className="text-slate-400 hover:text-slate-600">×</button>
-        </div>
-      )}
-
       {/* ════════════════════════════════════════════════════════════════════
           DOKUMEN LAPORAN RESMI (TAMPILAN MINIMALIS, BERSIH, PROFESIONAL)
          ════════════════════════════════════════════════════════════════════ */}
-      <div 
+      <div
         id="document-sheet"
-        className="bg-white border border-slate-200 shadow-sm rounded-2xl p-6 sm:p-10 lg:p-12 max-w-5xl mx-auto space-y-8 print:border-none print:shadow-none print:p-0 print:m-0 print:max-w-none text-slate-900"
+        className="bg-white border border-slate-200 shadow-sm rounded-2xl p-6 sm:p-10 lg:p-12 max-w-5xl mx-auto space-y-8 print:border-none print:shadow-none print:rounded-none print:p-0 print:m-0 print:max-w-none print:w-full print:space-y-5 text-slate-900"
       >
         {/* ── 1. HEADER DOKUMEN & LOGO JASA RAHARJA ── */}
         <div className="space-y-4">
@@ -487,7 +398,7 @@ export default function KabagReportPage({ embedded = false }) {
             Ringkasan Laporan
           </h2>
 
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 lg:grid-cols-4 print:grid-cols-4 gap-3">
             <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/50">
               <span className="block text-[11px] font-medium text-slate-500">
                 Total Korban Dipantau
@@ -526,6 +437,87 @@ export default function KabagReportPage({ embedded = false }) {
           </div>
         </div>
 
+        {/* ── 2.5 GRAFIK BATANG PERBANDINGAN KINERJA PETUGAS ── */}
+        <div className="space-y-3 break-inside-avoid">
+          <div className="flex flex-col sm:flex-row print:flex-row sm:items-center print:items-center justify-between gap-2">
+            <div>
+              <h2 className="text-xs font-bold uppercase tracking-wider text-slate-700">
+                Perbandingan Kinerja Petugas
+              </h2>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                Jumlah kunjungan tepat waktu vs terlambat untuk seluruh petugas lapangan ({selectedYear})
+              </p>
+            </div>
+            <div className="flex items-center gap-4 text-[11px] font-semibold shrink-0">
+              <span className="inline-flex items-center gap-1.5 text-emerald-700">
+                <span className="w-2.5 h-2.5 rounded-xs bg-emerald-600 inline-block" />
+                Tepat Waktu
+              </span>
+              <span className="inline-flex items-center gap-1.5 text-rose-600">
+                <span className="w-2.5 h-2.5 rounded-xs bg-rose-500 inline-block" />
+                Terlambat
+              </span>
+            </div>
+          </div>
+
+          <div className="border border-slate-200 rounded-xl p-4 print:p-3 bg-white">
+            <div className="h-[230px] print:h-[190px] w-full print:[&_.recharts-responsive-container]:!w-full print:[&_svg]:max-w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart
+                  data={[...officerRankings]
+                    .sort((a, b) => (a.nama || '').localeCompare(b.nama || ''))
+                    .map((o) => ({
+                      name: (o.nama || '').split(' ')[0] || o.nama,
+                      fullName: o.nama,
+                      tepatWaktu: o.tepatWaktu || 0,
+                      terlambat: o.terlambat || 0
+                    }))}
+                  margin={{ top: 22, right: 16, left: -12, bottom: 4 }}
+                  barCategoryGap="28%"
+                >
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
+                  <XAxis
+                    dataKey="name"
+                    axisLine={{ stroke: '#CBD5E1' }}
+                    tickLine={{ stroke: '#CBD5E1' }}
+                    tick={{ fill: '#475569', fontSize: 11, fontWeight: 600 }}
+                  />
+                  <YAxis
+                    allowDecimals={false}
+                    axisLine={{ stroke: '#CBD5E1' }}
+                    tickLine={{ stroke: '#CBD5E1' }}
+                    tick={{ fill: '#64748B', fontSize: 11 }}
+                  />
+                  <Tooltip
+                    cursor={{ fill: '#F8FAFC' }}
+                    formatter={(value, name) => [
+                      `${value} Kunjungan`,
+                      name === 'tepatWaktu' ? 'Tepat Waktu' : 'Terlambat'
+                    ]}
+                    labelFormatter={(_, payload) => payload?.[0]?.payload?.fullName || ''}
+                  />
+                  <Bar dataKey="tepatWaktu" name="tepatWaktu" fill="#059669" radius={[4, 4, 0, 0]} maxBarSize={28}>
+                    <LabelList
+                      dataKey="tepatWaktu"
+                      position="top"
+                      formatter={(val) => (val > 0 ? val : '')}
+                      style={{ fill: '#065F46', fontSize: 11, fontWeight: 700 }}
+                    />
+                  </Bar>
+                  <Bar dataKey="terlambat" name="terlambat" fill="#EF4444" radius={[4, 4, 0, 0]} maxBarSize={28}>
+                    <LabelList
+                      dataKey="terlambat"
+                      position="top"
+                      formatter={(val) => (val > 0 ? val : '')}
+                      style={{ fill: '#B91C1C', fontSize: 11, fontWeight: 700 }}
+                    />
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        </div>
+
         {/* ── 3. DAFTAR KORBAN YANG PERLU DITINDAKLANJUTI ── */}
         <div className="space-y-3">
           <div>
@@ -537,46 +529,47 @@ export default function KabagReportPage({ embedded = false }) {
             </p>
           </div>
 
-          <div className="border border-slate-200 rounded-xl overflow-hidden">
-            <table className="w-full text-left text-xs border-collapse">
+          <div className="border border-slate-200 rounded-xl overflow-hidden print:overflow-visible">
+            <div className="overflow-x-auto print:overflow-visible">
+              <table className="w-full text-left text-xs print:text-[10px] border-collapse">
               <thead>
                 <tr className="bg-slate-100/80 border-b border-slate-200 text-slate-800 font-semibold">
-                  <th className="py-2.5 px-3 text-center w-10">No</th>
-                  <th className="py-2.5 px-3">Nama Korban</th>
-                  <th className="py-2.5 px-3">Nama Petugas</th>
-                  <th className="py-2.5 px-3">Rumah Sakit</th>
-                  <th className="py-2.5 px-3 whitespace-nowrap">Tanggal Kecelakaan</th>
-                  <th className="py-2.5 px-3 whitespace-nowrap">Tanggal Masuk</th>
-                  <th className="py-2.5 px-3">Status Terakhir</th>
-                  <th className="py-2.5 px-3">Keterangan Keterlambatan</th>
+                  <th className="py-2.5 px-3 print:py-1.5 print:px-1.5 text-center w-10 print:w-7">No</th>
+                  <th className="py-2.5 px-3 print:py-1.5 print:px-1.5">Nama Korban</th>
+                  <th className="py-2.5 px-3 print:py-1.5 print:px-1.5">Nama Petugas</th>
+                  <th className="py-2.5 px-3 print:py-1.5 print:px-1.5">Rumah Sakit</th>
+                  <th className="py-2.5 px-3 print:py-1.5 print:px-1.5 whitespace-nowrap print:whitespace-normal">Tanggal Kecelakaan</th>
+                  <th className="py-2.5 px-3 print:py-1.5 print:px-1.5 whitespace-nowrap print:whitespace-normal">Tanggal Masuk</th>
+                  <th className="py-2.5 px-3 print:py-1.5 print:px-1.5">Status Terakhir</th>
+                  <th className="py-2.5 px-3 print:py-1.5 print:px-1.5">Keterangan Keterlambatan</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200">
                 {overdueVictims.length > 0 ? (
                   overdueVictims.map((v, idx) => (
-                    <tr key={v.id || idx} className="hover:bg-slate-50/60">
-                      <td className="py-2.5 px-3 text-center text-slate-500 font-mono">
+                    <tr key={v.id || idx} className="hover:bg-slate-50/60 break-inside-avoid">
+                      <td className="py-2.5 px-3 print:py-1.5 print:px-1.5 text-center text-slate-500 font-mono">
                         {idx + 1}
                       </td>
-                      <td className="py-2.5 px-3 font-semibold text-slate-900">
+                      <td className="py-2.5 px-3 print:py-1.5 print:px-1.5 font-semibold text-slate-900">
                         {v.nama}
                       </td>
-                      <td className="py-2.5 px-3 text-slate-700">
+                      <td className="py-2.5 px-3 print:py-1.5 print:px-1.5 text-slate-700">
                         {v.namaPetugas || 'Petugas Lapangan'}
                       </td>
-                      <td className="py-2.5 px-3 text-slate-700">
+                      <td className="py-2.5 px-3 print:py-1.5 print:px-1.5 text-slate-700">
                         {v.rumahSakit || '—'}
                       </td>
-                      <td className="py-2.5 px-3 text-slate-600 whitespace-nowrap">
+                      <td className="py-2.5 px-3 print:py-1.5 print:px-1.5 text-slate-600 whitespace-nowrap print:whitespace-normal">
                         {formatDateIndo(v.tanggalKecelakaan)}
                       </td>
-                      <td className="py-2.5 px-3 text-slate-600 whitespace-nowrap">
+                      <td className="py-2.5 px-3 print:py-1.5 print:px-1.5 text-slate-600 whitespace-nowrap print:whitespace-normal">
                         {formatDateIndo(v.tanggalMasukRs)}
                       </td>
-                      <td className="py-2.5 px-3 text-slate-700">
+                      <td className="py-2.5 px-3 print:py-1.5 print:px-1.5 text-slate-700">
                         {v.kondisiTerakhir || v.statusPemantauan || 'Masih Dirawat'}
                       </td>
-                      <td className="py-2.5 px-3 text-slate-800 font-medium">
+                      <td className="py-2.5 px-3 print:py-1.5 print:px-1.5 text-slate-800 font-medium">
                         {v._overdueReason || 'Perlu pemantauan lanjutan'}
                       </td>
                     </tr>
@@ -590,6 +583,7 @@ export default function KabagReportPage({ embedded = false }) {
                 )}
               </tbody>
             </table>
+            </div>
           </div>
         </div>
 
@@ -604,39 +598,40 @@ export default function KabagReportPage({ embedded = false }) {
             </p>
           </div>
 
-          <div className="border border-slate-200 rounded-xl overflow-hidden">
-            <table className="w-full text-left text-xs border-collapse">
+          <div className="border border-slate-200 rounded-xl overflow-hidden print:overflow-visible">
+            <div className="overflow-x-auto print:overflow-visible">
+              <table className="w-full text-left text-xs print:text-[10px] border-collapse">
               <thead>
                 <tr className="bg-slate-100/80 border-b border-slate-200 text-slate-800 font-semibold">
-                  <th className="py-2.5 px-3 text-center w-16">Peringkat</th>
-                  <th className="py-2.5 px-3">Nama Petugas</th>
-                  <th className="py-2.5 px-3 text-center whitespace-nowrap">Jumlah Korban yang Ditangani</th>
-                  <th className="py-2.5 px-3 text-center whitespace-nowrap">Jumlah Kunjungan</th>
-                  <th className="py-2.5 px-3 text-center whitespace-nowrap">Ketepatan Waktu Kunjungan</th>
-                  <th className="py-2.5 px-3 text-center whitespace-nowrap">Persentase Pencapaian SLA</th>
+                  <th className="py-2.5 px-3 print:py-1.5 print:px-1.5 text-center w-16 print:w-12">Peringkat</th>
+                  <th className="py-2.5 px-3 print:py-1.5 print:px-1.5">Nama Petugas</th>
+                  <th className="py-2.5 px-3 print:py-1.5 print:px-1.5 text-center whitespace-nowrap print:whitespace-normal">Jumlah Korban yang Ditangani</th>
+                  <th className="py-2.5 px-3 print:py-1.5 print:px-1.5 text-center whitespace-nowrap print:whitespace-normal">Jumlah Kunjungan</th>
+                  <th className="py-2.5 px-3 print:py-1.5 print:px-1.5 text-center whitespace-nowrap print:whitespace-normal">Ketepatan Waktu Kunjungan</th>
+                  <th className="py-2.5 px-3 print:py-1.5 print:px-1.5 text-center whitespace-nowrap print:whitespace-normal">Persentase Pencapaian SLA</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200">
                 {officerRankings.length > 0 ? (
                   officerRankings.map((o) => (
-                    <tr key={o.id} className="hover:bg-slate-50/60">
-                      <td className="py-2.5 px-3 text-center font-bold font-mono text-slate-700">
+                    <tr key={o.id} className="hover:bg-slate-50/60 break-inside-avoid">
+                      <td className="py-2.5 px-3 print:py-1.5 print:px-1.5 text-center font-bold font-mono text-slate-700">
                         {o.peringkat}
                       </td>
-                      <td className="py-2.5 px-3 font-semibold text-slate-900">
+                      <td className="py-2.5 px-3 print:py-1.5 print:px-1.5 font-semibold text-slate-900">
                         {o.nama}
                       </td>
-                      <td className="py-2.5 px-3 text-center font-mono text-slate-700">
+                      <td className="py-2.5 px-3 print:py-1.5 print:px-1.5 text-center font-mono text-slate-700">
                         {o.jumlahKorbanDitangani} Korban
                       </td>
-                      <td className="py-2.5 px-3 text-center font-mono text-slate-700">
+                      <td className="py-2.5 px-3 print:py-1.5 print:px-1.5 text-center font-mono text-slate-700">
                         {o.jumlahKunjungan}
                       </td>
-                      <td className="py-2.5 px-3 text-center text-slate-700">
+                      <td className="py-2.5 px-3 print:py-1.5 print:px-1.5 text-center text-slate-700">
                         {o.ketepatanWaktuKunjungan}
                       </td>
-                      <td className="py-2.5 px-3 text-center font-bold font-mono text-slate-900">
-                        {o.persentaseSla}%
+                      <td className="py-2.5 px-3 print:py-1.5 print:px-1.5 text-center font-bold font-mono text-slate-900">
+                        {o.persentaseSla !== null && o.persentaseSla !== undefined ? `${o.persentaseSla}%` : 'N/A'}
                       </td>
                     </tr>
                   ))
@@ -649,11 +644,12 @@ export default function KabagReportPage({ embedded = false }) {
                 )}
               </tbody>
             </table>
+            </div>
           </div>
         </div>
 
         {/* ── 5. LEMBAR PENGESAHAN TANDA TANGAN ── */}
-        <div className="pt-6 flex justify-end">
+        <div className="pt-6 print:pt-4 flex justify-end break-inside-avoid">
           <div className="w-64 text-center text-xs space-y-1">
             <p className="text-slate-600">Pekanbaru, {currentDateFormatted}</p>
             <p className="text-slate-600">Mengetahui / Mengesahkan,</p>
